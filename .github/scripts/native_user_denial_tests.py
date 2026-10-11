@@ -1,4 +1,5 @@
 """Finite diagnostic parsing and isolation; these are not native ACL proofs."""
+import ast
 import importlib.util
 import json
 import os
@@ -669,7 +670,7 @@ foreach($f in @(FILES)) {
         replace = actual.index("$stage='PrivateReplace'")
         self.assertLess(write, actual.index(" [IO.File]::WriteAllText($source,", write))
         self.assertLess(write, replace)
-        self.assertIn("try { [IO.File]::Replace($source,$f,$null); $expectedExit=16;exit 16 }", actual)
+        self.assertIn("try { [IO.File]::Replace($source,$f,[System.Management.Automation.Language.NullString]::Value); $expectedExit=16;exit 16 }", actual)
         self.assertEqual(actual.count("catch [UnauthorizedAccessException] { }"), 2)
         for candidate in ["OrdinaryNull", "TrueNull"]:
             script = probe.windows_replace_comparison_script(candidate)
@@ -678,6 +679,27 @@ foreach($f in @(FILES)) {
             self.assertNotIn("WriteAllBytes", script)
         with self.assertRaises(ValueError):
             probe.windows_replace_comparison_script("PRIVATE_SENTINEL")
+
+    def test_executed_child_passes_true_null_backup_to_public_and_private_replace(self):
+        tree = ast.parse(Path(probe.__file__).read_text())
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        templates = [node.value for node in ast.walk(main)
+                     if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                     and "[IO.File]::Replace($source,$control,$null)" in node.value]
+        self.assertEqual(len(templates), 1)
+        raw = templates[0]
+        actual = probe.instrument_windows_child(raw)
+        true_null = "[System.Management.Automation.Language.NullString]::Value"
+        for target in ["$control", "$f"]:
+            with self.subTest(target=target):
+                self.assertIn(f"[IO.File]::Replace($source,{target},{true_null})", actual)
+                self.assertNotIn(f"[IO.File]::Replace($source,{target},$null)", actual)
+                # The historical oversized launch control remains unchanged.
+                self.assertIn(f"[IO.File]::Replace($source,{target},$null)", raw)
+        self.assertIn("foreach($f in @(FILES))", actual)
+        self.assertEqual(actual.count("catch [UnauthorizedAccessException] { }"), 4)
+        self.assertIn("if(-not [IO.File]::Exists($source)){$expectedExit=17;exit 17}", actual)
+        self.assertIn("ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED", actual)
 
     def test_cleanup_can_succeed_independently_of_child_failure_and_rejects_false_claims(self):
         record = {"status": "Failed", "phase": "Child", "oversized_outcome": "ParameterIncorrect",

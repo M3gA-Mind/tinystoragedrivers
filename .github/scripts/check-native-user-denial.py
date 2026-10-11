@@ -542,7 +542,7 @@ CHILD_EXCEPTION_SCRIPT = r"""function ChildExceptionChain($exception) {
 
 
 def instrument_windows_child(child):
-    """Add finite stage diagnostics while retaining original operations/exits."""
+    """Add finite diagnostics and pass true null to Replace string backup slots."""
     prefix = r"""$ErrorActionPreference='Stop'
 $stage='NonAdmin';$ordinal=$null;$expectedExit=1;$category='NotSpecified';$classes=@()
 """ + CHILD_EXCEPTION_SCRIPT + r"""
@@ -552,15 +552,17 @@ try {
     child = child.replace("if([IO.File]::ReadAllText($control)", "$stage='PublicRead'\nif([IO.File]::ReadAllText($control)")
     child = child.replace("[IO.File]::WriteAllText($control,", "$stage='PublicWrite'\n[IO.File]::WriteAllText($control,")
     child = child.replace("$source=$control+'.replacement'", "$stage='PublicReplacementSourceWrite'\n$source=$control+'.replacement'")
+    # Windows PowerShell binds ordinary $null to an empty string here.
+    # Keep the raw oversized control intact; only the executed child uses true null.
     child = child.replace("[IO.File]::Replace($source,$control,$null)",
-                          "$stage='PublicReplace'\n[IO.File]::Replace($source,$control,$null)")
+                          "$stage='PublicReplace'\n[IO.File]::Replace($source,$control,[System.Management.Automation.Language.NullString]::Value)")
     child = child.replace("[IO.File]::Delete($control)", "$stage='PublicDelete'\n[IO.File]::Delete($control)")
     child = child.replace("foreach($f in @(", "$ordinal=-1\nforeach($f in @(")
     child = child.replace(" try { $h=[IO.File]::OpenRead", " $ordinal++;$stage='PrivateRead'\n try { $h=[IO.File]::OpenRead")
     child = child.replace(" try { $h=[IO.File]::Open($f", " $stage='PrivateWrite'\n try { $h=[IO.File]::Open($f")
     child = child.replace(" [IO.File]::WriteAllText($source,", " $stage='PrivateReplacementSourceWrite'\n [IO.File]::WriteAllText($source,")
     child = child.replace(" try { [IO.File]::Replace($source,$f,$null)",
-                          " $stage='PrivateReplace'\n try { [IO.File]::Replace($source,$f,$null)")
+                          " $stage='PrivateReplace'\n try { [IO.File]::Replace($source,$f,[System.Management.Automation.Language.NullString]::Value)")
     child = child.replace(" try { [IO.File]::Delete($f)", " $stage='PrivateDelete'\n try { [IO.File]::Delete($f)")
     child = re.sub(r"exit (1[1-8])", r"$expectedExit=\1;exit \1", child)
     child = child.replace("Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'",
