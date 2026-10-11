@@ -10,3 +10,9 @@ crates and consumers both compile against it. Most code should depend on the
 `tinystoragedrivers` facade instead, which re-exports everything here.
 
 See [`../../docs/specs/storage-ports.md`](../../docs/specs/storage-ports.md).
+
+Native document invalidation is optional through `DocumentStore::watch` and
+`Capability::Watch`. Subscribe before reading authoritative state; notifications
+are conservative, payload-free reread hints. Select the `polling-watch` feature
+explicitly for `PollingWatch` over an admitted handle; it does not promise native
+history or add Watch support to a backend. See [the watch module](src/watch/README.md).

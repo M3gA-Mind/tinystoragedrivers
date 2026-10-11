@@ -41,6 +41,8 @@ kms-gcp = ["secrets", "tinystoragedrivers-secrets/kms-gcp"]
 # Independent s3:// blob URLs and composite storage.
 s3 = ["dep:tinystoragedrivers-s3"]
 default = []
+# Explicit core polling adapter; independent of native Watch support.
+polling-watch = ["tinystoragedrivers-core/polling-watch"]
 # `sqlite:` URLs and bare paths: the SQLite driver.
 sqlite = ["dep:tinystoragedrivers-sqlite"]
 # Re-export the core's synchronous bridge.
