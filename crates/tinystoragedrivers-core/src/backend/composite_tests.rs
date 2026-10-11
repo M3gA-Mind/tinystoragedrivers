@@ -82,6 +82,9 @@ impl StorageBackend for MaskedRecords {
     fn driver(&self) -> &'static str {
         "masked-memory"
     }
+    fn document_driver(&self) -> &'static str {
+        self.0.document_driver()
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities::none()
     }
@@ -188,7 +191,7 @@ fn composite_document_driver_preserves_record_identity_instead_of_blob_or_wrappe
     );
     assert_eq!(
         backend.document_driver(),
-        "masked-memory",
+        "memory",
         "record coordination must not use composite or blob identity"
     );
 }
