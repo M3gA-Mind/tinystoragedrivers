@@ -26,7 +26,7 @@ impl DatabaseAddress {
     }
 }
 
-/// Native writer admission generation, issued by purge rather than model input.
+/// Native data-access admission generation, issued by purge rather than model input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ScopeGeneration(pub u64);

@@ -231,7 +231,8 @@ Standalone secrets backends, OS keyrings, arbitrary native SQL tables and other
 external owner stores are outside these ports and require explicit owner stages.
 
 The operation issues a monotonically increasing `ScopeGeneration`.
-Generation zero is the legacy handle default. Every data read and mutation, including empty operations and schema
+Generation zero is the legacy handle default. On memory and SQLite, every data
+read and mutation, including empty operations and schema
 declarations, validates its issued generation under the same native
 lock/transaction as the data access. SQLite reads pin generation and data in
 one deferred read transaction. Retired handles cannot read replacement data. Old handles therefore fail
@@ -265,3 +266,39 @@ reset port even when its data generation has retired. This reads native receipt
 authority and checks its native lease; it cannot start another erase. Pending
 receipts identify the next `PurgeStage`; a typed stage failure is followed by a
 status query and a retry of the same operation identity.
+
+### Mongo quiescent purge
+
+Replica sets advertise ScopePurge, with PurgeMode::Quiescent only. GridFS
+prevents atomic all-port erasure and fenced all-port reset: Atomic and fenced
+requests return typed Unsupported before changing admission or tenant data.
+Standalone and without_transactions backends do not advertise reset support.
+An independent replica handle with public transactions disabled still obeys
+the persistent admission row; normal document and stream mutations retain
+internal transactions.
+
+The host must stop and drain every scoped writer, including GridFS uploads,
+before starting. GridFS chunks carry no scope before a completed file manifest,
+so the driver cannot prove that assertion. Reset persists the issued generation,
+operation identity, Pending flag and next stage outside tenant data. Pending
+blocks both old and newly issued generations from data reads and mutations.
+Document and stream writes hold that admission row and check their generation
+inside the same transaction as the mutation. Shared declaration changes check
+the actor generation inside the schema metadata transaction; indexes remain
+shared administrative declarations.
+
+Records and stream lifetime heads are erased transactionally for the exact
+default/named namespace. Blob planning saves one durable manifest row per file.
+Each blob's chunks are erased before its file and manifest row. A stage failure
+keeps the receipt Pending; retrying the same identity resumes without losing
+ownership of orphan chunks. Complete is persisted only after no scoped files
+or manifest rows remain. It covers this one addressed database, and is not a
+cross-address, cross-port atomicity claim.
+
+All Mongo payload and admission reads select the primary. Port reads validate
+generation and Pending both before and after reading; a changed generation
+rejects the result instead of exposing replacement data. Existing returned
+bytes/values cannot be revoked, so hosts must gate and drain readers too before
+publishing a full reset. Each document/stream mutation serializes on its scope
+metadata row; unrelated scopes use separate rows. Scoped expiry reclamation
+after a reset uses sweep_expired_generation with the issued generation.

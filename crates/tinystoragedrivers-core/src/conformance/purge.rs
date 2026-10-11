@@ -15,7 +15,11 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
     {
         fails(
             ports.purge(&request()).await,
-            ErrorKind::Unsupported(Capability::ScopePurge),
+            ErrorKind::Unsupported(if backend.capabilities().contains(Capability::ScopePurge) {
+                Capability::AtomicScopePurge
+            } else {
+                Capability::ScopePurge
+            }),
             "unsupported atomic purge",
         );
         return;

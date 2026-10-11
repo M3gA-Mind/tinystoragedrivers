@@ -103,7 +103,7 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         }
     }
 
-    /// Bind an explicitly issued native writer generation.
+    /// Bind an explicitly issued native data-access generation.
     ///
     /// # Errors
     /// Unsupported nonzero generations on unknown drivers.
