@@ -41,6 +41,13 @@
 //!   transaction that reads and touches the fence's guard document; blob
 //!   writes are refused, because GridFS cannot join a transaction.
 //!
+//! - **`ScopePurge`**: replica sets support resumable purge under trusted host
+//!   writer quiescence. Persistent Pending admission blocks all generations.
+//!   GridFS prevents atomic or fenced all-port purge; those requests are refused.
+//!
+//! Payload and admission reads select the primary. Retired-generation reads
+//! fail closed before returning replacement data.
+//!
 //! See the crate `README.md` for the storage layout and every place this
 //! driver's behavior is driver-defined.
 //!
@@ -54,6 +61,7 @@ mod documents;
 mod errors;
 mod fence;
 mod naming;
+mod purge;
 mod scoped;
 mod streams;
 mod translate;

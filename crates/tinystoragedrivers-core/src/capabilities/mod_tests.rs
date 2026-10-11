@@ -36,6 +36,8 @@ fn all_holds_every_capability() {
             Capability::ConditionalStreamAppend,
             Capability::CrossDatabaseFencing,
             Capability::ValidatedBatch,
+            Capability::ScopePurge,
+            Capability::AtomicScopePurge,
         ]
     );
 }
@@ -75,6 +77,8 @@ fn renders_names() {
         (Capability::ValidatedBatch, "validated_batch"),
         (Capability::ExistingSchema, "existing_schema"),
         (Capability::CollectionValidation, "collection_validation"),
+        (Capability::ScopePurge, "scope_purge"),
+        (Capability::AtomicScopePurge, "atomic_scope_purge"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

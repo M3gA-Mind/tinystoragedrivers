@@ -49,23 +49,6 @@ impl std::ops::Deref for Fencing {
 /// retryable error.
 pub(crate) const FENCE_ATTEMPTS: usize = 64;
 
-/// Run `$body` (an expression using `$session: &mut ClientSession`) inside a
-/// fenced transaction, retrying transient aborts. Evaluates to the body's
-/// value as a `Result`.
-macro_rules! in_fence {
-    ($shared:expr, $fence:expr, $session:ident => $body:expr) => {{
-        let mut txn = $crate::fence::FencedTxn::start($shared, $fence).await?;
-        loop {
-            let $session = txn.begin().await?;
-            let outcome = $body;
-            if let Some(done) = txn.finish(outcome).await? {
-                break Ok::<_, tinystoragedrivers_core::StorageError>(done);
-            }
-        }
-    }};
-}
-pub(crate) use in_fence;
-
 /// Run a document mutation with an optional native lease fence.
 macro_rules! in_write {
     ($shared:expr, $fence:expr, $session:ident => $body:expr) => {{
@@ -118,6 +101,7 @@ impl<'a> FencedTxn<'a> {
     /// # Errors
     ///
     /// When no session can be started.
+    #[cfg(test)]
     pub(crate) async fn start(shared: &'a Shared, fence: &'a Fencing) -> Result<Self> {
         Self::start_optional(shared, Some(fence)).await
     }

@@ -47,6 +47,8 @@ pub(crate) fn json_path(field: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct Tables {
     pub(crate) docs: String,
+    pub(crate) admissions: String,
+    pub(crate) purge_receipts: String,
     pub(crate) specs: String,
     pub(crate) fts: String,
     pub(crate) streams: String,
@@ -65,6 +67,8 @@ impl Tables {
         let name = |table: &str| format!("{prefix}_tsd_{table}");
         Self {
             docs: name("docs"),
+            admissions: name("scope_admissions"),
+            purge_receipts: name("purge_receipts"),
             specs: name("collections"),
             fts: name("fts"),
             streams: name("streams"),
@@ -78,7 +82,18 @@ impl Tables {
     /// Create every table if missing.
     fn declaration_sql(&self) -> String {
         format!(
-            "CREATE TABLE IF NOT EXISTS {docs} (
+            "CREATE TABLE IF NOT EXISTS {admissions} (
+                 scope TEXT PRIMARY KEY,
+                 generation INTEGER NOT NULL,
+                 operation TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS {purge_receipts} (
+                 scope TEXT NOT NULL,
+                 operation TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 PRIMARY KEY (scope, operation)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS {docs} (
                  scope TEXT NOT NULL,
                  coll TEXT NOT NULL,
                  id TEXT NOT NULL,
@@ -123,6 +138,8 @@ impl Tables {
                  PRIMARY KEY (scope, coll, id)
              ) WITHOUT ROWID;",
             docs = ident(&self.docs),
+            admissions = ident(&self.admissions),
+            purge_receipts = ident(&self.purge_receipts),
             specs = ident(&self.specs),
             fts = ident(&self.fts),
             streams = ident(&self.streams),
@@ -134,11 +151,17 @@ impl Tables {
 
     pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(&self.declaration_sql())
-            .map_err(during("create tables"))
+            .map_err(during("create tables"))?;
+        conn.execute_batch(&format!(
+            "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
+            ident(&self.purge_receipts), ident(&self.admissions),
+        )).map_err(during("migrate purge receipts"))
     }
     /// Inspect the exact driver layout without creating or migrating tables.
     pub(crate) fn validate(&self, conn: &Connection) -> Result<()> {
         let names = [
+            &self.admissions,
+            &self.purge_receipts,
             &self.docs,
             &self.specs,
             &self.fts,

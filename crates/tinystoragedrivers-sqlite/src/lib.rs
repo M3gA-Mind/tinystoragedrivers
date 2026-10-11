@@ -36,6 +36,7 @@ mod documents;
 mod error;
 mod fence;
 mod native;
+mod purge;
 mod sql;
 mod storage;
 mod streams;
