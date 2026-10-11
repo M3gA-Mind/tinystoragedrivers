@@ -380,9 +380,9 @@ impl DocumentStore for MongoDocuments {
         }
         in_write!(&self.shared, self.fence.as_deref(), session => {
             self.hold_validation(session).await?;
+            let now = self.shared.now();
             for check in &checks {
                 let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
-                let now = self.shared.now();
                 let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
                     .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
                 check.verify(current)?;

@@ -390,6 +390,36 @@ async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
     assert!(!dir.0.join(KEY_FILE_NAME).exists());
 }
 
+#[tokio::test]
+async fn key_file_constructor_preserves_secrets_for_owned_and_borrowed_paths() {
+    // Every accepted path form must create and reopen the same protected store.
+    // In particular, borrowed Path and str callers must exercise creation as
+    // well as rejection; native LLVM reports each generic instantiation.
+    macro_rules! round_trip {
+        ($label:literal, $directory:ident, $path:expr) => {{
+            let $directory = TempDir::new($label);
+            let directory = &$directory;
+            let path = $path;
+            let first = EncryptedFileSecrets::with_key_file(path).unwrap();
+            first.set("retained", b"disposable fixture").await.unwrap();
+            let key = fs::read(directory.0.join(KEY_FILE_NAME)).unwrap();
+            let reopened = EncryptedFileSecrets::with_key_file($path).unwrap();
+            assert_eq!(
+                reopened.get("retained").await.unwrap().unwrap().as_slice(),
+                b"disposable fixture"
+            );
+            assert_eq!(fs::read(directory.0.join(KEY_FILE_NAME)).unwrap(), key);
+            assert_eq!(reopened.list("").await.unwrap(), ["retained"]);
+            assert!(reopened.delete("retained").await.unwrap());
+            assert!(first.get("retained").await.unwrap().is_none());
+        }};
+    }
+    round_trip!("owned-path", dir, dir.0.clone());
+    round_trip!("borrowed-pathbuf", dir, &dir.0);
+    round_trip!("borrowed-path", dir, dir.0.as_path());
+    round_trip!("borrowed-str", dir, dir.0.to_str().unwrap());
+}
+
 #[test]
 fn an_existing_openhuman_key_file_with_a_newline_loads() {
     let dir = TempDir::new("oh-key");
