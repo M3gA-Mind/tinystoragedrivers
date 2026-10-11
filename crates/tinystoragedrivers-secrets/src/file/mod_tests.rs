@@ -839,7 +839,6 @@ fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_
     assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publication() {
     let root = TempDir::new("staged-ciphertext-replacement");
@@ -863,7 +862,6 @@ fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publica
     assert_eq!(fs::read(target).unwrap(), b"substitute ciphertext");
 }
 
-#[cfg(unix)]
 #[test]
 fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_material() {
     let root = TempDir::new("staged-ciphertext-mutation");
@@ -875,7 +873,14 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
             .unwrap();
-        fixture_write(staged, b"changed ciphertext").unwrap();
+        // Mutate the admitted object in place, preserving its private ACL and identity.
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(staged)
+            .unwrap()
+            .write_all(b"changed ciphertext")
+            .unwrap();
     });
     let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
@@ -884,7 +889,6 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publication() {
     let root = TempDir::new("staged-key-replacement");
@@ -907,6 +911,156 @@ fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publicati
     assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
     assert!(!staged.exists());
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+}
+
+#[test]
+fn borrowed_namespace_path_reopens_the_same_private_master_key() {
+    let directory = TempDir::new("borrowed-master");
+    let path: &Path = directory.0.as_path();
+    let first = EncryptedFileSecrets::with_key_file(path).unwrap();
+    let bytes = fs::read(path.join(KEY_FILE_NAME)).unwrap();
+    let second = EncryptedFileSecrets::with_key_file(path).unwrap();
+    assert_eq!(*first.inner.key, *second.inner.key);
+    assert_eq!(fs::read(path.join(KEY_FILE_NAME)).unwrap(), bytes);
+    assert_eq!(
+        fs::read_dir(path)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|value| value == "tmp")
+                    .then_some(path)
+            })
+            .count(),
+        0
+    );
+}
+
+mod staging_pause {
+    use super::{File, Path};
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce(&Path, &File)>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce(&Path, &File) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(path: &Path, file: &File) {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(path, file);
+        }
+    }
+}
+
+pub(super) fn after_staged_reservation(path: &Path, file: &File) {
+    staging_pause::run(path, file);
+}
+
+fn weaken_reserved_fixture(path: &Path, file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        use windows_permissions::{
+            LocalBox, SecurityDescriptor,
+            constants::{SeObjectType, SecurityInformation},
+            wrappers,
+        };
+        let descriptor = wrappers::GetSecurityInfo(
+            file,
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+        )
+        .unwrap();
+        let owner = wrappers::ConvertSidToStringSid(descriptor.owner().unwrap())
+            .unwrap()
+            .into_string()
+            .unwrap();
+        // Grant Everyone access only to this empty, disposable fixture. The
+        // production admission must reject it before writing secret material.
+        let broad: LocalBox<SecurityDescriptor> =
+            format!("D:P(A;;FA;;;{owner})(A;;FA;;;WD)").parse().unwrap();
+        wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+            None,
+            None,
+            broad.dacl(),
+            None,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn private_admission_lost_after_reservation_never_writes_staged_secret_bytes() {
+    let root = TempDir::new("staging-admission-loss");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let _pause = staging_pause::Guard::install(weaken_reserved_fixture);
+    let error = stage(
+        &target,
+        b"must never reach the staged file",
+        &mut next_temp_seq,
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert!(!target.exists());
+    // Cleanup is best effort if native I/O refuses it. Even a retained staged
+    // object must remain empty because admission preceded every byte write.
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn an_unreservable_staging_name_leaves_no_private_objects() {
+    let root = TempDir::new("staging-name-limit");
+    let target = root.0.join("x".repeat(300));
+    let error = reserve_temp_file(&target, &mut || 0).unwrap_err();
+    assert_eq!(error.message(), "could not reserve a private staging file");
+    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[test]
+fn substituted_staging_object_is_rejected_before_secret_bytes_are_written() {
+    let root = TempDir::new("staging-object-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("original-empty-reservation");
+    let retained = preserved.clone();
+    let _pause = staging_pause::Guard::install(move |path, file| {
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        // Keep the original handle alive while replacing its visible leaf with
+        // another genuinely private object. Permission checks alone cannot
+        // distinguish the replacement; the retained native identity must.
+        fs::rename(path, &retained).unwrap();
+        fixture_write(path, b"").unwrap();
+    });
+    let error = stage(&target, b"must not enter either object", &mut next_temp_seq).unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert_eq!(fs::metadata(preserved).unwrap().len(), 0);
+    assert!(!target.exists());
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
 }
 
 // Fixture extraction must never format native values or errors on failure.
@@ -972,37 +1126,6 @@ fn native_fixture_error_extraction_never_formats_unexpected_success() {
         native_fixture_error::<PublicDebugProbe<'_>, _>(Err(7), "expected rejection phase"),
         7
     );
-}
-
-#[cfg(windows)]
-type StageCallback = Box<dyn FnOnce(&Path, &File)>;
-#[cfg(windows)]
-thread_local! {
-    static STAGE_PAUSE: std::cell::RefCell<Option<StageCallback>> = const { std::cell::RefCell::new(None) };
-}
-#[cfg(windows)]
-struct StagePause;
-#[cfg(windows)]
-impl StagePause {
-    fn install(callback: impl FnOnce(&Path, &File) + 'static) -> Self {
-        STAGE_PAUSE.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
-        Self
-    }
-}
-#[cfg(windows)]
-impl Drop for StagePause {
-    fn drop(&mut self) {
-        STAGE_PAUSE.with(|slot| {
-            slot.borrow_mut().take();
-        });
-    }
-}
-#[cfg(windows)]
-pub(super) fn after_private_stage_reservation(path: &Path, file: &File) {
-    let callback = STAGE_PAUSE.with(|slot| slot.borrow_mut().take());
-    if let Some(callback) = callback {
-        callback(path, file);
-    }
 }
 
 #[cfg(windows)]
@@ -1090,7 +1213,7 @@ fn replaced_private_staging_object_is_rejected_before_payload_and_only_substitut
     let original = preserved.clone();
     let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
     let retained = observer.clone();
-    let _pause = StagePause::install(move |source, reserved| {
+    let _pause = staging_pause::Guard::install(move |source, reserved| {
         assert_eq!(
             native_fixture_ok(reserved.metadata(), "reserved object metadata").len(),
             0
