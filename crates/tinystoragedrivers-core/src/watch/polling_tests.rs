@@ -245,6 +245,7 @@ async fn cancelled_polling_wait_can_be_retried_and_drop_spawns_no_worker() {
     let mut watch = PollingWatch::open(handle, "notes", &Filter::All, &WatchOptions::default())
         .await
         .unwrap();
+    assert_eq!(format!("{watch:?}"), "PollingWatch { .. }");
     let mut waiting = Box::pin(watch.next());
     assert!(matches!(
         std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await,
