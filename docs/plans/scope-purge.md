@@ -46,3 +46,20 @@ default workspace tests pass (544 reported cases, live-only cases explicitly
 gated without native URLs in that run), and all 27 all-feature doctests pass.
 The full coverage run separately supplied actual replica/standalone fixtures.
 All local publication gates are now green; hosted checks remain pending.
+
+Hosted PR23 review subsequently found missing-admission corruption. Mongo
+80935 and SQLite 76992 reproduced stale access after a completed reset. A
+further first-pending-reset regression 67592 reproduced the same reopening
+before any completed receipt existed. A durable per-scope Mongo witness now
+commits with admission closure; both absent and recreated registrations refuse.
+Focused replica purge suite 49858 passes all 15 cases. The Memory cross-database
+report was disproved by the existing shared root gate and a passing deterministic
+public takeover regression; no production workaround was added. Backend and
+Mongo purge suites now use focused directories and sibling mod_tests.rs files.
+
+After preserving canonical PR20 merge 2fe0b42, final run 84608 passes 559 native
+workspace tests, all real native supplements, all 81 production files above
+90 percent (Mongo purge 254/280, 90.71 percent), strict Clippy/build/rustdoc,
+all 27 all-feature doctests and formatting/diff checks. Independent read-only
+review confirms the pending-witness fix. Owner PR23 is ready; new hosted
+checks remain pending after pushing review fixes. Host integration is separate.
