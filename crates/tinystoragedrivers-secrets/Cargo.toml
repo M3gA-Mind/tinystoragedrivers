@@ -35,6 +35,13 @@ fs4 = { version = "1", default-features = false, features = ["sync"] }
 # The native OS credential stores, with the platform features OpenHuman ships.
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
 
+# Cloud KMS transports are opt-in; no cloud SDK enters desktop builds.
+reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
+bytes = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+hmac = { version = "0.12", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+
 [target.'cfg(unix)'.dependencies]
 # Safe descriptor-relative no-follow opens, identity checks and directory sync.
 rustix = { version = "1", default-features = false, features = ["fs", "process", "std"] }
@@ -54,7 +61,7 @@ atomicwrites = "0.4"
 # Disposable native ACL fixtures; drop removes the fixture after assertions.
 tempfile = { workspace = true }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", "net", "io-util"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The birth-mode regression changes umask only inside its disposable child.
@@ -68,6 +75,9 @@ winsafe = { version = "0.0.29", default-features = false, features = ["advapi", 
 
 [features]
 default = []
+# REST transports with authenticated scope context, without heavyweight SDKs.
+kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:chrono"]
+kms-gcp = ["dep:reqwest", "dep:base64", "dep:bytes"]
 # `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
 # Credential Manager, the Linux kernel keyring).
 keyring = ["dep:keyring"]
