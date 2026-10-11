@@ -247,7 +247,7 @@ fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes()
         .build()
         .unwrap();
     runtime.block_on(async {
-        for path in ["relative_directory", "relative_file.db"] {
+        for path in ["", "relative_directory", "relative_file.db"] {
             std::env::set_current_dir(&root).unwrap();
             let backend = SqliteStorage::open(path).unwrap();
             let target = backend.database("target").unwrap();
@@ -281,7 +281,9 @@ fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes()
                     .unwrap();
             }
             assert!(
-                !moved.join(path).exists(),
+                !moved
+                    .join(if path.is_empty() { ROOT_FILE } else { path })
+                    .exists(),
                 "binding must not recreate the relative layout under a new cwd"
             );
         }

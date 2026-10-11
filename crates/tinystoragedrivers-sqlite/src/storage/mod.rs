@@ -109,12 +109,19 @@ impl SqliteStorage {
         // Keep the opened namespace independent of later cwd changes. Resolve
         // the directory itself, since storage.db may be a symlink elsewhere.
         let layout = match layout {
-            Layout::Directory(dir) => Layout::Directory(dir.canonicalize().map_err(|error| {
-                tinystoragedrivers_core::StorageError::backend(
-                    "cannot resolve the sqlite layout directory",
-                )
-                .with_source(error)
-            })?),
+            Layout::Directory(dir) => {
+                let dir = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    dir.as_path()
+                };
+                Layout::Directory(dir.canonicalize().map_err(|error| {
+                    tinystoragedrivers_core::StorageError::backend(
+                        "cannot resolve the sqlite layout directory",
+                    )
+                    .with_source(error)
+                })?)
+            }
             Layout::File(_) => Layout::File(db.path().to_path_buf()),
         };
         let tables = Arc::new(Tables::new(prefix));
