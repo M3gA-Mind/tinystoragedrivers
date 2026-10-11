@@ -165,7 +165,7 @@ async fn missing_parent_is_error_and_is_never_created() {
     assert_eq!(error.kind(), ErrorKind::Backend);
     assert!(error.source().is_none());
     assert!(!format!("{error:?}").contains("missing-parent"));
-    assert!(inventory(&dir).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn unsafe_or_symlink_ancestor_cannot_be_confirmed_absence() {
         read_encoded(&dir.join("registered")).unwrap_err().kind(),
         ErrorKind::Backend
     );
-    assert!(inventory(&dir).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let alias = dir.with_file_name("alias");
     symlink(&dir, &alias).unwrap();
@@ -340,7 +340,7 @@ fn unsafe_or_symlink_ancestor_cannot_be_confirmed_absence() {
         read_encoded(&alias.join("registered")).unwrap_err().kind(),
         ErrorKind::Backend
     );
-    assert!(inventory(&dir).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
 }
 
 #[cfg(unix)]
@@ -377,8 +377,8 @@ fn replaced_namespace_cannot_be_confirmed_absence() {
     })
     .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
-    assert!(inventory(&dir).is_empty());
-    assert!(inventory(&moved).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
+    assert_eq!(inventory(&moved).len(), 0);
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn all_hex_cases_return_original_bytes_and_construction_is_io_free() {
     let (_root, dir) = directory();
     let missing = dir.join("absent-parent").join("registered");
     let _source = ProtectedHexKeyFile::new(missing).unwrap();
-    assert!(inventory(&dir).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
     for (index, pair) in [b"ab", b"AB", b"Ab"].iter().enumerate() {
         let path = dir.join(format!("case-{index}"));
         let bytes = Zeroizing::new(pair.repeat(32));
@@ -555,7 +555,7 @@ fn native_foreign_mutation_parent_cannot_be_confirmed_absence() {
             .unwrap(),
         before
     );
-    assert!(inventory(&dir).is_empty());
+    assert_eq!(inventory(&dir).len(), 0);
     native_acl(&dir, &format!("D:P(A;OICI;FA;;;{user})"));
 }
 
@@ -695,7 +695,8 @@ fn encoded_reads_use_one_full_zeroizing_allocation_from_the_first_read() {
             let mut reader = ObservedReader::new(length, 17);
             reader.interrupted = true;
             let bytes = read_bounded(&mut reader).unwrap();
-            assert!(bytes.as_slice() == reader.bytes.as_slice());
+            let original_bytes_retained = bytes.as_slice() == reader.bytes.as_slice();
+            assert!(original_bytes_retained);
             validate(&bytes).unwrap();
             let limit = MAX_HEX_KEY_FILE_BYTES + 1;
             assert!(
@@ -711,7 +712,7 @@ fn encoded_reads_use_one_full_zeroizing_allocation_from_the_first_read() {
                 "every read must stay inside the original allocation"
             );
             assert!(bytes.capacity() >= limit);
-            assert!(reader.used == length);
+            assert_eq!(reader.used, length);
         }
     }
 }
@@ -727,9 +728,10 @@ fn bounded_short_reads_stop_at_eof_or_the_single_overflow_byte() {
     ] {
         let mut reader = ObservedReader::new(length, 13);
         let result = read_bounded(&mut reader);
-        assert!(reader.used == length.min(MAX_HEX_KEY_FILE_BYTES + 1));
+        assert_eq!(reader.used, length.min(MAX_HEX_KEY_FILE_BYTES + 1));
         if length <= MAX_HEX_KEY_FILE_BYTES {
-            assert!(result.unwrap().as_slice() == reader.bytes.as_slice());
+            let original_bytes_retained = result.unwrap().as_slice() == reader.bytes.as_slice();
+            assert!(original_bytes_retained);
         } else {
             assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
         }
