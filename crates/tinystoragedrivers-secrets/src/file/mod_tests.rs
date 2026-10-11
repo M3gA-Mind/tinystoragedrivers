@@ -4,6 +4,8 @@
 use super::*;
 
 use std::collections::HashMap;
+use std::fs;
+use std::fs::OpenOptions;
 use std::sync::atomic::AtomicU64;
 
 use tinystoragedrivers_core::ErrorKind;
@@ -19,10 +21,18 @@ impl TempDir {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("tsd-secrets-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("tsd-secrets-{label}-{}-{seq}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        }
+        #[cfg(windows)]
+        clack_private_fs::create_dir(&dir).unwrap();
         Self(dir)
     }
 }
@@ -33,6 +43,24 @@ impl Drop for TempDir {
     }
 }
 
+// Compatibility fixtures themselves must meet admission; the bytes and format
+// assertions are unchanged. Unsafe-permission fixtures use direct native APIs.
+fn fixture_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(windows)]
+    let mut file = clack_private_fs::create_new_file(path.as_ref())?;
+    file.write_all(contents.as_ref())
+}
+
 /// Make `dir` read-only and report whether that is enforced. It is not for
 /// root, where the write failures under test cannot be produced.
 #[cfg(unix)]
@@ -40,7 +68,7 @@ fn make_readonly(dir: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
     let probe = dir.join("probe");
-    if fs::write(&probe, b"").is_ok() {
+    if fixture_write(&probe, b"").is_ok() {
         fs::remove_file(probe).unwrap();
         make_writable(dir);
         return false;
@@ -66,7 +94,7 @@ async fn passes_the_secrets_conformance_suite() {
 #[tokio::test]
 async fn opens_a_secrets_enc_file_openhuman_wrote() {
     let dir = TempDir::new("openhuman");
-    fs::write(
+    fixture_write(
         dir.0.join("secrets.enc"),
         hex_decode(OPENHUMAN_SECRETS_ENC_HEX).unwrap(),
     )
@@ -121,7 +149,7 @@ async fn a_missing_or_empty_file_is_an_empty_store() {
     let store = EncryptedFileSecrets::new(dir.0.join("nested"), crypto::generate_key().unwrap());
     assert_eq!(store.list("").await.unwrap(), Vec::<String>::new());
     fs::create_dir_all(dir.0.join("nested")).unwrap();
-    fs::write(store.path(), b"").unwrap();
+    fixture_write(store.path(), b"").unwrap();
     assert!(store.get("a").await.unwrap().is_none());
 }
 
@@ -162,7 +190,7 @@ async fn decrypted_garbage_is_a_serialization_error_without_plaintext() {
     let dir = TempDir::new("garbage");
     let key = crypto::generate_key().unwrap();
     let path = dir.0.join("secrets.enc");
-    fs::write(&path, crypto::encrypt(&key, b"[\"sk-leak\"]").unwrap()).unwrap();
+    fixture_write(&path, crypto::encrypt(&key, b"[\"sk-leak\"]").unwrap()).unwrap();
     let store = EncryptedFileSecrets::at_path(&path, key);
     let error = store.list("").await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Serialization);
@@ -183,7 +211,7 @@ async fn an_unreadable_path_is_a_backend_error() {
 async fn a_parent_that_is_a_file_fails_the_lock() {
     let dir = TempDir::new("parent-file");
     let blocker = dir.0.join("blocker");
-    fs::write(&blocker, b"").unwrap();
+    fixture_write(&blocker, b"").unwrap();
     let store = EncryptedFileSecrets::new(&blocker, crypto::generate_key().unwrap());
     assert_eq!(
         store.set("a", b"1").await.unwrap_err().kind(),
@@ -237,7 +265,7 @@ fn staging_skips_leftover_temp_files() {
     let path = dir.0.join("secrets.enc");
     // Leftovers from a crashed writer with this pid at sequence 0 and 1.
     for seq in 0..2 {
-        fs::write(
+        fixture_write(
             dir.0
                 .join(format!("secrets.enc.{}.{seq}.tmp", std::process::id())),
             b"stale",
@@ -264,7 +292,7 @@ fn write_atomic_replaces_an_existing_file() {
 fn a_key_published_concurrently_wins_and_the_temp_file_goes() {
     let dir = TempDir::new("key-race");
     let path = dir.0.join(".secret_key");
-    fs::write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
+    fixture_write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
     let loser = crypto::generate_key().unwrap();
     let tmp = stage(&path, key_to_hex(&loser).as_bytes(), &mut next_temp_seq).unwrap();
     let adopted = publish_key(&tmp, &path, loser).unwrap();
@@ -319,7 +347,7 @@ async fn with_key_file_creates_then_reuses_the_key() {
 fn an_existing_openhuman_key_file_with_a_newline_loads() {
     let dir = TempDir::new("oh-key");
     let path = dir.0.join(".secret_key");
-    fs::write(
+    fixture_write(
         &path,
         format!("{}\n", crate::crypto::tests::FIXTURE_KEY_HEX),
     )
@@ -331,7 +359,7 @@ fn an_existing_openhuman_key_file_with_a_newline_loads() {
 fn a_corrupt_key_file_is_a_crypto_error() {
     let dir = TempDir::new("bad-key");
     let path = dir.0.join(".secret_key");
-    fs::write(&path, "not hex").unwrap();
+    fixture_write(&path, "not hex").unwrap();
     assert_eq!(
         load_or_create_key_file(&path).unwrap_err().kind(),
         ErrorKind::Crypto
@@ -375,3 +403,175 @@ mod unix_birth;
 #[cfg(windows)]
 #[path = "windows_birth_tests.rs"]
 mod windows_birth;
+
+#[test]
+fn guarded_names_reject_root_parent_and_multiple_components() {
+    for name in ["", ".", "..", "one/two", "/"] {
+        assert!(secure::leaf(Path::new(name)).is_err());
+    }
+    assert!(secure::file_name(Path::new("/")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_replaced_lock_object_is_rejected_while_the_original_handle_is_held() {
+    let dir = TempDir::new("lock-replacement");
+    let path = dir.0.join("fixture.lock");
+    let lock = lock_file(&path).unwrap();
+    fs::rename(&path, dir.0.join("old.lock")).unwrap();
+    fixture_write(&path, b"").unwrap();
+    assert!(lock.verify().is_err());
+    assert!(dir.0.join("old.lock").exists());
+}
+
+#[tokio::test]
+async fn an_empty_private_ciphertext_file_is_an_empty_store() {
+    let dir = TempDir::new("empty-private-store");
+    fixture_write(dir.0.join(SECRETS_FILE_NAME), b"").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    assert!(store.get("missing").await.unwrap().is_none());
+    store.set("fixture", b"value").await.unwrap();
+    assert_eq!(
+        store.get("fixture").await.unwrap().unwrap().as_slice(),
+        b"value"
+    );
+}
+
+#[test]
+fn staged_key_readback_must_match_the_requested_generated_key() {
+    let dir = TempDir::new("key-readback-mismatch");
+    let path = dir.0.join(KEY_FILE_NAME);
+    let staged = stage(
+        &path,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let result = publish_key(&staged, &path, Zeroizing::new([42; KEY_LEN]));
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::Conflict);
+    assert!(!staged.exists());
+    assert_eq!(*load_or_create_key_file(&path).unwrap(), *fixture_key());
+}
+
+#[test]
+fn a_staged_key_cannot_publish_into_a_different_admitted_directory() {
+    let left = TempDir::new("key-left");
+    let right = TempDir::new("key-right");
+    let path = left.0.join(KEY_FILE_NAME);
+    let stage = stage(
+        &path,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let result = publish_key(&stage, &right.0.join(KEY_FILE_NAME), fixture_key());
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::Conflict);
+    assert!(!right.0.join(KEY_FILE_NAME).exists());
+    assert!(stage.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_namespace_substitution_before_staging_writes_no_payload() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("stage-substitution");
+    let private = root.0.join("private");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&private)
+        .unwrap();
+    let target = private.join(SECRETS_FILE_NAME);
+    let mut substitute = || {
+        fs::rename(&private, root.0.join("original")).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&private)
+            .unwrap();
+        0
+    };
+    assert!(stage(&target, b"disposable payload", &mut substitute).is_err());
+    for entry in fs::read_dir(&private).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+    assert!(
+        fs::read_dir(root.0.join("original"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_key_reader_waits_for_an_in_progress_no_clobber_publication() {
+    let Some(path) = std::env::var_os("TSD_KEY_RACE_FIXTURE") else {
+        let dir = TempDir::new("key-race-normal");
+        assert!(load_or_create_key_file(&dir.0.join(KEY_FILE_NAME)).is_ok());
+        return;
+    };
+    let key = load_or_create_key_file(&PathBuf::from(path)).unwrap();
+    assert_eq!(key.len(), KEY_LEN);
+    println!("KEY_CREATION_SUCCEEDED");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_key_publication_faults_preserve_an_uncertain_winner() {
+    let dir = TempDir::new("native-key-fault");
+    let path = dir.0.join(KEY_FILE_NAME);
+    let first = load_or_create_key_file(&path);
+    match std::env::var("TSD_EXPECT_NATIVE_KEY_FAULT").ok().as_deref() {
+        Some(kind) => {
+            let error = first.unwrap_err();
+            let native = std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(native.raw_os_error(), Some(5));
+            println!("OBSERVED_NATIVE_IO_ERROR=5");
+            if kind == "unlink" {
+                assert!(path.exists());
+                let before = fs::read(&path).unwrap();
+                let files = fs::read_dir(&dir.0).unwrap().count();
+                assert!(load_or_create_key_file(&path).is_err());
+                assert!(fs::read(&path).unwrap() == before);
+                assert_eq!(fs::read_dir(&dir.0).unwrap().count(), files);
+            } else if kind == "link" {
+                assert!(!path.exists());
+                assert!(load_or_create_key_file(&path).is_ok());
+            } else {
+                let before = fs::read(&path).unwrap();
+                assert!(load_or_create_key_file(&path).is_ok());
+                assert!(fs::read(&path).unwrap() == before);
+            }
+        }
+        None => {
+            assert!(first.is_ok());
+        }
+    }
+}
+
+#[test]
+fn an_absent_secret_file_name_is_rejected_before_any_filesystem_access() {
+    assert!(write_atomic(Path::new(""), b"disposable fixture").is_err());
+    assert!(stage(Path::new(""), b"disposable fixture", &mut next_temp_seq).is_err());
+}
+
+#[tokio::test]
+async fn published_objects_are_ready_for_a_separate_user_access_probe() {
+    let Some(path) = std::env::var_os("TSD_USER_DENIAL_FIXTURE") else {
+        let dir = TempDir::new("ordinary-user-normal");
+        let store = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+        store
+            .set("fixture:value", b"disposable-fixture")
+            .await
+            .unwrap();
+        return;
+    };
+    let store = EncryptedFileSecrets::with_key_file(PathBuf::from(path)).unwrap();
+    store
+        .set("fixture:value", b"disposable-fixture")
+        .await
+        .unwrap();
+    eprintln!("PRIVATE_PUBLIC_OBJECTS_CREATED");
+}

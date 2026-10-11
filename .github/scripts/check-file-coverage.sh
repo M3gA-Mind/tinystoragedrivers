@@ -17,6 +17,12 @@ cargo llvm-cov \
   --json \
   --output-path "$report"
 
+# Include the real native publication failure and concurrency executions in
+# this full-workspace report, just as the dedicated native secrets lane does.
+python3 .github/scripts/check-native-io-fault.py
+python3 .github/scripts/check-native-key-race.py
+cargo llvm-cov report --json --output-path "$report"
+
 covered_files="$(jq --arg source_root "$source_root" '
   [
     .data[].files[]

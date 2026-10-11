@@ -66,7 +66,10 @@ mod task;
 pub mod testkit;
 
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
-pub use file::{EncryptedFileSecrets, KEY_FILE_NAME, SECRETS_FILE_NAME, load_or_create_key_file};
+pub use file::{
+    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, KEY_FILE_NAME,
+    PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file,
+};
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
 pub use keys::{DerivedKeys, KeyProvider, StaticKey};

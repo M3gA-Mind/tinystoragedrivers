@@ -14,6 +14,8 @@ publish = false
 [dependencies]
 tinystoragedrivers-core = { workspace = true }
 async-trait = { workspace = true }
+# Typed encrypted import-intent records; not a change to secrets.enc.
+serde = { workspace = true }
 serde_json = { workspace = true }
 # File and keyring operations block (disk I/O, an advisory lock, an OS keychain
 # prompt), so they run on the runtime's blocking pool when one is present.
@@ -32,6 +34,21 @@ zeroize = "1"
 fs4 = { version = "1", default-features = false, features = ["sync"] }
 # The native OS credential stores, with the platform features OpenHuman ships.
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
+
+[target.'cfg(unix)'.dependencies]
+# Safe descriptor-relative no-follow opens, identity checks and directory sync.
+rustix = { version = "1", default-features = false, features = ["fs", "process", "std"] }
+
+[target.'cfg(windows)'.dependencies]
+# Supplies owner/protected DACL to CREATE_NEW and returns an owned std File.
+clack-private-fs = "1"
+# Safe handle-bound ACL checks and native effective-token/volume admission.
+windows-permissions = "0.2"
+winsafe = { version = "0.0.29", default-features = false, features = ["advapi", "kernel"] }
+# Safe native FileID and hard-link count readback on the actual std File.
+winapi-util = "0.1"
+# Safe same-volume native rename; this alone is not a durable namespace receipt.
+atomicwrites = "0.4"
 
 [dev-dependencies]
 # Disposable native ACL fixtures; drop removes the fixture after assertions.

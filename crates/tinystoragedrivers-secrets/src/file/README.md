@@ -1,0 +1,79 @@
+# Private encrypted file storage
+
+`EncryptedFileSecrets` keeps the existing raw nonce/ciphertext/tag JSON format.
+`load_or_create_key_file` keeps the 64-character hex key format. The driver
+owns private file creation, admitted namespaces, locking and verified
+publication. The caller selects secret names, source files, values and consent.
+
+Unix creates files with mode 0600 in the original open call and accesses the
+admitted directory through retained descriptors, no-follow opens and relative
+filesystem operations. Ancestors must belong to the current user or root and
+must not allow foreign mutation; root-owned sticky temporary ancestors may
+contain a private user-owned child. Files must be private regular single-link
+objects owned by the current user.
+
+Windows uses published `clack-private-fs` to pass an owner-only protected DACL
+at the original native create call and obtain an owned `std::fs::File`.
+Admission requires an NTFS disk namespace with persistent ACLs, a process
+identity without thread impersonation, trusted ancestor ownership and no
+foreign effective mutation grants. Retained directory handles deny delete
+sharing. Leaf handles retain actual FileIDs while allowing legitimate atomic
+replacement. Reparse points, unsafe owners/ACLs and hard links are rejected.
+Existing permissions are checked, never repaired after exposure.
+
+Reads and mutations hold `<secrets filename>.lock`. Key creation holds
+`<key filename>.lock`, including the short two-link no-clobber publication
+interval. New staging, key, data and lock files are private before bytes.
+Publication flushes staged content, publishes, then verifies the actual
+published identity and content. Unix also syncs the admitted directory.
+Windows uses same-volume native write-through replacement and file flush.
+These acknowledgments describe native APIs; they do not prove physical
+power-loss survival. A failure after publication may leave visible state.
+Failed staging cleanup is attempted and can itself fail; private leftovers
+are never permission-broadened or treated as committed data.
+
+## Bounded file imports
+
+`FileImportSource::open` admits and retains an exact private source object of
+at most 1 MiB. Its bytes are available for caller-owned parsing.
+`prepare_file_import` binds an operation, destination name, source identity,
+source/value hashes and retained source bytes in an authenticated encrypted
+`<secrets filename>.imports` ledger before destination publication. Exact
+publication retries reconcile that intent. A different operation, source or
+value conflicts; active destination/key/lock/ledger objects cannot be sources.
+
+`VerifiedFileImport` retains the actual source and destination handles and
+states its native acknowledgment boundary. Windows returns
+`WindowsVisibleFileFlushed`; cleanup returns `UnsupportedBoundary` and retains
+the source. Unix returns `UnixDirectorySync`. Cleanup verifies the destination,
+atomically captures the source into an operation-specific quarantine, verifies
+it again and persists the exact captured phase before unlinking. It never
+deletes an unverified replacement. A failed capture restoration preserves the
+captured object when the original name is occupied.
+
+After removal, a failed directory barrier or ledger update returns
+`RemovedUnacknowledged`. The encrypted backup remains available. A live receipt
+can retry the barrier and ledger only for the persisted removal phase with no
+replacement source occupying the name. Completed operations return
+`AlreadyCompleted`. These states do not imply rollback or hardware survival.
+
+The receipt is process-bound. `recover_file_import_source` works in a fresh
+process with the same key and returns authenticated retained bytes. It does
+not reconstruct a deletion receipt from a pathname or recycled file identity,
+restore plaintext files, select a migration slot or decide consent. A fresh
+source at the original name cannot authorize cleanup for an old operation.
+The caller owns recovery policy over the returned zeroizing bytes.
+
+The native CI matrix executes the birth and final-object fixtures on Linux,
+macOS and Windows. It checks actual native compiled-source inventory against
+LLVM JSON, and changed executable lines against LCOV and the original base.
+Linux additionally observes real injected I/O failures and a paused two-link
+publisher with a concurrent reader. Fault tests prove API failure handling,
+not physical power-loss durability.
+
+A separate native process under a different standard user reads a public
+control and attempts to read the published key, ciphertext and both locks.
+All four private reads must fail with access denied. Unix uses the existing
+unprivileged `nobody` account; the Windows CI fixture creates a random local
+standard account and removes it in a `finally` block. No operator account or
+operator credential is used by this fixture.
