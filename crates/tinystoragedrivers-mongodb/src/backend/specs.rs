@@ -355,7 +355,13 @@ impl Shared {
             match stored {
                 Some(stored) => {
                     let (current, rev) = decode_meta(&stored)?;
-                    (current.merge(&requested)?, Some(rev))
+                    let merged = current.merge(&requested)?;
+                    if merged != requested {
+                        // Indexes were built for requested before this transaction.
+                        // Retry the outer build before declaring the newer union.
+                        return Ok(None);
+                    }
+                    (merged, Some(rev))
                 }
                 None => (requested, None),
             }
@@ -439,3 +445,7 @@ impl Shared {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "specs_tests.rs"]
+mod tests;
