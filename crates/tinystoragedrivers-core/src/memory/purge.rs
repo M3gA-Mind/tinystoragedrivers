@@ -46,6 +46,7 @@ impl ScopePurge for MemoryPurge {
                 operation_id: operation.clone(),
                 generation: *generation,
                 status: PurgeStatus::Complete,
+                stage: crate::PurgeStage::Complete,
             });
         }
         state.check_generation(self.scope.as_str(), self.generation)?;
@@ -68,6 +69,26 @@ impl ScopePurge for MemoryPurge {
             operation_id: request.operation_id.clone(),
             generation,
             status: PurgeStatus::Complete,
+            stage: crate::PurgeStage::Complete,
         })
+    }
+    async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        let state = self.db.lock()?;
+        let now = if self.fence.is_some() {
+            (self.clock)()
+        } else {
+            0
+        };
+        self.db.guard(&state, self.fence.as_deref(), now)?;
+        Ok(state
+            .admissions
+            .get(self.scope.as_str())
+            .filter(|(_, operation)| operation == operation_id)
+            .map(|(generation, operation)| PurgeReceipt {
+                operation_id: operation.clone(),
+                generation: *generation,
+                status: PurgeStatus::Complete,
+                stage: crate::PurgeStage::Complete,
+            }))
     }
 }

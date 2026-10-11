@@ -394,16 +394,19 @@ async fn scope_purge_erases_all_ports_and_revokes_old_writers() {
     let receipt = target.purge(&request).await.unwrap();
     assert_eq!(receipt.status, PurgeStatus::Complete);
     assert_eq!(receipt.generation, ScopeGeneration(1));
+    let verified = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
     assert!(
-        target
+        verified
             .documents()
             .get("records", "one")
             .await
             .unwrap()
             .is_none()
     );
-    assert_eq!(target.streams().len("events").await.unwrap(), 0);
-    assert!(target.blobs().get("blob").await.unwrap().is_none());
+    assert_eq!(verified.streams().len("events").await.unwrap(), 0);
+    assert!(verified.blobs().get("blob").await.unwrap().is_none());
     assert!(
         keep.documents()
             .get("records", "one")
@@ -487,4 +490,73 @@ async fn exhausted_scope_generation_does_not_erase_data() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn retired_scope_handles_cannot_read_replacement_data() {
+    let backend = MemoryStorage::new();
+    let scope = Scope::new("retired_reader").unwrap();
+    let old = backend.for_scope(&scope).unwrap();
+    let receipt = old
+        .purge(&crate::PurgeRequest {
+            operation_id: "retire_reader".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let fresh = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    fresh
+        .documents()
+        .put(
+            "records",
+            "one",
+            serde_json::json!({"new":true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    fresh
+        .streams()
+        .append("events", serde_json::json!({"new":true}))
+        .await
+        .unwrap();
+    fresh.blobs().put("blob", vec![2], None).await.unwrap();
+    assert_eq!(
+        old.documents()
+            .get("records", "one")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        old.streams()
+            .read_window("events", 0, 10)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        old.blobs().get("blob").await.unwrap_err().kind(),
+        ErrorKind::Fenced
+    );
+}
+
+#[test]
+fn reset_port_debug_identifies_scope_and_generation_without_clock() {
+    let backend = MemoryStorage::new();
+    let port = purge::MemoryPurge {
+        db: Arc::clone(&backend.db),
+        scope: Scope::local(),
+        generation: crate::ScopeGeneration(3),
+        clock: Arc::clone(&backend.clock),
+        fence: None,
+    };
+    let rendered = format!("{port:?}");
+    assert!(rendered.contains("MemoryPurge"));
+    assert!(rendered.contains("local"));
+    assert!(rendered.contains("ScopeGeneration(3)"));
 }

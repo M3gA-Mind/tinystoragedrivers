@@ -105,3 +105,42 @@ fn unknown_adapters_only_accept_legacy_generation() {
         ErrorKind::Unsupported(Capability::ScopePurge)
     );
 }
+
+#[derive(Debug)]
+struct StatusUnsupported;
+#[async_trait]
+impl ScopePurge for StatusUnsupported {
+    async fn purge(&self, _: &PurgeRequest) -> Result<PurgeReceipt> {
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "unsupported",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn optional_status_defaults_to_typed_unsupported() {
+    assert_eq!(
+        StatusUnsupported.status("reset").await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    let bound = MemoryStorage::new()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .with_purge(Arc::new(StatusUnsupported));
+    assert_eq!(
+        bound.purge_status("reset").await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        bound
+            .purge(&PurgeRequest {
+                operation_id: "reset".into(),
+                mode: PurgeMode::Atomic
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+}

@@ -126,7 +126,14 @@ impl SqliteDocuments {
                     now_ms,
                 };
                 if access == Access::Read {
-                    return f(conn, ctx);
+                    let tx = conn
+                        .transaction()
+                        .map_err(crate::error::during("start read transaction"))?;
+                    crate::purge::check(&tx, &tables, scope.as_str(), generation)?;
+                    let value = f(&tx, ctx)?;
+                    tx.commit()
+                        .map_err(crate::error::during("finish read transaction"))?;
+                    return Ok(value);
                 }
                 let fencing = if access == Access::Write {
                     fencing.as_deref()

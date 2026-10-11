@@ -93,7 +93,7 @@ impl ScopePurge for SqlitePurge {
         self.db.run(move |conn| fence::write(conn, fencing.as_deref(), &tables, |tx| {
             if let Some((generation, operation)) = admission(tx, &tables, scope.as_str())?
                 && operation == request.operation_id {
-                    return Ok(PurgeReceipt { operation_id: operation, generation, status: PurgeStatus::Complete });
+                    return Ok(PurgeReceipt { operation_id: operation, generation, status: PurgeStatus::Complete, stage: tinystoragedrivers_core::PurgeStage::Complete });
             }
             check(tx, &tables, scope.as_str(), expected)?;
             let generation = expected.0.checked_add(1).and_then(|next| i64::try_from(next).ok())
@@ -105,7 +105,27 @@ impl ScopePurge for SqlitePurge {
             tx.execute(&format!("INSERT INTO {} (scope, generation, operation) VALUES (?1, ?2, ?3)
                 ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation, operation=excluded.operation", ident(&tables.admissions)),
                 params![scope.as_str(), generation, request.operation_id]).map_err(during("issue scope generation"))?;
-            Ok(PurgeReceipt { operation_id: request.operation_id.clone(), generation: ScopeGeneration(u64::try_from(generation).unwrap_or(0)), status: PurgeStatus::Complete })
+            Ok(PurgeReceipt { operation_id: request.operation_id.clone(), generation: ScopeGeneration(u64::try_from(generation).unwrap_or(0)), status: PurgeStatus::Complete, stage: tinystoragedrivers_core::PurgeStage::Complete })
         })).await
+    }
+    async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        let tables = Arc::clone(&self.tables);
+        let scope = self.scope.clone();
+        let operation_id = operation_id.to_owned();
+        let fencing = self.fencing.clone();
+        self.db
+            .run(move |conn| {
+                fence::write(conn, fencing.as_deref(), &tables, |tx| {
+                    Ok(admission(tx, &tables, scope.as_str())?
+                        .filter(|(_, operation)| operation == &operation_id)
+                        .map(|(generation, operation)| PurgeReceipt {
+                            operation_id: operation,
+                            generation,
+                            status: PurgeStatus::Complete,
+                            stage: tinystoragedrivers_core::PurgeStage::Complete,
+                        }))
+                })
+            })
+            .await
     }
 }

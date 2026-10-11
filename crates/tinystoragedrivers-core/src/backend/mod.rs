@@ -11,8 +11,8 @@ mod composite;
 mod purge;
 pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
 pub use purge::{
-    DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStatus, ScopeGeneration,
-    ScopePurge,
+    DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
+    ScopeGeneration, ScopePurge,
 };
 
 use std::fmt;
@@ -216,6 +216,25 @@ impl ScopedStorage {
             None => Err(StorageError::unsupported(
                 Capability::ScopePurge,
                 "this driver cannot purge a complete scope",
+            )),
+        }
+    }
+
+    /// Read a durable reset receipt without erasing data.
+    ///
+    /// # Errors
+    /// Invalid operation identity, unsupported port or native status error.
+    pub async fn purge_status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        PurgeRequest {
+            operation_id: operation_id.into(),
+            mode: PurgeMode::Atomic,
+        }
+        .validate()?;
+        match &self.purge {
+            Some(port) => port.status(operation_id).await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot read purge status",
             )),
         }
     }

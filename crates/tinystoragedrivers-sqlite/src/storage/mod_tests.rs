@@ -324,16 +324,19 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
             assert_eq!(receipt.status, PurgeStatus::Complete);
             assert_eq!(receipt.generation, ScopeGeneration(1));
             assert_eq!(target.purge(&request).await.unwrap(), receipt);
+            let verified = backend
+                .for_scope_generation(&scope, receipt.generation)
+                .unwrap();
             assert!(
-                target
+                verified
                     .documents()
                     .get("records", "one")
                     .await
                     .unwrap()
                     .is_none()
             );
-            assert_eq!(target.streams().len("events").await.unwrap(), 0);
-            assert!(target.blobs().get("blob").await.unwrap().is_none());
+            assert_eq!(verified.streams().len("events").await.unwrap(), 0);
+            assert!(verified.blobs().get("blob").await.unwrap().is_none());
             assert!(
                 keep.documents()
                     .get("records", "one")
@@ -525,5 +528,55 @@ async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn retired_scope_handles_cannot_read_replacement_data() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("retired_reader").unwrap();
+    let old = backend.for_scope(&scope).unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "retire_reader".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let fresh = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    fresh
+        .documents()
+        .put("records", "one", json!({"new":true}), Precondition::None)
+        .await
+        .unwrap();
+    fresh
+        .streams()
+        .append("events", json!({"new":true}))
+        .await
+        .unwrap();
+    fresh.blobs().put("blob", vec![2], None).await.unwrap();
+    assert_eq!(
+        old.documents()
+            .get("records", "one")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        old.streams()
+            .read_window("events", 0, 10)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        old.blobs().get("blob").await.unwrap_err().kind(),
+        ErrorKind::Fenced
     );
 }

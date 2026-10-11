@@ -80,6 +80,21 @@ pub enum PurgeStatus {
     Complete,
 }
 
+/// The next resumable stage, or completed native erasure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurgeStage {
+    /// Erase scoped documents and streams.
+    Records,
+    /// Persist every owned blob identity before deletion.
+    BlobManifest,
+    /// Remove scoped chunks and files using the durable manifest.
+    Blobs,
+    /// All ports have finished.
+    #[default]
+    Complete,
+}
+
 /// Durable native receipt kept outside erased tenant data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PurgeReceipt {
@@ -89,6 +104,9 @@ pub struct PurgeReceipt {
     pub generation: ScopeGeneration,
     /// Completion of this database only, never an implicit root-wide reset.
     pub status: PurgeStatus,
+    /// Durable next stage for a pending operation.
+    #[serde(default)]
+    pub stage: PurgeStage,
 }
 
 /// Optional reset port bound to a scope, database, generation and native fence.
@@ -105,6 +123,17 @@ pub trait ScopePurge: Send + Sync + fmt::Debug {
     /// Unsupported guarantees, stale generation or native fence, invalid input,
     /// or backend failure. Partial staged failures never return Complete.
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt>;
+    /// Read the bound scope's durable receipt without starting a new reset.
+    ///
+    /// # Errors
+    /// Unsupported status queries, stale native fence or backend failure.
+    async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        let _ = operation_id;
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "this driver cannot read purge status",
+        ))
+    }
 }
 
 /// Refuse a generation that the backend cannot bind.

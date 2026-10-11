@@ -231,9 +231,10 @@ Standalone secrets backends, OS keyrings, arbitrary native SQL tables and other
 external owner stores are outside these ports and require explicit owner stages.
 
 The operation issues a monotonically increasing `ScopeGeneration`.
-Generation zero is the legacy handle default. Every mutation, including empty
-operations and schema declarations, validates its issued generation under the
-same native lock/transaction as the mutation. Old handles therefore fail
+Generation zero is the legacy handle default. Every data read and mutation, including empty operations and schema
+declarations, validates its issued generation under the same native
+lock/transaction as the data access. SQLite reads pin generation and data in
+one deferred read transaction. Retired handles cannot read replacement data. Old handles therefore fail
 `Fenced` after reset, even if the operation would otherwise change nothing.
 Hosts persist the returned generation in authoritative profile state before
 reopening through `for_scope_generation` or
@@ -258,3 +259,9 @@ local cached key, then rebuild/rebind providers over the admitted generation.
 KMS async reads already revalidate the durable envelope before using cached
 plaintext; the synchronous KMS path refuses to use unvalidated cached keys.
 The new envelope must be created through a generation-admitted handle.
+
+The reset coordinator may call `purge_status(operation_id)` through its bound
+reset port even when its data generation has retired. This reads native receipt
+authority and checks its native lease; it cannot start another erase. Pending
+receipts identify the next `PurgeStage`; a typed stage failure is followed by a
+status query and a retry of the same operation identity.

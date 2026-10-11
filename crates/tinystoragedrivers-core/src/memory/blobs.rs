@@ -86,6 +86,7 @@ impl BlobStore for MemoryBlobs {
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state.blobs.get(&self.key(key)).map(|(meta, bytes)| Blob {
             meta: meta.clone(),
             bytes: bytes.clone(),
@@ -95,6 +96,7 @@ impl BlobStore for MemoryBlobs {
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
         let Some((_, bytes)) = state.blobs.get(&self.key(key)) else {
             return Ok(None);
         };
@@ -107,6 +109,7 @@ impl BlobStore for MemoryBlobs {
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state
             .blobs
             .get(&self.key(key))
@@ -122,6 +125,7 @@ impl BlobStore for MemoryBlobs {
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state
             .blobs
             .iter()

@@ -103,8 +103,10 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs);
-        for cap in self.blobs.capabilities().iter() {
-            caps = caps.with(cap);
+        for cap in [Capability::StreamingBlobs, Capability::PresignedUrls] {
+            if self.blobs.capabilities().contains(cap) {
+                caps = caps.with(cap);
+            }
         }
         caps
     }

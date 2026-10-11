@@ -46,7 +46,25 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
     let receipt = ok(target.purge(&request).await, "complete native purge");
     assert_eq!(receipt.status, PurgeStatus::Complete);
     assert_eq!(receipt.generation, ScopeGeneration(1));
-    empty(&target).await;
+    assert_eq!(
+        ok(
+            target.purge_status(&request.operation_id).await,
+            "durable native receipt"
+        ),
+        Some(receipt.clone())
+    );
+    assert!(
+        ok(
+            target.purge_status("missing_reset").await,
+            "unknown native receipt"
+        )
+        .is_none()
+    );
+    let verified = ok(
+        named.for_scope_generation(&owner, receipt.generation),
+        "verify issued purge generation",
+    );
+    empty(&verified).await;
     assert!(
         ok(
             keep.documents().get("records", "one").await,
@@ -246,6 +264,7 @@ async fn empty(ports: &ScopedStorage) {
 }
 
 async fn stale(ports: &ScopedStorage) {
+    stale_reads(ports).await;
     let docs = ports.documents();
     fails(
         docs.put("records", "late", json!({}), Precondition::None)
@@ -319,5 +338,69 @@ async fn stale(ports: &ScopedStorage) {
         ports.blobs().delete("missing").await,
         ErrorKind::Fenced,
         "late blob delete",
+    );
+}
+
+async fn stale_reads(ports: &ScopedStorage) {
+    let docs = ports.documents();
+    fails(
+        docs.get("records", "one").await,
+        ErrorKind::Fenced,
+        "retired document read",
+    );
+    fails(
+        docs.query("records", &crate::Query::default()).await,
+        ErrorKind::Fenced,
+        "retired document query",
+    );
+    fails(
+        docs.count("records", &crate::Filter::All).await,
+        ErrorKind::Fenced,
+        "retired document count",
+    );
+    fails(
+        docs.search("records", "one", 0).await,
+        ErrorKind::Fenced,
+        "retired empty search",
+    );
+    fails(
+        docs.collections("").await,
+        ErrorKind::Fenced,
+        "retired collection enumeration",
+    );
+    fails(
+        ports.streams().len("events").await,
+        ErrorKind::Fenced,
+        "retired stream length",
+    );
+    fails(
+        ports.streams().read_window("events", 0, 0).await,
+        ErrorKind::Fenced,
+        "retired empty stream window",
+    );
+    fails(
+        ports.streams().streams("").await,
+        ErrorKind::Fenced,
+        "retired stream enumeration",
+    );
+    fails(
+        ports.blobs().get("blob").await,
+        ErrorKind::Fenced,
+        "retired blob read",
+    );
+    fails(
+        ports.blobs().get_range("blob", 0..0).await,
+        ErrorKind::Fenced,
+        "retired blob range",
+    );
+    fails(
+        ports.blobs().head("blob").await,
+        ErrorKind::Fenced,
+        "retired blob metadata",
+    );
+    fails(
+        ports.blobs().list("").await,
+        ErrorKind::Fenced,
+        "retired blob enumeration",
     );
 }

@@ -105,7 +105,13 @@ impl SqliteStreams {
         self.db
             .run(move |conn| {
                 if !write {
-                    return f(conn, &tables, scope.as_str());
+                    let tx = conn
+                        .transaction()
+                        .map_err(during("start read transaction"))?;
+                    crate::purge::check(&tx, &tables, scope.as_str(), generation)?;
+                    let value = f(&tx, &tables, scope.as_str())?;
+                    tx.commit().map_err(during("finish read transaction"))?;
+                    return Ok(value);
                 }
                 fence::write(conn, fencing.as_deref(), &tables, |tx| {
                     crate::purge::check(tx, &tables, scope.as_str(), generation)?;
