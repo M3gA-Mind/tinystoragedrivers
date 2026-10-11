@@ -59,6 +59,13 @@ def parse_disposal_diagnostic(text):
     return value
 
 
+def method_proves_disposal(status, chain):
+    """Require the proven disposed-method exception, not any failure or getter."""
+    wrappers = {"GetValueInvocation", "MethodInvocation", "TargetInvocation", "Runtime"}
+    return (status == "Threw" and type(chain) is list and 1 <= len(chain) <= 4
+            and chain[-1] == "ObjectDisposed" and all(item in wrappers for item in chain[:-1]))
+
+
 DISPOSAL_EXCEPTION_SCRIPT = r"""function FiniteExceptionChain($exception) {
  $classes=@()
  for($depth=0;$depth -lt 4 -and $null -ne $exception;$depth++) {
@@ -92,6 +99,16 @@ def parse_engine_metadata(text):
 
 
 class FiniteDisposalDiagnostics(unittest.TestCase):
+    def test_actual_null_getter_red_is_disposed_only_by_known_method_exception_chain(self):
+        self.assertTrue(method_proves_disposal("Threw", ["MethodInvocation", "ObjectDisposed"]))
+        for status, chain in [("Returned", []), ("Threw", ["Other"]),
+                              ("Threw", ["Other", "ObjectDisposed"]),
+                              ("Threw", ["MethodInvocation"]),
+                              ("Threw", ["ObjectDisposed", "Runtime"]),
+                              ("Threw", ["Runtime"] * 4 + ["ObjectDisposed"])]:
+            with self.subTest(status=status, chain=chain):
+                self.assertFalse(method_proves_disposal(status, chain))
+
     def test_engine_metadata_rejects_paths_unknown_editions_and_nonfinite_components(self):
         record = {"edition": "Desktop", "major": 5, "minor": 1, "build": 0, "revision": -1,
                   "module_path_present": True, "child_default_included": False}
@@ -569,8 +586,97 @@ class OuterFixtureReadback(unittest.TestCase):
             probe.validate_windows_outer_acl({**segment, "aces": segment["aces"][:-1]})
 
 
+class ProtectedProbeLaunch(unittest.TestCase):
+    def test_controlled_launch_metadata_rejects_payloads_and_unproven_success(self):
+        record = {"status": "Passed", "phase": "Complete", "oversized_outcome": "ParameterIncorrect",
+                  "oversized_length": 4000, "short_length": 140, "short_within_bound": True,
+                  "child_exit": 0, "cleanup_complete": True}
+        self.assertEqual(probe.parse_launch_diagnostic(json.dumps(record)), record)
+        for field, value in [("password", "PRIVATE_SENTINEL"), ("path", "PRIVATE_SENTINEL"),
+                             ("phase", "PRIVATE_SENTINEL"), ("oversized_length", True),
+                             ("short_length", 1025), ("short_within_bound", False),
+                             ("child_exit", 13), ("cleanup_complete", False),
+                             ("oversized_outcome", "UnexpectedSuccess")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                probe.parse_launch_diagnostic(json.dumps({**record, field: value}))
+        for text in ["PRIVATE_SENTINEL", "[]", " " * 8193]:
+            with self.assertRaises(ValueError):
+                probe.parse_launch_diagnostic(text)
+
+    def test_script_identity_rejects_existing_links_and_changed_identity(self):
+        with tempfile.TemporaryDirectory() as name:
+            outer = Path(name)
+            file = outer / 'denial-probe.ps1'
+            file.write_text('fixed nonsecret fixture')
+            identity = probe.validate_probe_file_identity(file)
+            with self.assertRaisesRegex(RuntimeError, '^exclusive disposable probe script creation failed$'):
+                probe.create_windows_probe_file(outer, 'must not overwrite', outer)
+            with self.assertRaises(RuntimeError):
+                probe.validate_probe_file_identity(file, (identity[0], identity[1] + 1))
+            link = outer / 'linked'
+            os.link(file, link)
+            with self.assertRaises(RuntimeError):
+                probe.validate_probe_file_identity(file)
+
+    def test_file_acl_rejects_public_mutation_and_directory_or_reparse(self):
+        segment = observed()["segments"][2]
+        segment.update(directory=False, owner_class="Current", owner_trusted=True, dacl_protected=True)
+        segment["aces"] = [
+            {"allowed": True, "inherit_only": False, "effective_allowed": True,
+             "identity_class": name, "trusted": name != "Everyone",
+             "mutation_mask": 0 if name == "Everyone" else 0xD0152}
+            for name in ["Current", "System", "Admins", "Everyone"]]
+        probe.validate_probe_file_acl(segment)
+        for field, value in [("directory", True), ("reparse", True), ("dacl_protected", False)]:
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                probe.validate_probe_file_acl({**segment, field: value})
+        segment["aces"][-1]["mutation_mask"] = 2
+        with self.assertRaises(RuntimeError):
+            probe.validate_probe_file_acl(segment)
+
+    def test_create_new_script_preserves_utf8_bom_and_literal_data_without_logging_body(self):
+        with tempfile.TemporaryDirectory() as name:
+            outer = Path(name)
+            child = "fixed nonsecret script ' [literal] \u03bb"
+            segment = observed()["segments"][2]
+            segment.update(directory=False, owner_class="Current", owner_trusted=True, dacl_protected=True)
+            segment["aces"] = [
+                {"allowed": True, "inherit_only": False, "effective_allowed": True,
+                 "identity_class": name, "trusted": name != "Everyone",
+                 "mutation_mask": 0 if name == "Everyone" else 0xD0152}
+                for name in ["Current", "System", "Admins", "Everyone"]]
+            record = {"diagnostic_status": "Observed", "segments": [*observed()["segments"][:2], segment]}
+            with patch.object(probe.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "PROBE_SCRIPT_PROTECTED", "")) as run, \
+                    patch.object(probe, "capture_windows_setup_diagnostics", return_value=record):
+                path, identity = probe.create_windows_probe_file(outer, child, outer)
+            self.assertEqual(path.read_bytes(), b'\xef\xbb\xbf' + child.encode('utf-8'))
+            self.assertEqual(probe.validate_probe_file_identity(path), identity)
+            args, kwargs = run.call_args
+            self.assertEqual(args[0][-1], probe.PROBE_FILE_ACL_SCRIPT)
+            self.assertNotIn(str(path), args[0][-1])
+            self.assertEqual(json.loads(kwargs['env']['TSD_PROBE_SCRIPT_PATH']), str(path))
+            self.assertNotIn(child, (outer / 'probe-script-acl.json').read_text())
+
+
 @unittest.skipUnless(os.name == "nt", "requires native Windows fixture ACLs and production admission")
 class NativeWindowsOuterFixture(unittest.TestCase):
+    def test_probe_script_is_protected_readable_and_rejects_public_mutation(self):
+        outer = Path(tempfile.mkdtemp(prefix="tsd-denial-", dir="C:\\"))
+        try:
+            with tempfile.TemporaryDirectory(prefix="tsd-script-evidence-") as name:
+                evidence = Path(name)
+                probe.configure_windows_outer(outer, evidence)
+                path, identity = probe.create_windows_probe_file(outer, "# nonsecret native fixture \u03bb\n", evidence)
+                probe.validate_probe_file_identity(path, identity)
+                grant = subprocess.run(["icacls", str(path), "/grant:r", "*S-1-1-0:(M)"], capture_output=True)
+                self.assertTrue(grant.returncode == 0, "native script mutation control grant failed")
+                record = probe.capture_windows_setup_diagnostics(outer, path, "", evidence)
+                self.assertTrue(record["diagnostic_status"] == "Observed", "native script ACL read failed")
+                with self.assertRaises(RuntimeError):
+                    probe.validate_probe_file_acl(record["segments"][2])
+        finally:
+            probe.shutil.rmtree(outer)
+
     def test_reconstruction_removes_existing_foreign_mutation_before_production_admission(self):
         outer = Path(tempfile.mkdtemp(prefix="tsd-denial-", dir="C:\\"))
         try:
@@ -662,6 +768,19 @@ Write-Output 'SECURE_PASSWORD_CHECK_PASSED'
             "PASSWORD_CLEANUP", probe.WINDOWS_PASSWORD_CLEANUP)
         self.run_static_check(script)
 
+    def test_nondisposed_method_return_is_rejected_by_disposal_oracle(self):
+        script = """$ErrorActionPreference='Stop'
+$password=[System.Security.SecureString]::new()
+try {
+ $null=$password.IsReadOnly()
+ Write-Output 'METHOD_RETURNED'
+} finally {$password.Dispose()}
+"""
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+        self.assertTrue(result.returncode == 0 and result.stdout.strip() == 'METHOD_RETURNED' and not result.stderr.strip(),
+                        "native nondisposed negative control failed")
+        self.assertFalse(method_proves_disposal("Returned", []))
+
     def test_password_is_disposed_after_construction_probe_or_account_cleanup_failure(self):
         # Simulated failures exercise the real PowerShell finally and real .NET
         # disposal; no account is created and this is not ordinary-user proof.
@@ -696,13 +815,17 @@ try {
   $disposed=$true;$getterStatus='TypedCaught';$getterClasses=FiniteExceptionChain $_.Exception
  }
  catch { $getterStatus='OtherCaught';$getterClasses=FiniteExceptionChain $_.Exception;$getterFailure=$_ }
- # Independent nonsecret method probe on this same disposed instance. Its
- # outcome is diagnostic only and never makes the original assertion pass.
+ # The same-object method exception is the native-proven disposal oracle.
+ # Keep the original getter outcome as diagnostic metadata only.
  $stage='MethodProbe'
  try { $null=$password.IsReadOnly();$methodStatus='Returned' }
  catch { $methodStatus='Threw';$methodClasses=FiniteExceptionChain $_.Exception }
- if($null -ne $getterFailure){$stage='Getter';throw $getterFailure}
  $stage='DisposedAssertion'
+ $disposed=($methodStatus -eq 'Threw' -and $methodClasses.Count -ge 1 -and
+  $methodClasses.Count -le 4 -and $methodClasses[-1] -eq 'ObjectDisposed')
+ for($index=0;$index -lt $methodClasses.Count-1;$index++) {
+  if($methodClasses[$index] -notin @('GetValueInvocation','MethodInvocation','TargetInvocation','Runtime')){$disposed=$false}
+ }
  if(-not $disposed){throw 'password disposal failed'}
  $stage='Complete';$status='Passed'
 } catch { $failureClasses=FiniteExceptionChain $_.Exception }
@@ -726,6 +849,8 @@ if($status -ne 'Passed'){exit 1}
                 self.assertTrue(result.returncode == 0, "native SecureString check failed")
                 self.assertTrue(not result.stderr.strip(), "native SecureString check emitted stderr")
                 self.assertTrue(record["status"] == "Passed", "native disposal assertion failed")
+                self.assertTrue(method_proves_disposal(record["method_status"], record["method_exception_classes"]),
+                                "native disposed method oracle failed")
 
 
 if __name__ == "__main__":

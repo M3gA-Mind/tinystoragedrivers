@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -430,6 +431,109 @@ def configure_windows_outer(outer, evidence):
     validate_windows_outer_acl(record["segments"][1])
 
 
+PROBE_FILE_ACL_SCRIPT = r"""$ErrorActionPreference='Stop'
+try {
+ $path=ConvertFrom-Json -InputObject $env:TSD_PROBE_SCRIPT_PATH
+ if($path -isnot [string]){throw 'invalid script'}
+ $item=Get-Item -Force -LiteralPath $path
+ if($item -isnot [IO.FileInfo] -or ([int]$item.Attributes -band 0x400) -ne 0 -or
+    $item.Name -ne 'denial-probe.ps1' -or $item.Directory.Name -notmatch '^tsd-denial-[a-zA-Z0-9_-]+$' -or
+    $item.Directory.Parent.FullName -ne $item.Directory.Root.FullName){throw 'invalid script'}
+ $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+ $owner=$item.GetAccessControl([Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier])
+ $admins=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,$null)
+ if($owner -ne $current -and $owner -ne $admins){throw 'invalid owner'}
+ $acl=[Security.AccessControl.FileSecurity]::new()
+ $acl.SetOwner($current);$acl.SetAccessRuleProtection($true,$false)
+ $system=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalSystemSid,$null)
+ $everyone=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::WorldSid,$null)
+ foreach($identity in @($current,$system,$admins)) {
+  $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+ }
+ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,[Security.AccessControl.FileSystemRights]::ReadAndExecute,[Security.AccessControl.AccessControlType]::Allow))
+ $item.SetAccessControl($acl)
+ Write-Output 'PROBE_SCRIPT_PROTECTED'
+} catch {exit 1}
+"""
+
+
+def validate_probe_file_identity(path, identity=None):
+    """Reject links/reparse objects and any changed create-new file identity."""
+    try:
+        info = path.lstat()
+    except OSError:
+        raise RuntimeError("unsafe disposable probe script") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or (identity is not None and (info.st_dev, info.st_ino) != identity)):
+        raise RuntimeError("unsafe disposable probe script")
+    return info.st_dev, info.st_ino
+
+
+def validate_probe_file_acl(segment):
+    if segment.get("directory") is not False:
+        raise RuntimeError("unsafe disposable probe script ACL")
+    validate_windows_outer_acl({**segment, "directory": True})
+
+
+def create_windows_probe_file(outer, child, evidence):
+    """Create an exclusive protected read-only-foreign script in admitted outer."""
+    path = outer / "denial-probe.ps1"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    except OSError:
+        raise RuntimeError("exclusive disposable probe script creation failed") from None
+    with os.fdopen(descriptor, "w", encoding="utf-8-sig", newline="") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise RuntimeError("unsafe disposable probe script")
+        identity = info.st_dev, info.st_ino
+        handle.write(child)
+    validate_probe_file_identity(path, identity)
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", PROBE_FILE_ACL_SCRIPT],
+                                env={**os.environ, "TSD_PROBE_SCRIPT_PATH": json.dumps(str(path))},
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeError("probe script protection failed") from None
+    if result.returncode != 0 or result.stdout.strip() != "PROBE_SCRIPT_PROTECTED" or result.stderr.strip():
+        raise RuntimeError("probe script protection failed")
+    record = capture_windows_setup_diagnostics(outer, path, "", evidence)
+    if record["diagnostic_status"] != "Observed":
+        raise RuntimeError("probe script ACL readback failed")
+    validate_probe_file_acl(record["segments"][2])
+    (evidence / "probe-script-acl.json").write_text(json.dumps(record, indent=2) + "\n")
+    validate_probe_file_identity(path, identity)
+    if path.read_bytes() != b"\xef\xbb\xbf" + child.encode("utf-8"):
+        raise RuntimeError("disposable probe script changed")
+    return path, identity
+
+
+def parse_launch_diagnostic(text):
+    """Accept only bounded controlled-launch outcomes, never native payloads."""
+    if len(text) > 8192:
+        raise ValueError("invalid finite launch diagnostic")
+    record = json.loads(text)
+    fields = {"status", "phase", "oversized_outcome", "oversized_length", "short_length",
+              "short_within_bound", "child_exit", "cleanup_complete"}
+    if (type(record) is not dict or set(record) != fields
+            or record["status"] not in {"Passed", "Failed"}
+            or record["phase"] not in {"Password", "Account", "Group", "Credential", "Oversized", "Short", "Child", "Complete"}
+            or record["oversized_outcome"] not in {"NotRun", "ParameterIncorrect", "UnexpectedFailure", "UnexpectedSuccess"}
+            or any(not bounded_integer(record[key], 0, 131072) for key in ["oversized_length", "short_length"])
+            or type(record["short_within_bound"]) is not bool
+            or type(record["cleanup_complete"]) is not bool
+            or (record["child_exit"] is not None and not bounded_integer(record["child_exit"], -(2**31), 2**32-1))):
+        raise ValueError("invalid finite launch diagnostic")
+    if record["short_within_bound"] != (0 < record["short_length"] <= 1024):
+        raise ValueError("invalid finite launch diagnostic")
+    if record["status"] == "Passed" and (record["phase"] != "Complete" or record["oversized_outcome"] != "ParameterIncorrect"
+            or record["oversized_length"] <= 1024 or not record["short_within_bound"]
+            or record["child_exit"] != 0 or not record["cleanup_complete"]):
+        raise ValueError("invalid finite launch diagnostic")
+    return record
+
+
 # Shared by the actual account parent and account-free native regressions.
 # Never emit the generated password or convert the SecureString back to text.
 WINDOWS_PASSWORD_CONSTRUCTION = """foreach($character in ([Guid]::NewGuid().ToString('N')+'aA!7').ToCharArray()) {
@@ -517,22 +621,77 @@ foreach($f in @(FILES)) {
 }
 Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'
 """.replace("CONTROL", literal(str(control))).replace("FILES", ",".join(map(literal, files)))
+            script_path, script_identity = create_windows_probe_file(outer, child, evidence)
             encoded = base64.b64encode(child.encode("utf-16le")).decode()
+            # Both launches use this same account/credential/settings. The old
+            # oversized command must fail before the short-file probe is accepted.
             script = """$ErrorActionPreference='Stop'
-$name='tsd'+[Guid]::NewGuid().ToString('N').Substring(0,12)
-$password=[System.Security.SecureString]::new()
-$created=$false
+$status='Failed';$phase='Password';$oldOutcome='NotRun';$oldLength=0;$shortLength=0
+$within=$false;$childExit=$null;$cleanup=$false
 try {
- PASSWORD_CONSTRUCTION
- New-LocalUser -Name $name -Password $password | Out-Null; $created=$true
- Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
- $credential=[PSCredential]::new(($env:COMPUTERNAME+'\\'+$name),$password)
- $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $credential -ArgumentList @('-NoProfile','-EncodedCommand','ENCODED') -Wait -PassThru -RedirectStandardOutput OUT -RedirectStandardError ERR
- if($p.ExitCode -ne 0){exit $p.ExitCode}
- Get-Content OUT
-} finally { PASSWORD_CLEANUP }
-""".replace("PASSWORD_CONSTRUCTION", WINDOWS_PASSWORD_CONSTRUCTION).replace("PASSWORD_CLEANUP", WINDOWS_PASSWORD_CLEANUP).replace("ENCODED", encoded).replace("OUT", literal(str(evidence / "child.stdout"))).replace("ERR", literal(str(evidence / "child.stderr")))
+ $name='tsd'+[Guid]::NewGuid().ToString('N').Substring(0,12)
+ $password=[System.Security.SecureString]::new()
+ $created=$false
+ try {
+  PASSWORD_CONSTRUCTION
+  $phase='Account'
+  New-LocalUser -Name $name -Password $password | Out-Null; $created=$true
+  $phase='Group'
+  Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
+  $phase='Credential'
+  $credential=[PSCredential]::new(($env:COMPUTERNAME+'\\'+$name),$password)
+  $executable="$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  $oldArgs=@('-NoProfile','-EncodedCommand','ENCODED')
+  $shortArgs=@('-NoProfile','-File',SCRIPTFILE)
+  $oldLength=('"'+$executable+'" '+($oldArgs -join ' ')).Length
+  $shortLength=('"'+$executable+'" '+($shortArgs -join ' ')).Length
+  $within=($shortLength -gt 0 -and $shortLength -le 1024)
+  if(-not $within -or $oldLength -le 1024){throw 'command bound failed'}
+  $phase='Oversized'
+  try {
+   $p=Start-Process -FilePath $executable -Credential $credential -ArgumentList $oldArgs -Wait -PassThru -RedirectStandardOutput OUT -RedirectStandardError ERR
+   $oldOutcome='UnexpectedSuccess'
+  } catch {
+   $oldOutcome='UnexpectedFailure'
+   $known=([string]$_.CategoryInfo.Category -eq 'InvalidOperation')
+   $parameter=$false;$exception=$_.Exception
+   for($depth=0;$depth -lt 4 -and $null -ne $exception;$depth++) {
+    if($exception.Message -like '*parameter is incorrect*'){$parameter=$true}
+    $exception=$exception.InnerException
+   }
+   if($known -and $parameter){$oldOutcome='ParameterIncorrect'}
+  }
+  if($oldOutcome -ne 'ParameterIncorrect'){throw 'oversized launch control failed'}
+  $phase='Short'
+  $p=Start-Process -FilePath $executable -Credential $credential -ArgumentList $shortArgs -Wait -PassThru -RedirectStandardOutput OUT -RedirectStandardError ERR
+  $phase='Child';$childExit=$p.ExitCode
+  if($childExit -ne 0){throw 'child probe failed'}
+  if([IO.File]::ReadAllText(OUT).Trim() -ne 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'){throw 'child receipt absent'}
+ } finally { PASSWORD_CLEANUP }
+ $cleanup=$true;$phase='Complete';$status='Passed'
+} catch {}
+ConvertTo-Json -Compress -InputObject @{status=$status;phase=$phase;oversized_outcome=$oldOutcome;
+ oversized_length=$oldLength;short_length=$shortLength;short_within_bound=$within;child_exit=$childExit;cleanup_complete=$cleanup}
+if($status -ne 'Passed'){exit 1}
+""".replace("PASSWORD_CONSTRUCTION", WINDOWS_PASSWORD_CONSTRUCTION).replace("PASSWORD_CLEANUP", WINDOWS_PASSWORD_CLEANUP).replace("ENCODED", encoded).replace("SCRIPTFILE", literal('"' + str(script_path) + '"')).replace("OUT", literal(str(outer / "child.stdout"))).replace("ERR", literal(str(outer / "child.stderr")))
             result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+            # Redirected native streams are private disposable fixture data, never
+            # upload artifacts. Delete them before any assertion or failure report.
+            try:
+                for raw in [outer / "child.stdout", outer / "child.stderr"]:
+                    raw.unlink(missing_ok=True)
+            except OSError:
+                raise RuntimeError("private probe stream cleanup failed") from None
+            try:
+                launch = parse_launch_diagnostic(result.stdout)
+            except (ValueError, TypeError, KeyError):
+                (evidence / "controlled-launch.json").write_text('{"diagnostic_status":"ParserRejected"}\n')
+                raise RuntimeError("controlled native launch diagnostic rejected") from None
+            (evidence / "controlled-launch.json").write_text(json.dumps(launch, indent=2) + "\n")
+            validate_probe_file_identity(script_path, script_identity)
+            if launch["status"] != "Passed" or result.returncode != 0 or result.stderr.strip():
+                raise RuntimeError("controlled separate-user probe failed")
+            result = subprocess.CompletedProcess([], 0, "ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED\n", "")
         else:
             child = """import os,sys
 assert os.geteuid() != int(sys.argv[1]) and os.geteuid() != 0
