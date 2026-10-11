@@ -26,6 +26,12 @@ def observed():
         for ordinal, role in enumerate(["Volume", "Outer", "Private"])]}
 
 
+def print_finite_failure(record):
+    """Retain only validated diagnostics when a native assertion fails."""
+    probe.validate_diagnostic_record(record)
+    print(json.dumps(record, sort_keys=True))
+
+
 class FiniteAclDiagnostics(unittest.TestCase):
     def test_nonzero_process_retains_only_bounded_exit_and_finite_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -77,9 +83,49 @@ class FiniteAclDiagnostics(unittest.TestCase):
                        mutation_mask=probe.MUTATION_MASK)
         self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
 
+    def test_failure_print_validates_before_disclosing_any_record(self):
+        record = {"source_phase": "OtherSetupFailure", "diagnostic_version": 1,
+                  "executable_resolution": "Resolved", "diagnostic_status": "Observed",
+                  **observed()}
+        with patch("builtins.print") as output:
+            print_finite_failure(record)
+            self.assertEqual(json.loads(output.call_args.args[0]), record)
+        for field in ["path", "sid", "sddl", "message"]:
+            with self.subTest(field=field), patch("builtins.print") as output:
+                with self.assertRaises(ValueError):
+                    print_finite_failure({**record, field: "PRIVATE_SECRET_SENTINEL"})
+                output.assert_not_called()
+
+    def test_unreadable_segment_requires_operation_and_category(self):
+        data = observed()
+        data["segments"][0] = {"ordinal": 0, "role": "Volume", "status": "ReadFailed"}
+        with self.assertRaises(ValueError):
+            probe.parse_acl_diagnostics(json.dumps(data))
+
+    def test_unreadable_operation_and_category_are_finite_and_exact(self):
+        stages = ["Existence", "Item", "Acl", "Descriptor", "Owner", "DaclLimit",
+                  "AceType", "AceFlags", "AceIdentity", "AceMask", "AceClassification",
+                  "DaclShape", "ItemMetadata", "OwnerClassification", "Record"]
+        for stage in stages:
+            data = observed()
+            segment = {"ordinal": 0, "role": "Volume", "status": "ReadFailed",
+                       "read_stage": stage, "error_category": "PermissionDenied"}
+            data["segments"][0] = segment
+            self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
+            for key, value in [("read_stage", True), ("read_stage", 1),
+                               ("read_stage", "PRIVATE_PATH_SENTINEL"),
+                               ("error_category", False), ("error_category", "S-1-PRIVATE_SID"),
+                               ("path", "PRIVATE_PATH_SENTINEL"), ("sddl", "PRIVATE_SDDL_SENTINEL"),
+                               ("message", "PRIVATE_SECRET_SENTINEL")]:
+                with self.subTest(stage=stage, key=key), self.assertRaises(ValueError):
+                    probe.parse_acl_diagnostics(json.dumps({"segments": [
+                        {**segment, key: value}, *data["segments"][1:]]}))
+
     def test_missing_and_unreadable_segments_have_only_finite_fields(self):
         data = {"segments": [{"ordinal": n, "role": role, "status": "Missing" if n == 2 else "ReadFailed"}
                              for n, role in enumerate(["Volume", "Outer", "Private"])]}
+        for segment in data["segments"][:2]:
+            segment.update(read_stage="Acl", error_category="PermissionDenied")
         self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
 
     def test_raw_fields_unknown_classes_and_inconsistent_effective_flags_are_rejected(self):
@@ -303,12 +349,16 @@ class NativeWindowsPathDecoder(unittest.TestCase):
             missing = private / "absent ' [literal] $(Write-Output LEAK)"
             record = self.capture_paths(json.dumps([str(file), str(missing), str(private)]),
                                         outer, private, outer)
-            self.assertEqual(record["diagnostic_status"], "Observed")
-            segments = record["segments"]
-            self.assertEqual([segment["status"] for segment in segments],
-                             ["Observed", "Missing", "Observed"])
-            self.assertFalse(segments[0]["directory"])
-            self.assertTrue(segments[2]["directory"])
+            try:
+                self.assertEqual(record["diagnostic_status"], "Observed")
+                segments = record["segments"]
+                self.assertEqual([segment["status"] for segment in segments],
+                                 ["Observed", "Missing", "Observed"])
+                self.assertFalse(segments[0]["directory"])
+                self.assertTrue(segments[2]["directory"])
+            except AssertionError:
+                print_finite_failure(record)
+                raise
 
     def test_nonflat_nonstring_wrong_count_and_malformed_json_fail_before_acl_reads(self):
         sentinel = "TSD_PRIVATE_SENTINEL ' [literal] $(Write-Output LEAK)"

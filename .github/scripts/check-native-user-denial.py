@@ -24,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = "file::tests::published_objects_are_ready_for_a_separate_user_access_probe"
 MUTATION_MASK = 0x500D0152
 IDENTITY_CLASSES = {"Current", "System", "Admins", "TrustedInstaller", "Everyone", "AuthUsers", "BuiltinUsers", "Owner", "Other"}
+READ_STAGES = {"Existence", "Item", "Acl", "Descriptor", "Owner", "DaclLimit",
+               "AceType", "AceFlags", "AceIdentity", "AceMask", "AceClassification",
+               "DaclShape", "ItemMetadata", "OwnerClassification", "Record"}
 SCRIPT_STAGES = {"Start", "Identity", "Paths", "Segments", "Serialize", "Complete"}
 ERROR_CATEGORIES = {"ParserError", "InvalidArgument", "ObjectNotFound", "PermissionDenied",
                     "InvalidOperation", "ResourceUnavailable", "NotSpecified", "Other"}
@@ -70,30 +73,56 @@ $stage='Segments'
 $segments=@()
 for($ordinal=0;$ordinal -lt 3;$ordinal++) {
  $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed'}
+ $readStage='Existence'
+ $readCategory=$null
  try {
   if(-not (Test-Path -LiteralPath $paths[$ordinal])) {
    $record.status='Missing'
   } else {
+   $readStage='Item'
    $item=Get-Item -Force -LiteralPath $paths[$ordinal]
+   $readStage='Acl'
    $acl=Get-Acl -LiteralPath $paths[$ordinal]
+   $readStage='Descriptor'
    $raw=[Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(),0)
+   $readStage='Owner'
    $owner=if($raw.Owner){$raw.Owner.Value}else{$null}
-   if($raw.DiscretionaryAcl.Count -gt 256){throw 'finite limit'}
+   $readStage='DaclLimit'
+   if($raw.DiscretionaryAcl.Count -gt 256){$readCategory='InvalidArgument';throw 'finite limit'}
    $aces=@()
    foreach($ace in $raw.DiscretionaryAcl) {
+    $readStage='AceType'
     $allowed=([int]$ace.AceType -eq 0)
+    $readStage='AceFlags'
     $inheritOnly=(([int]$ace.AceFlags -band 8) -ne 0)
+    $readStage='AceIdentity'
     $sid=if($ace.SecurityIdentifier){$ace.SecurityIdentifier.Value}else{$null}
+    $readStage='AceMask'
     $mask=if($null -ne $ace.AccessMask){([int64]$ace.AccessMask -band 0xffffffffL)}else{0}
+    $readStage='AceClassification'
     $aces+=@{allowed=$allowed;inherit_only=$inheritOnly;effective_allowed=($allowed -and -not $inheritOnly);
      identity_class=(Classify $sid $owner);trusted=(Trusted $sid);mutation_mask=($mask -band 0x500d0152)}
    }
+   $readStage='DaclShape'
    $dacl=if($null -eq $raw.DiscretionaryAcl){'Absent'}elseif($raw.DiscretionaryAcl.Count -eq 0){'Empty'}else{'Present'}
-   $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='Observed';directory=[bool]$item.PSIsContainer;
-    reparse=(([int]$item.Attributes -band 0x400) -ne 0);owner_class=(Classify $owner $null);
-    owner_trusted=(Trusted $owner);dacl=$dacl;dacl_protected=[bool]$acl.AreAccessRulesProtected;aces=$aces}
+   $readStage='ItemMetadata'
+   $directory=[bool]$item.PSIsContainer
+   $reparse=(([int]$item.Attributes -band 0x400) -ne 0)
+   $protected=[bool]$acl.AreAccessRulesProtected
+   $readStage='OwnerClassification'
+   $ownerClass=(Classify $owner $null)
+   $ownerTrusted=(Trusted $owner)
+   $readStage='Record'
+   $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='Observed';directory=$directory;
+    reparse=$reparse;owner_class=$ownerClass;
+    owner_trusted=$ownerTrusted;dacl=$dacl;dacl_protected=$protected;aces=$aces}
   }
- } catch { $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed'} }
+ } catch {
+  $category=[string]$_.CategoryInfo.Category
+  if($readCategory){$category=$readCategory}
+  if($category -notin @('ParserError','InvalidArgument','ObjectNotFound','PermissionDenied','InvalidOperation','ResourceUnavailable','NotSpecified')){$category='Other'}
+  $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed';read_stage=$readStage;error_category=$category}
+ }
  $segments+=$record
 }
 $stage='Serialize'
@@ -125,7 +154,13 @@ def parse_acl_diagnostics(text):
                 or segment["ordinal"] != ordinal or segment.get("role") != role
                 or segment.get("status") not in {"Observed", "Missing", "ReadFailed"}):
             raise ValueError("invalid finite diagnostic")
-        if segment["status"] != "Observed":
+        if segment["status"] == "ReadFailed":
+            if (set(segment) != base | {"read_stage", "error_category"}
+                    or segment["read_stage"] not in READ_STAGES
+                    or segment["error_category"] not in ERROR_CATEGORIES):
+                raise ValueError("invalid finite diagnostic")
+            continue
+        if segment["status"] == "Missing":
             if set(segment) != base:
                 raise ValueError("invalid finite diagnostic")
             continue
