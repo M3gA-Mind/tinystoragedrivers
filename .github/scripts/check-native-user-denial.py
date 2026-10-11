@@ -359,6 +359,77 @@ def check_windows_diagnostic_launcher(evidence):
         print("WINDOWS_DIAGNOSTIC_LAUNCHER_THREE_SEGMENTS_OBSERVED")
 
 
+# Reconstruct only the freshly created, empty, owned disposable outer. Never
+# edit an ancestor, public sibling, or production-private descriptor here.
+OUTER_ACL_SCRIPT = r"""$ErrorActionPreference='Stop'
+try {
+ $path=ConvertFrom-Json -InputObject $env:TSD_OUTER_FIXTURE_PATH
+ if($path -isnot [string] -or $path.Length -eq 0){throw 'invalid fixture'}
+ $item=Get-Item -Force -LiteralPath $path
+ if($item -isnot [IO.DirectoryInfo] -or ([int]$item.Attributes -band 0x400) -ne 0){throw 'invalid fixture'}
+ if($item.Name -notmatch '^tsd-denial-[a-zA-Z0-9_-]+$' -or
+    $item.Parent.FullName -ne $item.Root.FullName -or
+    @($item.GetFileSystemInfos()).Count -ne 0){throw 'invalid fixture'}
+ $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+ $system=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalSystemSid,$null)
+ $admins=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,$null)
+ $everyone=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::WorldSid,$null)
+ $owner=$item.GetAccessControl([Security.AccessControl.AccessControlSections]::Owner).GetOwner([Security.Principal.SecurityIdentifier])
+ if($owner -ne $current -and $owner -ne $admins){throw 'invalid fixture owner'}
+ $acl=[Security.AccessControl.DirectorySecurity]::new()
+ $acl.SetOwner($current)
+ $acl.SetAccessRuleProtection($true,$false)
+ $inherit=[Security.AccessControl.InheritanceFlags]::ObjectInherit -bor [Security.AccessControl.InheritanceFlags]::ContainerInherit
+ $propagate=[Security.AccessControl.PropagationFlags]::None
+ $allow=[Security.AccessControl.AccessControlType]::Allow
+ foreach($identity in @($current,$system,$admins)) {
+  $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity,[Security.AccessControl.FileSystemRights]::FullControl,$inherit,$propagate,$allow))
+ }
+ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,[Security.AccessControl.FileSystemRights]::ReadAndExecute,$inherit,$propagate,$allow))
+ $item.SetAccessControl($acl)
+ Write-Output 'OUTER_ACL_RECONSTRUCTED'
+} catch { exit 1 }
+"""
+
+
+def validate_windows_outer_acl(segment):
+    """Require the actual finite readback to match the disposable outer ACL."""
+    expected = {"Current": (True, 0xD0152), "System": (True, 0xD0152),
+                "Admins": (True, 0xD0152), "Everyone": (False, 0)}
+    if (segment.get("status") != "Observed" or segment.get("directory") is not True
+            or segment.get("reparse") is not False or segment.get("owner_class") != "Current"
+            or segment.get("owner_trusted") is not True or segment.get("dacl") != "Present"
+            or segment.get("dacl_protected") is not True or len(segment.get("aces", [])) != 4):
+        raise RuntimeError("disposable outer ACL readback failed")
+    remaining = dict(expected)
+    for ace in segment["aces"]:
+        identity = ace["identity_class"]
+        if (identity not in remaining or not ace["allowed"] or ace["inherit_only"]
+                or not ace["effective_allowed"]
+                or (ace["trusted"], ace["mutation_mask"]) != remaining.pop(identity)):
+            raise RuntimeError("disposable outer ACL readback failed")
+
+
+def configure_windows_outer(outer, evidence):
+    """Replace a just-created fixture descriptor, then verify native readback.
+
+    Callers own this empty mkdtemp directory. Paths are environment JSON data;
+    native failure streams and exception payloads are always discarded.
+    """
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", OUTER_ACL_SCRIPT],
+                                env={**os.environ, "TSD_OUTER_FIXTURE_PATH": json.dumps(str(outer))},
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeError("disposable outer ACL reconstruction failed") from None
+    if result.returncode != 0 or result.stdout.strip() != "OUTER_ACL_RECONSTRUCTED" or result.stderr.strip():
+        raise RuntimeError("disposable outer ACL reconstruction failed")
+    record = capture_windows_setup_diagnostics(outer, outer / "private", "", evidence)
+    if record["diagnostic_status"] != "Observed":
+        raise RuntimeError("disposable outer ACL readback failed")
+    validate_windows_outer_acl(record["segments"][1])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path)
@@ -376,9 +447,7 @@ def main():
     outer = Path(tempfile.mkdtemp(prefix="tsd-denial-", dir="C:\\" if windows else str(Path("/var/tmp").resolve())))
     try:
         if windows:
-            subprocess.run(["icacls", str(outer), "/inheritance:r", "/grant:r",
-                            f"{os.environ['USERNAME']}:(OI)(CI)(F)", "*S-1-1-0:(OI)(CI)(RX)"],
-                           capture_output=True, check=True)
+            configure_windows_outer(outer, evidence)
         else:
             outer.chmod(0o755)
         public = outer / "public"

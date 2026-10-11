@@ -428,5 +428,93 @@ class NativeWindowsPathDecoder(unittest.TestCase):
                                               "return_code": 21, "failure_stage": "Paths", "error_category": "InvalidArgument"})
 
 
+class OuterFixtureReadback(unittest.TestCase):
+    def test_reconstruction_paths_remain_environment_json_and_native_failure_is_static(self):
+        outer = PureWindowsPath("C:/tsd-denial-PRIVATE_SENTINEL'$(source)")
+        outcomes = [subprocess.CompletedProcess([], 1, "PRIVATE_SENTINEL", "PRIVATE_SENTINEL"),
+                    subprocess.CompletedProcess([], 0, "OUTER_ACL_RECONSTRUCTED", "PRIVATE_SENTINEL"),
+                    subprocess.CompletedProcess([], 0, "PRIVATE_SENTINEL", ""),
+                    OSError("PRIVATE_SENTINEL"),
+                    subprocess.TimeoutExpired("PRIVATE_SENTINEL", 30, output="PRIVATE_SENTINEL")]
+        for case, outcome in enumerate(outcomes):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as name:
+                mocked = patch.object(probe.subprocess, "run", side_effect=outcome) if isinstance(outcome, Exception) else patch.object(probe.subprocess, "run", return_value=outcome)
+                with mocked as run, self.assertRaisesRegex(RuntimeError, "^disposable outer ACL reconstruction failed$"):
+                    probe.configure_windows_outer(outer, Path(name))
+                args, kwargs = run.call_args
+                self.assertEqual(args[0][-1], probe.OUTER_ACL_SCRIPT)
+                self.assertNotIn(str(outer), args[0][-1])
+                self.assertEqual(json.loads(kwargs["env"]["TSD_OUTER_FIXTURE_PATH"]), str(outer))
+                self.assertEqual(kwargs["timeout"], 30)
+                self.assertEqual(list(Path(name).iterdir()), [])
+
+    def test_successful_setter_still_requires_actual_readback(self):
+        result = subprocess.CompletedProcess([], 0, "OUTER_ACL_RECONSTRUCTED\n", "")
+        with tempfile.TemporaryDirectory() as name:
+            outer = PureWindowsPath("C:/tsd-denial-owned")
+            with patch.object(probe.subprocess, "run", return_value=result), \
+                    patch.object(probe, "capture_windows_setup_diagnostics", return_value={"diagnostic_status": "ParserRejected"}) as readback, \
+                    self.assertRaisesRegex(RuntimeError, "^disposable outer ACL readback failed$"):
+                probe.configure_windows_outer(outer, Path(name))
+            readback.assert_called_once_with(outer, outer / "private", "", Path(name))
+
+    def test_requires_exact_protected_current_owned_trusted_rules_and_foreign_read_only(self):
+        segment = observed()["segments"][1]
+        segment.update(owner_class="Current", owner_trusted=True, dacl_protected=True)
+        segment["aces"] = [
+            {"allowed": True, "inherit_only": False, "effective_allowed": True,
+             "identity_class": name, "trusted": name != "Everyone",
+             "mutation_mask": 0 if name == "Everyone" else 0xD0152}
+            for name in ["Current", "System", "Admins", "Everyone"]]
+        probe.validate_windows_outer_acl(segment)
+        for field, value in [("owner_class", "Admins"), ("dacl_protected", False),
+                             ("reparse", True), ("directory", False)]:
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                probe.validate_windows_outer_acl({**segment, field: value})
+        for name in ["Other", "Everyone"]:
+            invalid = {**segment, "aces": [*segment["aces"],
+                       {**segment["aces"][-1], "identity_class": name, "mutation_mask": 2}]}
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                probe.validate_windows_outer_acl(invalid)
+        with self.assertRaises(RuntimeError):
+            probe.validate_windows_outer_acl({**segment, "aces": segment["aces"][:-1]})
+
+
+@unittest.skipUnless(os.name == "nt", "requires native Windows fixture ACLs and production admission")
+class NativeWindowsOuterFixture(unittest.TestCase):
+    def test_reconstruction_removes_existing_foreign_mutation_before_production_admission(self):
+        outer = Path(tempfile.mkdtemp(prefix="tsd-denial-", dir="C:\\"))
+        try:
+            # Deliberately add a well-known foreign writer to this owned disposable
+            # directory; no ancestor or production private object is modified.
+            grant = subprocess.run(["icacls", str(outer), "/grant:r", "*S-1-1-0:(OI)(CI)(M)"],
+                                   capture_output=True)
+            self.assertTrue(grant.returncode == 0, "native regression grant failed")
+            with tempfile.TemporaryDirectory(prefix="tsd-outer-evidence-") as name:
+                evidence = Path(name)
+                private = outer / "private"
+                before = probe.capture_windows_setup_diagnostics(outer, private, "", evidence)
+                self.assertTrue(before["diagnostic_status"] == "Observed", "native regression ACL read failed")
+                self.assertTrue(any(ace["effective_allowed"] and not ace["trusted"] and ace["mutation_mask"]
+                                    for ace in before["segments"][1]["aces"]),
+                                "native regression foreign write was absent")
+                def production():
+                    return subprocess.run(["cargo", "test", "--locked", "-p", "tinystoragedrivers-secrets",
+                                           "--lib", probe.TEST, "--", "--exact", "--nocapture"],
+                                          cwd=probe.ROOT, env={**os.environ, "TSD_USER_DENIAL_FIXTURE": str(private)},
+                                          capture_output=True, text=True)
+                rejected = production()
+                self.assertTrue(rejected.returncode != 0 and
+                                probe.fixture_failure_phase(rejected.stderr) == "NamespaceForeignMutation",
+                                "production failed to reject foreign mutation")
+                self.assertTrue(not private.exists(), "unsafe admission created private objects")
+                probe.configure_windows_outer(outer, evidence)
+                accepted = production()
+                self.assertTrue(accepted.returncode == 0 and "PRIVATE_PUBLIC_OBJECTS_CREATED" in accepted.stderr,
+                                "production rejected reconstructed fixture")
+        finally:
+            probe.shutil.rmtree(outer)
+
+
 if __name__ == "__main__":
     unittest.main()
