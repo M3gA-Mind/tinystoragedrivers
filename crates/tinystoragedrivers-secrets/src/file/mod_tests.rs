@@ -352,9 +352,9 @@ fn a_bare_file_name_has_no_parent_to_create() {
 }
 
 #[tokio::test]
-async fn with_key_file_creates_then_reuses_the_key() {
+async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
     let dir = TempDir::new("keyfile");
-    let first = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let first = EncryptedFileSecrets::with_key_file(dir.0.clone()).unwrap();
     first.set("a", b"1").await.unwrap();
 
     let key_hex = fs::read_to_string(dir.0.join(".secret_key")).unwrap();
@@ -370,8 +370,22 @@ async fn with_key_file_creates_then_reuses_the_key() {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    let second = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let second = EncryptedFileSecrets::with_key_file(dir.0.clone()).unwrap();
     assert_eq!(second.get("a").await.unwrap().unwrap().as_slice(), b"1");
+    assert_eq!(
+        fs::read_to_string(dir.0.join(KEY_FILE_NAME)).unwrap(),
+        key_hex
+    );
+    let ciphertext = fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap();
+    drop(first);
+    drop(second);
+    fs::remove_file(dir.0.join(KEY_FILE_NAME)).unwrap();
+    let Err(error) = EncryptedFileSecrets::with_key_file(dir.0.clone()) else {
+        panic!("lost master must deny reopening existing ciphertext");
+    };
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap(), ciphertext);
+    assert!(!dir.0.join(KEY_FILE_NAME).exists());
 }
 
 #[test]
@@ -615,7 +629,8 @@ fn a_missing_master_with_existing_store_objects_never_mints_a_new_key() {
         let path = directory.0.join(name);
         fixture_write(&path, b"existing material").unwrap();
         let before = fs::read(&path).unwrap();
-        let denied = EncryptedFileSecrets::with_key_file(&directory.0).is_err();
+        let denied = EncryptedFileSecrets::with_key_file(directory.0.clone())
+            .is_err_and(|error| error.kind() == ErrorKind::Conflict);
         let unchanged = fs::read(path).unwrap() == before;
         let no_key = !directory.0.join(KEY_FILE_NAME).exists();
         println!(

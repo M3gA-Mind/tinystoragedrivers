@@ -134,11 +134,19 @@ impl fmt::Debug for FileImportSource {
 /// process restart. Restart recovery retrieves authenticated backup bytes.
 pub struct VerifiedFileImport {
     inner: Arc<Inner>,
+    #[cfg(unix)]
     source: Arc<Source>,
+    #[cfg(windows)]
+    _source: Arc<Source>,
+    #[cfg(unix)]
     intent: Intent,
+    #[cfg(unix)]
     destination: secure::Identity,
     _destination_file: File,
+    #[cfg(unix)]
     namespace: secure::Identity,
+    #[cfg(windows)]
+    _namespace: secure::Identity,
     boundary: PublicationBoundary,
 }
 
@@ -237,15 +245,24 @@ impl EncryptedFileSecrets {
                 "import acknowledgment belongs to a different store",
             ));
         }
-        if receipt.boundary == PublicationBoundary::WindowsVisibleFileFlushed {
-            return Ok(CleanupAcknowledgment::UnsupportedBoundary);
+        #[cfg(windows)]
+        {
+            // No publicly issued Windows receipt grants namespace durability.
+            // Keep its pins and authenticated backup without cleanup dispatch.
+            std::future::ready(Ok(CleanupAcknowledgment::UnsupportedBoundary)).await
         }
-        let inner = Arc::clone(&self.inner);
-        let source = Arc::clone(&receipt.source);
-        let intent = receipt.intent.clone();
-        let destination = receipt.destination;
-        let namespace = receipt.namespace;
-        run_blocking(move || cleanup(&inner, &source, &intent, destination, namespace)).await
+        #[cfg(unix)]
+        {
+            if receipt.boundary == PublicationBoundary::WindowsVisibleFileFlushed {
+                return Ok(CleanupAcknowledgment::UnsupportedBoundary);
+            }
+            let inner = Arc::clone(&self.inner);
+            let source = Arc::clone(&receipt.source);
+            let intent = receipt.intent.clone();
+            let destination = receipt.destination;
+            let namespace = receipt.namespace;
+            run_blocking(move || cleanup(&inner, &source, &intent, destination, namespace)).await
+        }
     }
 
     /// Recover admitted source bytes retained by an exact encrypted import intent.
@@ -497,11 +514,19 @@ fn prepare(
     let boundary = PublicationBoundary::WindowsVisibleFileFlushed;
     Ok(VerifiedFileImport {
         inner,
+        #[cfg(unix)]
         source,
+        #[cfg(windows)]
+        _source: source,
+        #[cfg(unix)]
         intent,
+        #[cfg(unix)]
         destination,
         _destination_file: destination_file,
+        #[cfg(unix)]
         namespace,
+        #[cfg(windows)]
+        _namespace: namespace,
         boundary,
     })
 }
@@ -510,7 +535,8 @@ fn verify_destination(
     inner: &Inner,
     namespace: &secure::Namespace,
     intent: &Intent,
-    expected: Option<secure::Identity>,
+    #[cfg(unix)] expected: Option<secure::Identity>,
+    #[cfg(windows)] _expected: Option<secure::Identity>,
 ) -> Result<secure::Identity> {
     let name = secure::file_name(&inner.path)
         .map_err(|e| io_error("admit the imported destination name", e))?;
@@ -519,6 +545,7 @@ fn verify_destination(
         .map_err(|e| io_error("verify the imported destination", e))?;
     let id = secure::identity(&file)
         .map_err(|e| io_error("verify the imported destination identity", e))?;
+    #[cfg(unix)]
     if expected.is_some_and(|expected| expected != id) {
         return Err(StorageError::conflict(
             "imported destination object changed",
@@ -755,19 +782,6 @@ fn absent(namespace: &secure::Namespace, name: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(io_error("inspect the cleanup name", error)),
     }
-}
-
-#[cfg(windows)]
-fn cleanup(
-    _inner: &Inner,
-    _source: &Source,
-    _receipt: &Intent,
-    _destination: secure::Identity,
-    _namespace: secure::Identity,
-) -> Result<CleanupAcknowledgment> {
-    Err(StorageError::backend(
-        "durable source cleanup is unsupported on this platform",
-    ))
 }
 
 #[cfg(test)]

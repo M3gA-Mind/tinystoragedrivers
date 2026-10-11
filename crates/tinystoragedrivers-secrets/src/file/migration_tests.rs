@@ -212,21 +212,45 @@ async fn cleanup_acknowledges_only_the_supported_native_boundary() {
 }
 
 #[test]
-fn missing_and_oversized_sources_are_rejected_without_key_creation() {
+fn missing_sources_are_rejected_without_key_creation() {
     let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
     assert!(FileImportSource::open(root.path().join("absent")).is_err());
     assert!(!root.path().join(KEY_FILE_NAME).exists());
-    #[cfg(unix)]
-    {
-        let path = root.path().join("large");
-        let file = std::fs::OpenOptions::new()
+}
+
+#[test]
+fn native_private_sources_preserve_empty_exact_bound_and_oversized_bytes() {
+    for length in [0, 1_048_576, 1_048_577] {
+        let (_root, path, store, source) = setup();
+        drop(source);
+        drop(store);
+        let bytes = vec![b'x'; length];
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
-            .mode(0o600)
+            .truncate(true)
             .open(&path)
             .unwrap();
-        file.set_len(1_048_577).unwrap();
-        assert!(FileImportSource::open(path).is_err());
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let owned = FileImportSource::open(path.clone());
+        let borrowed = FileImportSource::open(&path);
+        for result in [owned, borrowed] {
+            if length <= 1_048_576 {
+                let admitted = result.unwrap();
+                assert_eq!(admitted.bytes(), bytes);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    tinystoragedrivers_core::ErrorKind::InvalidInput
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let parent = path.parent().unwrap();
+        assert!(!parent.join(KEY_FILE_NAME).exists());
+        assert!(!parent.join(super::super::SECRETS_FILE_NAME).exists());
+        assert_eq!(std::fs::read_dir(parent).unwrap().count(), 1);
     }
 }
 
@@ -505,11 +529,17 @@ async fn native_io_fault_preserves_source_and_reconciles_publication() {
 #[tokio::test]
 async fn an_in_place_destination_mutation_fails_verified_readback() {
     let (_root, path, store, source) = setup();
-    let receipt = store
+    let _receipt = store
         .prepare_file_import("in-place", "fixture", b"value", &source)
         .await
         .unwrap();
     let lock = store.inner.lock().unwrap();
+    let intent = get_intent(
+        &read_ledger(&store.inner, &lock.namespace).unwrap(),
+        "fixture",
+    )
+    .unwrap()
+    .unwrap();
     let mut map = SecretMap::default();
     map.0
         .insert("fixture".to_string(), "changed value".to_string());
@@ -526,8 +556,8 @@ async fn an_in_place_destination_mutation_fails_verified_readback() {
         verify_destination(
             &store.inner,
             &lock.namespace,
-            &receipt.intent,
-            Some(receipt.destination)
+            &intent,
+            Some(secure::identity(&file).unwrap())
         )
         .is_err()
     );

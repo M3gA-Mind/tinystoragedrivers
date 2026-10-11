@@ -276,6 +276,97 @@ fn a_hardlinked_key_is_rejected_without_minting_another_key() {
 }
 
 #[test]
+fn unsafe_native_data_lock_and_ledger_are_retained_before_master_creation() {
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+    for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
+        for broad in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let private = root.path().join("private");
+            clack_private_fs::create_dir(&private).unwrap();
+            let namespace = super::super::windows::Namespace::open(&private, false).unwrap();
+            let path = private.join(name);
+            let mut file = clack_private_fs::create_new_file(&path).unwrap();
+            file.write_all(b"disposable existing store material")
+                .unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            // Retain READ_CONTROL and WRITE_DAC authority before restricting
+            // only this disposable leaf; restoration needs no account changes.
+            let mut authority = OpenOptions::new()
+                .access_mode(0x0006_0000)
+                .share_mode(7)
+                .open(&path)
+                .unwrap();
+            let user = current_user();
+            let before_id = super::super::secure::identity(&authority).unwrap();
+            let before_bytes = fs::read(&path).unwrap();
+            let sddl = if broad {
+                format!("D:P(A;;FA;;;{user})(A;;FR;;;WD)")
+            } else {
+                format!("D:P(A;;FR;;;{user})")
+            };
+            let unsafe_sd: LocalBox<SecurityDescriptor> = sddl.parse().unwrap();
+            wrappers::SetSecurityInfo(
+                &mut authority,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+                None,
+                unsafe_sd.dacl(),
+                None,
+            )
+            .unwrap();
+            let observed = descriptor(&authority);
+            let acl = observed.dacl().unwrap();
+            assert_eq!(acl.len(), if broad { 2 } else { 1 });
+            let owner_matches = observed.owner().is_some_and(|sid| sid_text(sid) == user);
+            assert!(owner_matches);
+            let first = acl.get_ace(0).unwrap();
+            assert_eq!(first.ace_type(), AceType::ACCESS_ALLOWED_ACE_TYPE);
+            assert!(!first.flags().contains(AceFlags::Inherited));
+            assert_eq!(first.mask().bits() == 0x001f_01ff, broad);
+            let unsafe_descriptor = observed.as_sddl().unwrap().into_string().unwrap();
+            assert!(super::super::windows::verify_file(&authority).is_err());
+            let Err(error) = EncryptedFileSecrets::with_key_file(private.clone()) else {
+                panic!("unsafe existing store must deny master construction");
+            };
+            assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+            assert!(!private.join(KEY_FILE_NAME).exists());
+            assert_eq!(fs::read(&path).unwrap(), before_bytes);
+            assert_eq!(
+                super::super::secure::identity(&authority).unwrap(),
+                before_id
+            );
+            let descriptor_unchanged = descriptor(&authority)
+                .as_sddl()
+                .unwrap()
+                .into_string()
+                .unwrap()
+                == unsafe_descriptor;
+            assert!(
+                descriptor_unchanged,
+                "constructor must not repair the fixture DACL"
+            );
+            namespace.verify().unwrap();
+            let restored: LocalBox<SecurityDescriptor> =
+                format!("D:P(A;;FA;;;{user})").parse().unwrap();
+            wrappers::SetSecurityInfo(
+                &mut authority,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+                None,
+                None,
+                restored.dacl(),
+                None,
+            )
+            .unwrap();
+            assert!(restricted_handle(&authority, &user, "restored-store-leaf"));
+        }
+    }
+}
+
+#[test]
 fn a_native_no_delete_handle_retains_the_previous_publication() {
     use std::os::windows::fs::OpenOptionsExt;
     let root = tempfile::tempdir().unwrap();
