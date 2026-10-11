@@ -24,6 +24,8 @@ fn all_holds_every_capability() {
     assert_eq!(
         all.iter().collect::<Vec<_>>(),
         vec![
+            Capability::ExistingSchema,
+            Capability::CollectionValidation,
             Capability::FullText,
             Capability::Transactions,
             Capability::Ttl,

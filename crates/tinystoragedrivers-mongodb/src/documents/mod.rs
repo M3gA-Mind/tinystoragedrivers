@@ -202,7 +202,9 @@ impl DocumentStore for MongoDocuments {
         let base = Capabilities::none()
             .with(Capability::FullText)
             .with(Capability::Ttl)
-            .with(Capability::CollectionEnumeration);
+            .with(Capability::CollectionEnumeration)
+            .with(Capability::ExistingSchema)
+            .with(Capability::CollectionValidation);
         if self.shared.transactions {
             base.with(Capability::Transactions)
                 .with(Capability::ConditionalStreamAppend)
@@ -215,6 +217,28 @@ impl DocumentStore for MongoDocuments {
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         self.shared.ensure(spec).await
+    }
+
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        required.validate()?;
+        let stored = self.shared.persisted_spec(&required.name).await?;
+        if stored.merge(required)? != stored {
+            return Err(StorageError::invalid_input(
+                "stored declaration lacks required features",
+            ));
+        }
+        let mut models = vec![scope_key_model()];
+        models.extend(crate::backend::specs::index_models(&stored)?);
+        if let Some(model) = stored
+            .search
+            .as_ref()
+            .map(crate::backend::specs::text_model)
+            .transpose()?
+            .flatten()
+        {
+            models.push(model);
+        }
+        self.shared.validate_indexes(&stored.name, &models).await
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {

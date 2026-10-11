@@ -107,6 +107,21 @@ impl Docs<'_> {
         }
     }
 
+    pub(super) fn validate_spec(&self, required: &CollectionSpec) -> Result<()> {
+        let stored = read_json::<CollectionSpec>(&self.spec_path(&required.name))?
+            .ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
+        if stored.name != required.name {
+            return Err(collision());
+        }
+        stored.validate()?;
+        if stored.merge(required)? != stored {
+            return Err(StorageError::invalid_input(
+                "stored declaration lacks required features",
+            ));
+        }
+        Ok(())
+    }
+
     /// Merge `spec` into the stored declaration.
     pub(super) fn ensure(&self, spec: &CollectionSpec) -> Result<()> {
         spec.validate()?;

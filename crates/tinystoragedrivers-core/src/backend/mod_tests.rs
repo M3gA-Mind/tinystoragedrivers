@@ -50,6 +50,10 @@ fn unknown_adapters_refuse_explicit_guard_addresses() {
             Ok(Arc::new(Adapter))
         }
     }
+    assert!(matches!(
+        Adapter.existing_schema().unwrap_err().kind(),
+        crate::ErrorKind::Unsupported(Capability::ExistingSchema)
+    ));
     let fence = Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
     for locator in [
         crate::GuardDatabase::Default,

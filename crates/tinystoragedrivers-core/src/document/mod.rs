@@ -43,6 +43,22 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
     /// when the spec asks for expiry the driver lacks, or a backend error.
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()>;
 
+    /// Check a persisted declaration without creating or changing schema.
+    ///
+    /// Compatible stored supersets are accepted; missing declarations are not.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported by default, `NotFound` for absent declarations, `InvalidInput`
+    /// for malformed or incompatible requests, or the native backend error.
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        let _ = required;
+        Err(StorageError::unsupported(
+            Capability::CollectionValidation,
+            "this document store cannot validate existing schema",
+        ))
+    }
+
     /// Read one document. Expired documents read as `None`.
     ///
     /// # Errors

@@ -28,6 +28,7 @@ pub struct MemoryDocuments {
     clock: Clock,
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
+    existing: bool,
 }
 
 impl std::fmt::Debug for MemoryDocuments {
@@ -45,13 +46,24 @@ impl MemoryDocuments {
         scope: Scope,
         clock: Clock,
         fence: Option<Arc<MemoryFence>>,
+        existing: bool,
     ) -> Self {
         Self {
             db,
             scope,
             clock,
             fence,
+            existing,
         }
+    }
+
+    fn check_schema(&self, collection: &str) -> Result<()> {
+        if self.existing && !self.db.lock()?.specs.contains_key(collection) {
+            return Err(StorageError::not_found(
+                "collection has no persisted declaration",
+            ));
+        }
+        Ok(())
     }
 
     fn now(&self) -> u64 {
@@ -125,9 +137,17 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::CrossDatabaseFencing)
             .with(Capability::ConditionalStreamAppend)
             .with(Capability::CollectionEnumeration)
+            .with(Capability::ExistingSchema)
+            .with(Capability::CollectionValidation)
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot declare collections",
+            ));
+        }
         spec.validate()?;
         let mut state = self.db.lock()?;
         let merged = match state.specs.get(&spec.name) {
@@ -139,7 +159,23 @@ impl DocumentStore for MemoryDocuments {
         Ok(())
     }
 
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        required.validate()?;
+        let state = self.db.lock()?;
+        let stored = state
+            .specs
+            .get(&required.name)
+            .ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
+        if stored.merge(required)? != *stored {
+            return Err(StorageError::invalid_input(
+                "stored declaration lacks required features",
+            ));
+        }
+        Ok(())
+    }
+
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        self.check_schema(collection)?;
         validate_collection(collection)?;
         crate::document::validate_id(id)?;
         let state = self.db.lock()?;
@@ -153,6 +189,7 @@ impl DocumentStore for MemoryDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -162,6 +199,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -171,6 +209,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
+        self.check_schema(collection)?;
         query.validate()?;
         let start = parse_cursor(collection, query)?;
         let state = self.db.lock()?;
@@ -185,11 +224,13 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        self.check_schema(collection)?;
         let state = self.db.lock()?;
         Ok(self.matching(&state, collection, filter, &[])?.len() as u64)
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        self.check_schema(collection)?;
         validate_collection(collection)?;
         filter.validate()?;
         // The clock is read under the lock, where the guard check and the
@@ -207,6 +248,7 @@ impl DocumentStore for MemoryDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
+        self.check_schema(collection)?;
         validate_doc(patch)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
@@ -238,6 +280,10 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        for op in &ops {
+            let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+            self.check_schema(collection)?;
+        }
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -278,6 +324,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.check_schema(collection)?;
         validate_collection(collection)?;
         let state = self.db.lock()?;
         let spec = state.spec(collection);
@@ -316,6 +363,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
+        self.check_schema(collection)?;
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
         // Only a fenced handle reads the clock here: dropping a collection

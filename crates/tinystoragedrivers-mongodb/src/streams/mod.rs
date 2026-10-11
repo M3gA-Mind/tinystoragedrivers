@@ -145,7 +145,7 @@ pub(crate) fn new_segment(
     })
 }
 
-fn segment_models() -> Vec<IndexModel> {
+pub(crate) fn segment_models() -> Vec<IndexModel> {
     let named = |name: &str, unique: bool| {
         let mut options = IndexOptions::builder().name(name.to_owned()).build();
         options.unique = Some(unique);
@@ -187,6 +187,9 @@ impl MongoStreams {
     }
 
     async fn segments(&self) -> Result<ScopedCollection> {
+        if self.shared.existing {
+            self.shared.require_collection(STREAM_HEADS).await?;
+        }
         self.shared.prepare(STREAMS, segment_models()).await?;
         Ok(self.shared.scoped(STREAMS, &self.scope))
     }

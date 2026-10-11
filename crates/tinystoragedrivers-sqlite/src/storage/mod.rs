@@ -57,6 +57,7 @@ pub struct SqliteStorage {
     db: Arc<Db>,
     tables: Arc<Tables>,
     clock: Clock,
+    existing: bool,
 }
 
 impl fmt::Debug for SqliteStorage {
@@ -114,7 +115,30 @@ impl SqliteStorage {
             db,
             tables,
             clock,
+            existing: false,
         })
+    }
+
+    fn assemble_existing(layout: Layout, file: &Path, prefix: &str, clock: Clock) -> Result<Self> {
+        let db = Db::open_existing(file)?;
+        let tables = Arc::new(Tables::new(prefix));
+        let inspect = Arc::clone(&tables);
+        db.run_now(move |conn| inspect.validate(conn))?;
+        Ok(Self {
+            layout,
+            db,
+            tables,
+            clock,
+            existing: true,
+        })
+    }
+
+    fn select(&self, file: &Path, prefix: &str) -> Result<Self> {
+        if self.existing {
+            Self::assemble_existing(self.layout.clone(), file, prefix, Arc::clone(&self.clock))
+        } else {
+            Self::assemble(self.layout.clone(), file, prefix, Arc::clone(&self.clock))
+        }
     }
 
     /// Read document expiry time from `clock` instead of the system clock.
@@ -141,6 +165,7 @@ impl SqliteStorage {
                 scope.clone(),
                 Arc::clone(&self.clock),
                 fencing.cloned(),
+                self.existing,
             )),
             Arc::new(SqliteStreams::new(
                 Arc::clone(&self.db),
@@ -164,6 +189,7 @@ impl SqliteStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl StorageBackend for SqliteStorage {
     fn driver(&self) -> &'static str {
         "sqlite"
@@ -171,6 +197,25 @@ impl StorageBackend for SqliteStorage {
 
     fn capabilities(&self) -> Capabilities {
         capabilities()
+    }
+
+    async fn prepare_schema(&self) -> Result<()> {
+        if self.existing {
+            return Err(tinystoragedrivers_core::StorageError::unsupported(
+                tinystoragedrivers_core::Capability::ExistingSchema,
+                "existing-schema handles cannot prepare internal schema",
+            ));
+        }
+        let tables = Arc::clone(&self.tables);
+        self.db.run(move |conn| tables.ensure(conn)).await
+    }
+
+    fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
+        let inspect = Arc::clone(&self.tables);
+        self.db.run_now(move |conn| inspect.validate(conn))?;
+        let mut storage = self.clone();
+        storage.existing = true;
+        Ok(Arc::new(storage))
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
@@ -205,7 +250,7 @@ impl StorageBackend for SqliteStorage {
             (Layout::File(file), GuardDatabase::Named(name)) => (file.clone(), format!("{name}__")),
             (_, GuardDatabase::Current) => unreachable!(),
         };
-        let guard = Self::assemble(self.layout.clone(), &file, &prefix, Arc::clone(&self.clock))?;
+        let guard = self.select(&file, &prefix)?;
         let attached = if guard.db.path() == self.db.path() {
             None
         } else {
@@ -222,17 +267,9 @@ impl StorageBackend for SqliteStorage {
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
         validate_database(name)?;
-        let clock = Arc::clone(&self.clock);
         let storage = match &self.layout {
-            Layout::Directory(dir) => Self::assemble(
-                self.layout.clone(),
-                &dir.join(format!("{name}.db")),
-                "",
-                clock,
-            )?,
-            Layout::File(file) => {
-                Self::assemble(self.layout.clone(), file, &format!("{name}__"), clock)?
-            }
+            Layout::Directory(dir) => self.select(&dir.join(format!("{name}.db")), "")?,
+            Layout::File(file) => self.select(file, &format!("{name}__"))?,
         };
         Ok(Arc::new(storage))
     }
@@ -241,3 +278,7 @@ impl StorageBackend for SqliteStorage {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;

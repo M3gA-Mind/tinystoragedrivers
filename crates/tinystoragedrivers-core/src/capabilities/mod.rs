@@ -14,6 +14,10 @@ use crate::error::{Result, StorageError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Capability {
+    /// Native handles never initialize or repair schema.
+    ExistingSchema,
+    /// Read-only validation of persisted document collection declarations.
+    CollectionValidation,
     /// [`DocumentStore::search`](crate::DocumentStore::search) over the
     /// fields a collection's [`SearchSpec`](crate::SearchSpec) names.
     FullText,
@@ -42,7 +46,9 @@ pub enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
+        Self::ExistingSchema,
+        Self::CollectionValidation,
         Self::FullText,
         Self::Transactions,
         Self::Ttl,
@@ -56,6 +62,8 @@ impl Capability {
 
     const fn bit(self) -> u32 {
         match self {
+            Self::ExistingSchema => 1 << 12,
+            Self::CollectionValidation => 1 << 13,
             Self::FullText => 1,
             Self::Transactions => 1 << 1,
             Self::Ttl => 1 << 2,
@@ -72,6 +80,8 @@ impl Capability {
 impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::ExistingSchema => "existing_schema",
+            Self::CollectionValidation => "collection_validation",
             Self::FullText => "full_text",
             Self::Transactions => "transactions",
             Self::Ttl => "ttl",
@@ -115,7 +125,9 @@ impl Capabilities {
     #[must_use]
     pub const fn all() -> Self {
         Self(
-            Capability::FullText.bit()
+            Capability::ExistingSchema.bit()
+                | Capability::CollectionValidation.bit()
+                | Capability::FullText.bit()
                 | Capability::Transactions.bit()
                 | Capability::Ttl.bit()
                 | Capability::Fencing.bit()

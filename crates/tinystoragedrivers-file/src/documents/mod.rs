@@ -16,9 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition, Query, Result,
-    Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection, validate_doc,
-    value,
+    Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
+    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection,
+    validate_doc, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -32,6 +32,7 @@ pub struct FileDocuments {
     scope: Scope,
     /// Checked under the database lock before every write, when set.
     fence: Option<Arc<Fencing>>,
+    existing: bool,
 }
 
 /// Refuse a write unless `fence` (when there is one) holds. Called under the
@@ -57,8 +58,18 @@ pub(crate) fn guard(_db: &Db, fence: Option<&Fencing>) -> Result<()> {
 }
 
 impl FileDocuments {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
-        Self { db, scope, fence }
+    pub(crate) fn new(
+        db: Arc<Db>,
+        scope: Scope,
+        fence: Option<Arc<Fencing>>,
+        existing: bool,
+    ) -> Self {
+        Self {
+            db,
+            scope,
+            fence,
+            existing,
+        }
     }
 
     /// Run `work` under the database lock with this scope's document view.
@@ -137,11 +148,27 @@ impl DocumentStore for FileDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot declare collections",
+            ));
+        }
         let spec = spec.clone();
         self.with(move |docs| docs.ensure(&spec)).await
     }
 
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        required.validate()?;
+        let required = required.clone();
+        self.with(move |docs| docs.validate_spec(&required)).await
+    }
+
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.with(move |docs| docs.get(&collection, &id)).await
     }
@@ -153,18 +180,30 @@ impl DocumentStore for FileDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.write(move |docs| docs.put(&collection, &id, doc, precondition))
             .await
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.write(move |docs| docs.delete(&collection, &id, precondition))
             .await
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         query.validate()?;
         let start = parse_cursor(collection, query)?;
         let fingerprint = fingerprint(collection, query);
@@ -183,12 +222,20 @@ impl DocumentStore for FileDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, filter) = (collection.to_owned(), filter.clone());
         self.with(move |docs| Ok(docs.matching(&collection, &filter, &[])?.len() as u64))
             .await
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, filter) = (collection.to_owned(), filter.clone());
         self.write(move |docs| docs.delete_where(&collection, &filter))
             .await
@@ -201,6 +248,10 @@ impl DocumentStore for FileDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         validate_doc(patch)?;
         let (collection, filter, sort, patch) = (
             collection.to_owned(),
@@ -234,6 +285,10 @@ impl DocumentStore for FileDocuments {
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         validate_collection(collection)?;
         let (collection, text) = (collection.to_owned(), text.to_owned());
         self.with(move |docs| {
@@ -275,6 +330,10 @@ impl DocumentStore for FileDocuments {
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let collection = collection.to_owned();
         self.write(move |docs| docs.drop_collection(&collection))
             .await

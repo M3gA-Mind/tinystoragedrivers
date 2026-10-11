@@ -41,6 +41,8 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::CrossDatabaseFencing)
         .with(Capability::ConditionalStreamAppend)
         .with(Capability::CollectionEnumeration)
+        .with(Capability::ExistingSchema)
+        .with(Capability::CollectionValidation)
 }
 
 /// SQLite documents bound to one scope.
@@ -52,6 +54,7 @@ pub struct SqliteDocuments {
     clock: Clock,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
+    existing: bool,
 }
 
 impl fmt::Debug for SqliteDocuments {
@@ -82,6 +85,7 @@ impl SqliteDocuments {
         scope: Scope,
         clock: Clock,
         fencing: Option<Arc<Fencing>>,
+        existing: bool,
     ) -> Self {
         Self {
             db,
@@ -89,6 +93,7 @@ impl SqliteDocuments {
             scope,
             clock,
             fencing,
+            existing,
         }
     }
 
@@ -157,6 +162,12 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot declare collections",
+            ));
+        }
         spec.validate()?;
         let spec = spec.clone();
         self.with(Access::Declare, move |conn, ctx| {
@@ -165,7 +176,20 @@ impl DocumentStore for SqliteDocuments {
         .await
     }
 
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        required.validate()?;
+        let required = required.clone();
+        self.with(Access::Read, move |conn, ctx| {
+            ops::validate_spec(conn, ctx.tables, &required)
+        })
+        .await
+    }
+
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.with(Access::Read, move |conn, ctx| {
             ops::get(conn, ctx, &collection, &id)
@@ -180,6 +204,10 @@ impl DocumentStore for SqliteDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.with(Access::Write, move |conn, ctx| {
             ops::put(conn, ctx, &collection, &id, &doc, precondition)
@@ -188,6 +216,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.with(Access::Write, move |conn, ctx| {
             ops::delete(conn, ctx, &collection, &id, precondition)
@@ -196,6 +228,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         query.validate()?;
         let start = parse_cursor(collection, query)?;
         let fingerprint = fingerprint(collection, query)?;
@@ -214,6 +250,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, filter) = (collection.to_owned(), filter.clone());
         self.with(Access::Read, move |conn, ctx| {
             Ok(ops::matching(conn, ctx, &collection, &filter, &[])?.len() as u64)
@@ -222,6 +262,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, filter) = (collection.to_owned(), filter.clone());
         self.with(Access::Write, move |conn, ctx| {
             ops::delete_where(conn, ctx, &collection, &filter)
@@ -236,6 +280,10 @@ impl DocumentStore for SqliteDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         validate_doc(patch)?;
         let (collection, filter, sort, patch) = (
             collection.to_owned(),
@@ -270,6 +318,13 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        if self.existing {
+            for op in &ops {
+                let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+                self.validate_collection_spec(&CollectionSpec::new(collection))
+                    .await?;
+            }
+        }
         self.with(Access::Write, move |conn, ctx| {
             ops.into_iter()
                 .map(|op| match op {
@@ -295,6 +350,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let (collection, text) = (collection.to_owned(), text.to_owned());
         let hits = self
             .with(Access::Read, move |conn, ctx| {
@@ -308,6 +367,10 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
+        if self.existing {
+            self.validate_collection_spec(&CollectionSpec::new(collection))
+                .await?;
+        }
         let collection = collection.to_owned();
         self.with(Access::Write, move |conn, ctx| {
             ops::drop_collection(conn, ctx, &collection)

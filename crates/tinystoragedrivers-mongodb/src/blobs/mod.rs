@@ -25,7 +25,8 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Result, Scope, StorageError, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Capability, Result, Scope, StorageError, clamp_range,
+    validate_blob_key,
 };
 
 use crate::backend::Shared;
@@ -68,6 +69,17 @@ pub(crate) fn chunk_span(range: &Range<usize>, chunk_size: usize) -> (usize, usi
     (first, last, range.start - first * size)
 }
 
+pub(crate) fn file_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1})
+        .options(
+            IndexOptions::builder()
+                .name(BLOB_KEY_INDEX.to_owned())
+                .build(),
+        )
+        .build()
+}
+
 /// MongoDB blobs bound to one scope.
 #[derive(Debug)]
 pub(crate) struct MongoBlobs {
@@ -96,15 +108,13 @@ impl MongoBlobs {
     }
 
     async fn bucket(&self) -> Result<GridFsBucket> {
+        if self.shared.existing {
+            self.shared
+                .require_collection(&format!("{BLOBS}.chunks"))
+                .await?;
+        }
         let name = format!("{}{BLOBS}", self.shared.prefix);
-        let model = IndexModel::builder()
-            .keys(doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1})
-            .options(
-                IndexOptions::builder()
-                    .name(BLOB_KEY_INDEX.to_owned())
-                    .build(),
-            )
-            .build();
+        let model = file_index();
         self.shared
             .prepare(&format!("{BLOBS}.files"), vec![model])
             .await?;
@@ -226,6 +236,12 @@ impl BlobStore for MongoBlobs {
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         validate_blob_key(key)?;
         self.writable("a blob put")?;
+        if self.shared.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "GridFS upload may initialize schema",
+            ));
+        }
         let bucket = self.bucket().await?;
         let mut upload = bucket
             .open_upload_stream(key)

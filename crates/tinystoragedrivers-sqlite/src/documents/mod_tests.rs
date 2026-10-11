@@ -44,6 +44,7 @@ fn handles_render_their_scope_and_file() {
         Scope::local(),
         Arc::new(|| 0),
         None,
+        false,
     );
     let shown = format!("{docs:?}");
     assert!(shown.contains("local") && shown.contains("d.db"), "{shown}");
