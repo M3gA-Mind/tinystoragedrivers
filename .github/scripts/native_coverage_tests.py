@@ -1,0 +1,209 @@
+"""Failure-mode tests for the native compiled-source coverage gate."""
+import importlib.util
+import json
+import os
+import platform
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("gate", Path(__file__).with_name("check-native-secrets-coverage.py"))
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+
+
+class NativeCoverageGate(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve()
+        self.module = gate.SOURCE + ("file/windows.rs" if platform.system() == "Windows" else "file/unix.rs")
+        source = self.root / self.module
+        source.parent.mkdir(parents=True)
+        source.write_text("pub fn example() {}\n")
+        self.patches = [patch.object(gate, "ROOT", self.root), patch.object(gate, "git", self.git)]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+        self.started = time.time_ns() - 1_000_000_000
+        target = self.root / "target"
+        target.mkdir()
+        provenance = {"head": "a" * 40, "base": gate.BASE, "platform": platform.system(),
+                      "sources": gate.source_hashes(), "started_ns": self.started}
+        (target / "secrets-native-provenance.json").write_text(json.dumps(provenance))
+        deps = target / "llvm-cov-target/debug/deps"
+        deps.mkdir(parents=True)
+        (deps / "tinystoragedrivers_secrets-fixture.d").write_text("fixture: " + self.module + "\n")
+        self.report = target / "secrets-native-coverage.json"
+        self.lcov = target / "secrets-native-coverage.lcov"
+        self.entry = {"filename": str(source), "summary": {"lines": {"count": 1, "covered": 1}},
+                      "segments": [[1, 1, 1, True, True, False], [1, 20, 0, False, False, False]]}
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry]}]}))
+        self.lcov.write_text("SF:" + str(source) + "\nDA:1,1\nend_of_record\n")
+
+    def git(self, *args):
+        if args[0] == "diff" and hasattr(self, "diff"):
+            return self.diff
+        if args[0] == "status":
+            return ""
+        if args[:2] == ("rev-parse", "HEAD"):
+            return "a" * 40
+        if args[0] == "rev-parse":
+            return gate.BASE
+        if args[0] == "diff":
+            return "+++ b/" + self.module + "\n@@ -0,0 +1 @@\n+pub fn example() {}\n"
+        raise AssertionError(args)
+
+    def run_gate(self):
+        with patch.object(sys, "argv", ["gate"]):
+            gate.main()
+
+    def test_fixture_root_is_canonical_like_the_production_root(self):
+        self.assertEqual(self.root, self.root.resolve())
+        self.run_gate()
+
+    def test_a_fresh_native_inventory_and_matching_execution_pass(self):
+        self.run_gate()
+        receipt = json.loads((self.root / "target/secrets-native-coverage-receipt.json").read_text())
+        self.assertEqual(receipt["changed_covered"], 1)
+        self.assertEqual(len(receipt["compiled_production"]), 1)
+
+    def test_a_compiled_production_module_cannot_be_omitted(self):
+        self.report.write_text(json.dumps({"data": [{"files": []}]}))
+        with self.assertRaisesRegex(RuntimeError, "omitted"):
+            self.run_gate()
+
+    def test_zero_executable_coverage_fails(self):
+        self.entry["summary"]["lines"] = {"count": 0, "covered": 0}
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry]}]}))
+        with self.assertRaisesRegex(RuntimeError, "empty or malformed"):
+            self.run_gate()
+
+    def test_old_reports_do_not_prove_a_new_execution(self):
+        os.utime(self.report, ns=(self.started - 1, self.started - 1))
+        with self.assertRaisesRegex(RuntimeError, "predate"):
+            self.run_gate()
+
+    def test_uncovered_changed_executable_lines_fail(self):
+        self.entry["segments"][0][2] = 0
+        self.entry["summary"]["lines"]["covered"] = 0
+        self.write_report()
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nend_of_record\n")
+        with self.assertRaisesRegex(RuntimeError, "changed executable lines: 0/1"):
+            self.run_gate()
+
+    def test_malformed_json_and_missing_reports_fail(self):
+        self.report.write_text("not JSON")
+        with self.assertRaises(json.JSONDecodeError):
+            self.run_gate()
+        self.report.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.run_gate()
+
+    def test_source_changes_invalidate_provenance(self):
+        (self.root / self.module).write_text("pub fn changed() {}\n")
+        with self.assertRaisesRegex(RuntimeError, "sources"):
+            self.run_gate()
+
+    def test_another_platform_inventory_is_not_native_proof(self):
+        dep = self.root / "target/llvm-cov-target/debug/deps/tinystoragedrivers_secrets-fixture.d"
+        dep.write_text("fixture: " + gate.SOURCE + "lib.rs\n")
+        with self.assertRaisesRegex(RuntimeError, "native platform module missing"):
+            self.run_gate()
+
+    def write_report(self):
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry]}]}))
+
+    def configure_hundred_line_report(self):
+        self.entry["summary"]["lines"] = {"count": 100, "covered": 90}
+        self.entry["segments"] = []
+        for line in range(1, 101):
+            count = int(line != 2 and line <= 91)
+            self.entry["segments"].extend([[line, 1, count, True, True, False],
+                                            [line, 20, 0, False, False, False]])
+        self.write_report()
+        self.diff = "+++ b/" + self.module + "\n@@ -0,0 +1,2 @@\n+first executable\n+second executable\n"
+
+    def test_partial_lcov_cannot_omit_an_uncovered_changed_coordinate(self):
+        self.configure_hundred_line_report()
+        # JSON independently includes uncovered line 2; partial LCOV must not
+        # shrink changed coverage to the surviving covered line 1.
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_reports_with_mismatched_executable_coordinates_fail(self):
+        self.entry["summary"]["lines"] = {"count": 2, "covered": 2}
+        self.entry["segments"].extend([[2, 1, 1, True, True, False], [2, 20, 0, False, False, False]])
+        self.write_report()
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,1\nDA:3,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_duplicate_lcov_coordinates_fail_even_when_counts_match(self):
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,1\nDA:1,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_conflicting_lcov_coordinates_cannot_choose_the_covered_count(self):
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nDA:1,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_duplicate_json_source_entries_fail(self):
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry, self.entry]}]}))
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_generic_instantiation_summary_can_exceed_unique_coordinates(self):
+        self.entry["summary"]["lines"] = {"count": 2, "covered": 2}
+        self.write_report()
+        self.run_gate()
+        receipt = json.loads((self.root / "target/secrets-native-coverage-receipt.json").read_text())
+        self.assertEqual(receipt["changed_lines"], 1)
+
+    def test_complementary_generic_instantiations_preserve_both_coverage_measures(self):
+        fixture = Path(__file__).with_name("fixtures") / "scope-complementary-instantiations.json"
+        data = json.loads(fixture.read_text())
+        entry = data["files"][0]
+        entry["filename"] = self.entry["filename"]
+        for function in data["functions"]:
+            function["filenames"] = [self.entry["filename"] if name == "scope/mod.rs" else name
+                                     for name in function["filenames"]]
+        self.assertEqual(entry["summary"]["lines"]["count"], 44)
+        self.assertEqual(entry["summary"]["lines"]["covered"], 42)
+        self.assertEqual(len(gate.json_lines(entry)), 43)
+        self.assertTrue(all(gate.json_lines(entry).values()))
+        self.report.write_text(json.dumps({"data": [data]}))
+        self.lcov.write_text(fixture.with_suffix(".lcov").read_text()
+                            .replace("SF:scope/mod.rs", "SF:" + self.entry["filename"]))
+        self.diff = "+++ b/" + self.module + "\n@@ -0,0 +49 @@\n+executable\n"
+        self.run_gate()
+
+    def test_summary_cannot_claim_coverage_for_an_uncovered_coordinate(self):
+        self.entry["segments"][0][2] = 0
+        other_name = gate.SOURCE + "file/secure.rs"
+        other = self.root / other_name
+        other.write_text("pub fn covered() {}\n")
+        covered = {"filename": str(other), "summary": {"lines": {"count": 1, "covered": 1}},
+                   "segments": [[1, 1, 1, True, True, False], [1, 20, 0, False, False, False]]}
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry, covered]}]}))
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nend_of_record\n"
+                            + "SF:" + str(other) + "\nDA:1,1\nend_of_record\n")
+        self.diff = "+++ b/" + other_name + "\n@@ -0,0 +1 @@\n+pub fn covered() {}\n"
+        target = self.root / "target"
+        manifest = target / "secrets-native-provenance.json"
+        provenance = json.loads(manifest.read_text())
+        provenance["sources"] = gate.source_hashes()
+        manifest.write_text(json.dumps(provenance))
+        dep = target / "llvm-cov-target/debug/deps/tinystoragedrivers_secrets-fixture.d"
+        dep.write_text("fixture: " + self.module + " " + other_name + "\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+
+if __name__ == "__main__":
+    unittest.main()

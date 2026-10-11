@@ -1,0 +1,10 @@
+{
+  "source_head": "016cd1ff2551a9186b7b8419c3917db6a8d8f090",
+  "toolchain": "rustc 1.99.0 / cargo llvm-cov",
+  "original_source": "crates/tinystoragedrivers-core/src/scope/mod.rs",
+  "original_reports_sha256": {
+    "workspace-016cd1f-coverage.lcov": "bf4d6e1dc9ea549a7f3f8ff60d904f41c19ffc735cc98c0761af99128556dcad",
+    "workspace-016cd1f-coverage.json": "05fc1dc946c6f64a3866c3c8c7be206f26e328924c8937706490249e8954827d"
+  },
+  "fixture_transform": "Extracted actual file entry, all 26 functions naming this file, and matching LCOV record. Replaced only source filename with scope/mod.rs; test remaps it into mock compiled secrets inventory. Function regions, segments, counters, summaries, and function names are unchanged. Summary42/44 with43/43 merged covered coordinates is valid complementary generic execution."
+}
