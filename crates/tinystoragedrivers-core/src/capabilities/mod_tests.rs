@@ -32,6 +32,8 @@ fn all_holds_every_capability() {
             Capability::StreamingBlobs,
             Capability::CollectionEnumeration,
             Capability::ConditionalStreamAppend,
+            Capability::CrossDatabaseFencing,
+            Capability::ValidatedBatch,
         ]
     );
 }

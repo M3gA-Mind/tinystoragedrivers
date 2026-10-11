@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::MemoryFence;
 use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::blob::{Blob, BlobMeta, BlobStore, clamp_range, validate_blob_key};
 use crate::error::Result;
-use crate::fence::Fence;
 use crate::scope::Scope;
 
 /// In-memory blobs bound to one scope.
@@ -19,7 +19,7 @@ pub struct MemoryBlobs {
     scope: Scope,
     clock: Clock,
     /// Checked under the lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<MemoryFence>>,
 }
 
 impl std::fmt::Debug for MemoryBlobs {
@@ -36,7 +36,7 @@ impl MemoryBlobs {
         db: Arc<MemoryDb>,
         scope: Scope,
         clock: Clock,
-        fence: Option<Arc<Fence>>,
+        fence: Option<Arc<MemoryFence>>,
     ) -> Self {
         Self {
             db,
@@ -51,7 +51,7 @@ impl MemoryBlobs {
     fn guard(&self, state: &DbState) -> Result<()> {
         match self.fence.as_deref() {
             None => Ok(()),
-            fence => state.guard(fence, (self.clock)()),
+            fence => self.db.guard(state, fence, (self.clock)()),
         }
     }
 

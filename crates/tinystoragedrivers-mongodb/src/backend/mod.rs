@@ -7,22 +7,24 @@
 
 pub(crate) mod specs;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
-use mongodb::{Client, Collection, Database};
+use mongodb::{Client, ClientSession, Collection, Database};
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
-    StorageError, validate_collection, validate_database,
+    Capabilities, Capability, Clock, Fence, GuardDatabase, Result, Scope, ScopedStorage,
+    StorageBackend, StorageError, validate_collection, validate_database,
 };
 
 use crate::blobs::MongoBlobs;
 use crate::documents::MongoDocuments;
 use crate::errors;
+use crate::fence::Fencing;
 use crate::naming::{database_prefix, validate_mongo_database};
 use crate::scoped::ScopedCollection;
 use crate::streams::MongoStreams;
@@ -54,19 +56,131 @@ pub(crate) struct Shared {
     pub(crate) prefix: String,
     pub(crate) clock: Clock,
     pub(crate) transactions: bool,
+    /// Detected server support, retained when public capabilities are disabled.
+    pub(crate) physical_transactions: bool,
+    validation_ready: AtomicBool,
+    validation_scopes: Mutex<BTreeSet<String>>,
     pub(crate) specs: SpecCache,
 }
 
 impl Shared {
-    fn new(client: Client, db: Database, prefix: String, clock: Clock, transactions: bool) -> Self {
+    fn new(
+        client: Client,
+        db: Database,
+        prefix: String,
+        clock: Clock,
+        transactions: bool,
+        physical_transactions: bool,
+    ) -> Self {
         Self {
             client,
             db,
             prefix,
             clock,
             transactions,
+            physical_transactions,
+            validation_ready: AtomicBool::new(false),
+            validation_scopes: Mutex::new(BTreeSet::new()),
             specs: SpecCache::default(),
         }
+    }
+
+    async fn prepare_validation_registry(&self) -> Result<()> {
+        if self.validation_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let outcome = self
+            .raw("_tsd_validated_batch")
+            .update_one(
+                doc! {"_id": "documents"},
+                doc! {"$setOnInsert": {"epoch": 0_i64}},
+            )
+            .upsert(true)
+            .await;
+        if let Err(error) = outcome {
+            let error = errors::map(error, "initialize document validation metadata");
+            if error.kind() != tinystoragedrivers_core::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        self.validation_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Register a scope against collection-wide schema mutations. Existing
+    /// scopes take no registration lock on their ordinary mutation paths.
+    pub(crate) async fn prepare_validation(&self, scope: Option<&Scope>) -> Result<()> {
+        self.prepare_validation_registry().await?;
+        let Some(scope) = scope else {
+            return Ok(());
+        };
+        let key = format!("scope:{}", scope.as_str());
+        if self
+            .validation_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key)
+        {
+            return Ok(());
+        }
+        let metadata = self.raw("_tsd_validated_batch");
+        if metadata
+            .find_one(doc! {"_id": &key})
+            .await
+            .map_err(errors::failed("read validation scope"))?
+            .is_none()
+        {
+            crate::fence::in_write!(self, None, session => {
+                metadata.update_one(doc! {"_id": "documents"}, doc! {"$inc": {"epoch": 1_i64}})
+                    .session(&mut *session).await.map_err(errors::failed("register validation scope"))?;
+                metadata.update_one(doc! {"_id": &key}, doc! {"$setOnInsert": {"epoch": 0_i64, "scope": scope.as_str()}})
+                    .upsert(true).session(&mut *session).await.map_err(errors::failed("initialize validation scope"))?;
+                Ok(())
+            })?;
+        }
+        self.validation_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        Ok(())
+    }
+
+    /// Ordinary mutations lock only their tenant. Collection-wide schema
+    /// changes lock registration and every admitted tenant in one transaction.
+    pub(crate) async fn hold_validation(
+        &self,
+        scope: Option<&Scope>,
+        session: &mut ClientSession,
+    ) -> Result<()> {
+        let metadata = self.raw("_tsd_validated_batch");
+        if let Some(scope) = scope {
+            let key = format!("scope:{}", scope.as_str());
+            let held = metadata
+                .update_one(doc! {"_id": key}, doc! {"$inc": {"epoch": 1_i64}})
+                .session(session)
+                .await
+                .map_err(errors::failed("hold document validation metadata"))?;
+            if held.matched_count != 1 {
+                return Err(StorageError::unavailable(
+                    "document validation metadata is missing; retry",
+                ));
+            }
+        } else {
+            metadata
+                .update_one(doc! {"_id": "documents"}, doc! {"$inc": {"epoch": 1_i64}})
+                .session(&mut *session)
+                .await
+                .map_err(errors::failed("hold validation registration"))?;
+            metadata
+                .update_many(
+                    doc! {"scope": {"$exists": true}},
+                    doc! {"$inc": {"epoch": 1_i64}},
+                )
+                .session(session)
+                .await
+                .map_err(errors::failed("hold all document validation scopes"))?;
+        }
+        Ok(())
     }
 
     /// Milliseconds since the Unix epoch, from the configured clock.
@@ -158,6 +272,7 @@ impl MongoStorage {
             String::new(),
             Arc::new(system_clock),
             supports_transactions(&hello),
+            supports_transactions(&hello),
         );
         Ok(Self {
             shared: Arc::new(shared),
@@ -172,10 +287,13 @@ impl MongoStorage {
         self.rebuild(clock, self.shared.transactions)
     }
 
-    /// Never use multi-document transactions, as if the deployment were a
+    /// Disable public transactional capabilities, as if the deployment were a
     /// standalone server: [`Capability::Transactions`] is not reported and
     /// [`atomic_batch`](tinystoragedrivers_core::DocumentStore::atomic_batch)
-    /// returns `Unsupported`.
+    /// returns `Unsupported`. Internal document writes still use native
+    /// metadata transactions when the server supports them, so these handles
+    /// cannot bypass another handle's read validation. A true standalone
+    /// deployment keeps its existing single-document writes.
     #[must_use]
     pub fn without_transactions(self) -> Self {
         let clock = Arc::clone(&self.shared.clock);
@@ -189,6 +307,7 @@ impl MongoStorage {
             self.shared.prefix.clone(),
             clock,
             transactions,
+            self.shared.physical_transactions,
         );
         Self {
             shared: Arc::new(shared),
@@ -205,14 +324,21 @@ impl MongoStorage {
     /// An invalid collection name, or a backend error.
     pub async fn sweep_expired(&self, scope: &Scope, collection: &str) -> Result<u64> {
         validate_collection(collection)?;
-        MongoDocuments::new(Arc::clone(&self.shared), scope.clone(), None)
-            .sweep(collection, None)
-            .await
+        let docs = MongoDocuments::new(Arc::clone(&self.shared), scope.clone(), None);
+        if !self.shared.physical_transactions {
+            return docs.sweep(collection, None).await;
+        }
+        self.shared.prepare_validation(Some(scope)).await?;
+        crate::fence::in_write!(&self.shared, None, session => {
+            self.shared.hold_validation(Some(scope), session).await?;
+            self.shared.spec_in_session(collection, &mut *session).await?;
+            docs.sweep(collection, Some(session)).await
+        })
     }
 }
 
 impl MongoStorage {
-    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
@@ -255,8 +381,10 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
+                .with(Capability::CrossDatabaseFencing)
         } else {
             base
         }
@@ -274,28 +402,80 @@ impl StorageBackend for MongoStorage {
             ));
         }
         fence.validate()?;
-        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                shared: Arc::clone(&self.shared),
+            })),
+        ))
+    }
+
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        locator: &GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        locator.validate()?;
+        if *locator == GuardDatabase::Current {
+            return self.for_scope_fenced(scope, fence);
+        }
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::CrossDatabaseFencing,
+                "cross-database fencing needs transactions",
+            ));
+        }
+        let guard = match locator {
+            GuardDatabase::Default => Arc::new(Shared::new(
+                self.shared.client.clone(),
+                self.shared.db.clone(),
+                String::new(),
+                Arc::clone(&self.shared.clock),
+                true,
+                self.shared.physical_transactions,
+            )),
+            GuardDatabase::Named(name) => self.named(name)?,
+            GuardDatabase::Current => unreachable!(),
+        };
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                shared: guard,
+            })),
+        ))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
+        Ok(Arc::new(Self {
+            shared: self.named(name)?,
+            databases: Arc::clone(&self.databases),
+        }))
+    }
+}
+
+impl MongoStorage {
+    fn named(&self, name: &str) -> Result<Arc<Shared>> {
         validate_database(name)?;
         let mut databases = self
             .databases
             .lock()
             .map_err(|_| StorageError::backend("mongodb database registry lock poisoned"))?;
-        let shared = databases.entry(name.to_owned()).or_insert_with(|| {
-            Arc::new(Shared::new(
-                self.shared.client.clone(),
-                self.shared.db.clone(),
-                database_prefix(name),
-                Arc::clone(&self.shared.clock),
-                self.shared.transactions,
-            ))
-        });
-        Ok(Arc::new(Self {
-            shared: Arc::clone(shared),
-            databases: Arc::clone(&self.databases),
-        }))
+        Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
+            || {
+                Arc::new(Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.db.clone(),
+                    database_prefix(name),
+                    Arc::clone(&self.shared.clock),
+                    self.shared.transactions,
+                    self.shared.physical_transactions,
+                ))
+            },
+        )))
     }
 }
 

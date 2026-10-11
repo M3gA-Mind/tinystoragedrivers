@@ -47,6 +47,7 @@ fn blob_landed<T>(result: Result<T>, check: &str) -> bool {
 /// Run the fencing checks. The guard lives in `conformance-fence`, or in
 /// [`Scope::local`] beside the fenced data on a single-scope backend.
 pub(super) async fn run(backend: &dyn StorageBackend, single_scope: bool) {
+    cross_database(backend).await;
     let guard_scope = if single_scope {
         Scope::local()
     } else {
@@ -196,6 +197,13 @@ async fn refused_documents(fenced: &ScopedStorage, names: &Names, check: &str) {
         ErrorKind::Fenced,
         &fenced_kind("drop_collection"),
     );
+    if docs.capabilities().contains(Capability::ValidatedBatch) {
+        fails(
+            docs.atomic_batch_checked(vec![], vec![]).await,
+            ErrorKind::Fenced,
+            &fenced_kind("empty checked batch"),
+        );
+    }
     let batch = docs
         .atomic_batch(vec![WriteOp::Put {
             collection: names.coll.clone(),
@@ -286,6 +294,13 @@ async fn holding(fenced: &ScopedStorage, plain: &ScopedStorage, names: &Names) {
 /// Fenced document writes land while the fence holds.
 async fn holding_documents(fenced: &ScopedStorage, plain: &ScopedStorage, names: &Names) {
     let docs = fenced.documents();
+    if docs.capabilities().contains(Capability::ValidatedBatch) {
+        ok(
+            docs.atomic_batch_checked(vec![], vec![]).await,
+            "holding checked batch",
+        );
+    }
+
     let v1 = ok(
         docs.put(&names.coll, "seed", json!({"n": 1}), Precondition::Absent)
             .await,
@@ -472,4 +487,76 @@ async fn expired_guard(backend: &dyn StorageBackend, guard_scope: &Scope, guards
         ErrorKind::Fenced,
         "an expired guard",
     );
+}
+
+async fn cross_database(backend: &dyn StorageBackend) {
+    let target = ok(backend.database("fenced_target"), "named fenced target");
+    let scope = Scope::local();
+    let leases = unique("cross_leases");
+    let fence = Fence::epoch(scope.clone(), &leases, "lease", "epoch", 1);
+    if !target
+        .capabilities()
+        .contains(Capability::CrossDatabaseFencing)
+    {
+        fails(
+            target.for_scope_fenced_in_database(&scope, &fence, &crate::GuardDatabase::Default),
+            ErrorKind::Unsupported(Capability::CrossDatabaseFencing),
+            "cross database unsupported",
+        );
+        return;
+    }
+    ok(
+        target.for_scope_fenced_in_database(&scope, &fence, &crate::GuardDatabase::Current),
+        "explicit current guard",
+    );
+    fails(
+        target.for_scope_fenced_in_database(
+            &scope,
+            &fence,
+            &crate::GuardDatabase::Named("bad name".into()),
+        ),
+        ErrorKind::InvalidInput,
+        "invalid guard database",
+    );
+    for (locator, guard_backend) in [
+        (crate::GuardDatabase::Default, None),
+        (
+            crate::GuardDatabase::Named("fenced_guards".into()),
+            Some(ok(backend.database("fenced_guards"), "named guards")),
+        ),
+    ] {
+        let guards = ok(
+            guard_backend
+                .as_deref()
+                .unwrap_or(backend)
+                .for_scope(&scope),
+            "guard handles",
+        );
+        ok(
+            guards
+                .documents()
+                .put(&leases, "lease", json!({"epoch":1}), Precondition::None)
+                .await,
+            "grant cross database fence",
+        );
+        let fenced = ok(
+            target.for_scope_fenced_in_database(&scope, &fence, &locator),
+            "bind cross database fence",
+        );
+        let plain = ok(target.for_scope(&scope), "plain named target");
+        let names = Names {
+            coll: unique("cross_docs"),
+            stream: unique("cross_stream"),
+            blob: unique("cross_blob"),
+        };
+        holding(&fenced, &plain, &names).await;
+        ok(
+            guards
+                .documents()
+                .put(&leases, "lease", json!({"epoch":2}), Precondition::None)
+                .await,
+            "cross database takeover",
+        );
+        refused(&fenced, &plain, &names, "cross database stale holder").await;
+    }
 }

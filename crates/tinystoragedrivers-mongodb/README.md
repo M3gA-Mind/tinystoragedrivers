@@ -73,6 +73,20 @@ id that was itself resolved under the scope.
 - **Transactions** (`atomic_batch`) run in a session transaction on replica
   sets and sharded clusters, retried on transient aborts.
 
+- **Validated batches** (`atomic_batch_checked`) validate exact live document
+  versions or absence before applying writes in the same transaction. Reserved
+  metadata serializes mutations per named database and scope, including writes
+  through independent handles. Dependencies retain their user JSON and logical
+  versions. Collection-wide schema changes and expiry burial participate in
+  this protocol; the driver does not use server TTL deletion indexes.
+- **Public transaction opt-out** (`without_transactions`) disables transactional
+  capabilities, including checked batches and native fencing. On replica sets,
+  ordinary document mutations still use internal physical transactions so they
+  cannot bypass read validation by another handle. This narrows the previous
+  promise that the handle never used transactions. True standalone deployments
+  keep single-document mutations and do not advertise checked batches.
+
+
 ## Driver-defined behavior and limits
 
 - Integers above `i64::MAX` cannot be stored (`ErrorKind::Serialization`),

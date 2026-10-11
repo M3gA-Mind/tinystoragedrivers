@@ -78,12 +78,13 @@ pub use blob::{
 pub use blocking::Blocking;
 pub use capabilities::{Capabilities, Capability};
 pub use document::{
-    CollectionSpec, Cursor, DocumentStore, DocumentStoreExt, IndexSpec, MAX_COLLECTION_LEN,
-    MAX_ID_LEN, Page, Precondition, Query, RESERVED_PREFIX, SearchHit, SearchSpec, Version,
-    Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
+    CollectionSpec, Cursor, DocumentStore, DocumentStoreExt, ExpectedDocument, IndexSpec,
+    MAX_COLLECTION_LEN, MAX_ID_LEN, Page, Precondition, Query, RESERVED_PREFIX, ReadCheck,
+    SearchHit, SearchSpec, Version, Versioned, WriteOp, WriteResult, validate_collection,
+    validate_doc, validate_id,
 };
 pub use error::{ErrorKind, Result, StorageError};
-pub use fence::Fence;
+pub use fence::{Fence, GuardDatabase};
 pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
 pub use scope::{MAX_SCOPE_LEN, Scope};

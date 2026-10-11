@@ -8,7 +8,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Result, Scope, StorageError, StreamEntry, StreamStore, async_trait, validate_stream,
@@ -96,13 +96,9 @@ impl SqliteStreams {
                 if !write {
                     return f(conn, &tables, scope.as_str());
                 }
-                let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(during("begin"))?;
-                fence::guard(fencing.as_deref(), &tx, &tables)?;
-                let out = f(&tx, &tables, scope.as_str())?;
-                tx.commit().map_err(during("commit"))?;
-                Ok(out)
+                fence::write(conn, fencing.as_deref(), &tables, |tx| {
+                    f(tx, &tables, scope.as_str())
+                })
             })
             .await
     }

@@ -323,3 +323,45 @@ async fn fenced_document_writes_read_the_clock_under_the_database_lock() {
     docs.delete_where("c", &Filter::All).await.unwrap();
     assert_eq!(unlocked.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn changed_read_only_dependency_aborts_checked_batch_without_mutation() {
+    use crate::{ExpectedDocument, ReadCheck, WriteOp};
+    let store = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let docs = store.documents();
+    let version = docs
+        .put(
+            "dependencies",
+            "d",
+            json!({"state": "complete"}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    docs.put(
+        "dependencies",
+        "d",
+        json!({"state": "changed"}),
+        Precondition::None,
+    )
+    .await
+    .unwrap();
+    let error = docs
+        .atomic_batch_checked(
+            vec![ReadCheck {
+                collection: "dependencies".into(),
+                id: "d".into(),
+                expected: ExpectedDocument::Version(version),
+            }],
+            vec![WriteOp::Put {
+                collection: "claims".into(),
+                id: "c".into(),
+                doc: json!({}),
+                precondition: Precondition::Absent,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Conflict);
+    assert!(docs.get("claims", "c").await.unwrap().is_none());
+}

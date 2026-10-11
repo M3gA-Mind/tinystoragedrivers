@@ -90,3 +90,114 @@ fn a_symlinked_database_directory_shares_the_targets_lock() {
         &direct.db.lock
     ));
 }
+
+#[tokio::test]
+async fn reopened_named_target_observes_default_guard_takeover() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let guard_scope = Scope::new("cluster").unwrap();
+    let guard = root.for_scope(&guard_scope).unwrap();
+    guard
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 1}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let target = FileStorage::open(dir.path())
+        .unwrap()
+        .database("target")
+        .unwrap();
+    let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
+    let held = target
+        .for_scope_fenced_in_database(&scope, &fence, &GuardDatabase::Default)
+        .unwrap();
+    held.documents()
+        .put(
+            "docs",
+            "d",
+            serde_json::json!({"value": 1}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    drop(guard);
+    let takeover = FileStorage::open(dir.path())
+        .unwrap()
+        .for_scope(&guard_scope)
+        .unwrap();
+    takeover
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 2}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "docs",
+                "d",
+                serde_json::json!({"value": 2}),
+                tinystoragedrivers_core::Precondition::None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_core::ErrorKind::Fenced
+    );
+    let plain = target.for_scope(&scope).unwrap();
+    assert_eq!(
+        plain
+            .documents()
+            .get("docs", "d")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"value": 1})
+    );
+    assert!(
+        target
+            .for_scope(&Scope::new("bob").unwrap())
+            .unwrap()
+            .documents()
+            .get("docs", "d")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn unrelated_database_roots_have_independent_native_locks() {
+    let left_dir = tempfile::tempdir().unwrap();
+    let right_dir = tempfile::tempdir().unwrap();
+    let left = FileStorage::open(left_dir.path()).unwrap();
+    let right = FileStorage::open(right_dir.path()).unwrap();
+    let held = left.db.lock();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let _other = right.db.lock();
+        done_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    let independent = done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_ok();
+    drop(held);
+    worker.join().unwrap();
+    assert!(
+        independent,
+        "an unrelated directory must not wait for this root"
+    );
+}

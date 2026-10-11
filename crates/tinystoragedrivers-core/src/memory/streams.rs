@@ -5,10 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use super::MemoryFence;
 use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::error::Result;
-use crate::fence::Fence;
 use crate::scope::Scope;
 use crate::stream::{StreamEntry, StreamStore, validate_stream};
 
@@ -19,7 +19,7 @@ pub struct MemoryStreams {
     scope: Scope,
     clock: Clock,
     /// Checked under the lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<MemoryFence>>,
 }
 
 impl std::fmt::Debug for MemoryStreams {
@@ -36,7 +36,7 @@ impl MemoryStreams {
         db: Arc<MemoryDb>,
         scope: Scope,
         clock: Clock,
-        fence: Option<Arc<Fence>>,
+        fence: Option<Arc<MemoryFence>>,
     ) -> Self {
         Self {
             db,
@@ -51,7 +51,7 @@ impl MemoryStreams {
     fn guard(&self, state: &DbState) -> Result<()> {
         match self.fence.as_deref() {
             None => Ok(()),
-            fence => state.guard(fence, (self.clock)()),
+            fence => self.db.guard(state, fence, (self.clock)()),
         }
     }
 

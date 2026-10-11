@@ -16,16 +16,15 @@ mod pushdown;
 use std::fmt;
 use std::sync::Arc;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::Connection;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
-    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp, WriteResult,
-    async_trait, validate_doc, value,
+    Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
+    WriteResult, async_trait, validate_doc, value,
 };
 
 use crate::connection::Db;
-use crate::error::during;
 use crate::fence::{self, Fencing};
 use crate::sql::Tables;
 use crate::storage::Clock;
@@ -37,8 +36,10 @@ pub(crate) fn capabilities() -> Capabilities {
     Capabilities::none()
         .with(Capability::FullText)
         .with(Capability::Transactions)
+        .with(Capability::ValidatedBatch)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
+        .with(Capability::CrossDatabaseFencing)
         .with(Capability::ConditionalStreamAppend)
         .with(Capability::CollectionEnumeration)
 }
@@ -114,15 +115,12 @@ impl SqliteDocuments {
                 if access == Access::Read {
                     return f(conn, ctx);
                 }
-                let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(during("begin"))?;
-                if access == Access::Write {
-                    fence::guard(fencing.as_deref(), &tx, &tables)?;
-                }
-                let out = f(&tx, ctx)?;
-                tx.commit().map_err(during("commit"))?;
-                Ok(out)
+                let fencing = if access == Access::Write {
+                    fencing.as_deref()
+                } else {
+                    None
+                };
+                fence::write(conn, fencing, &tables, |tx| f(tx, ctx))
             })
             .await
     }
@@ -273,7 +271,22 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked(Vec::new(), ops).await
+    }
+
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
         self.with(Access::Write, move |conn, ctx| {
+            for check in &checks {
+                check.validate()?;
+                check.verify(
+                    ops::get(conn, ctx, &check.collection, &check.id)?.map(|found| found.version),
+                )?;
+            }
+
             ops.into_iter()
                 .map(|op| match op {
                     WriteOp::Put {
