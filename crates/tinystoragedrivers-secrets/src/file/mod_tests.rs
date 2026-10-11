@@ -1,12 +1,13 @@
 //! The encrypted file driver: conformance, OpenHuman file compatibility,
 //! key files, and every failure path.
 
+use super::*;
+
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
 use tinystoragedrivers_core::ErrorKind;
 
-use super::*;
 use crate::crypto::hex_decode;
 use crate::crypto::tests::{OPENHUMAN_SECRETS_ENC_HEX, fixture_key};
 use crate::testkit::secrets_conformance;
@@ -366,3 +367,11 @@ fn debug_shows_the_path_but_not_the_key() {
     assert!(debug.contains("/x/secrets.enc"));
     assert!(!debug.contains("0001020304"));
 }
+
+#[cfg(unix)]
+#[path = "unix_birth_tests.rs"]
+mod unix_birth;
+
+#[cfg(windows)]
+#[path = "windows_birth_tests.rs"]
+mod windows_birth;

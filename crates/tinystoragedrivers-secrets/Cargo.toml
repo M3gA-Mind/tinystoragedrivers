@@ -34,8 +34,20 @@ fs4 = { version = "1", default-features = false, features = ["sync"] }
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
 
 [dev-dependencies]
+# Disposable native ACL fixtures; drop removes the fixture after assertions.
+tempfile = { workspace = true }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The birth-mode regression changes umask only inside its disposable child.
+rustix = { version = "1", default-features = false, features = ["process", "fs", "std"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Native handle-bound owner/DACL inspection and fixture-only ACL setup.
+windows-permissions = "0.2"
+# Read the effective native token's user SID without local unsafe code.
+winsafe = { version = "0.0.29", default-features = false, features = ["advapi", "kernel"] }
 
 [features]
 default = []

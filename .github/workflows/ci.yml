@@ -17,6 +17,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  native-secrets:
+    name: Native secret files (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Run the new named regression before a broader suite can fail. These
+      # are native runtime tests; cross-target compilation is not acceptance.
+      - name: Windows empty production handle at birth
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::reserved_empty_file_has_protected_owner_dacl_before_bytes_under_broad_parent -- --exact --nocapture
+      - name: Unix empty production handle at birth
+        if: runner.os != 'Windows'
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::unix_birth::reserved_empty_file_is_owner_only_at_birth_with_permissive_umask -- --exact --nocapture
+      - name: Windows public key data and lock fixture
+        if: ${{ always() && runner.os == 'Windows' }}
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::published_key_data_and_lock_have_protected_owner_dacl_under_broad_parent -- --exact --nocapture
+      # Keep native key/file compatibility evidence even when birth is RED.
+      # MongoDB and Bash service setup remain in the existing Linux lanes.
+      - name: Native existing file and key tests
+        if: always()
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests -- --nocapture
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
