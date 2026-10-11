@@ -99,7 +99,12 @@ async fn search_ignores_text_without_tokens() {
 fn reports_its_driver_and_capabilities() {
     let storage = MemoryStorage::new();
     assert_eq!(storage.driver(), "memory");
-    assert_eq!(storage.capabilities(), Capabilities::all());
+    assert_eq!(
+        storage.capabilities(),
+        Capabilities::all()
+            .without(crate::Capability::PresignedUrls)
+            .without(crate::Capability::StreamingBlobs)
+    );
     assert_eq!(format!("{storage:?}"), "MemoryStorage { .. }");
     let docs = storage.for_scope(&Scope::local()).unwrap();
     assert!(format!("{:?}", docs.documents()).contains("local"));

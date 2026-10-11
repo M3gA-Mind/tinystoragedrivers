@@ -66,11 +66,60 @@ pub(super) async fn run(storage: &ScopedStorage) {
     assert!(ok(blobs.delete(&key).await, "delete"));
     assert!(!ok(blobs.delete(&key).await, "delete missing"));
 
+    key_limits(storage).await;
+
     for bad in ["", "/abs", "a//b", "a/../b", "a/./b"] {
         fails(
             blobs.put(bad, vec![], None).await,
             ErrorKind::InvalidInput,
             "invalid key",
         );
+    }
+}
+
+/// Build a key of exactly the announced byte limit with small path segments,
+/// so local filesystems do not reject one overly long filename component.
+fn boundary_key(limit: usize, utf8: bool) -> String {
+    let mut key = String::new();
+    let mut segment = 0;
+    while key.len() < limit {
+        let remaining = limit - key.len();
+        if segment >= 60 && remaining > 1 {
+            key.push('/');
+            segment = 0;
+        } else if utf8 && remaining >= 2 {
+            key.push('é');
+            segment += 2;
+        } else {
+            key.push('x');
+            segment += 1;
+        }
+    }
+    key
+}
+
+async fn key_limits(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    let limit = blobs.max_key_len();
+    assert!(limit > 0 && limit <= crate::MAX_BLOB_KEY_LEN);
+    for utf8 in [false, true] {
+        let key = boundary_key(limit, utf8);
+        assert_eq!(key.len(), limit);
+        ok(
+            blobs.put(&key, vec![1], None).await,
+            "announced key boundary",
+        );
+        assert_eq!(
+            ok(blobs.get(&key).await, "read boundary")
+                .expect("exists")
+                .bytes,
+            [1]
+        );
+        fails(
+            blobs.put(&(key.clone() + "x"), vec![], None).await,
+            ErrorKind::InvalidInput,
+            "key beyond announced boundary",
+        );
+        ok(blobs.delete(&key).await, "delete boundary");
     }
 }

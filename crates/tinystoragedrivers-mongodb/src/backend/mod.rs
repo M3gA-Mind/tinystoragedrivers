@@ -251,7 +251,8 @@ impl StorageBackend for MongoStorage {
     fn capabilities(&self) -> Capabilities {
         let base = Capabilities::none()
             .with(Capability::FullText)
-            .with(Capability::Ttl);
+            .with(Capability::Ttl)
+            .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
                 .with(Capability::Fencing)

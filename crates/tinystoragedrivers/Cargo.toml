@@ -12,6 +12,8 @@ categories = ["database"]
 publish = false
 
 [dependencies]
+# Optional object-store client; absent from desktop builds by default.
+tinystoragedrivers-s3 = { workspace = true, optional = true }
 # The ports, the memory driver and the shared types. Re-exported wholesale so a
 # consumer takes one dependency.
 tinystoragedrivers-core = { workspace = true }
@@ -33,6 +35,11 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
+# Cloud envelope-encryption key providers; remain optional.
+kms-aws = ["secrets", "tinystoragedrivers-secrets/kms-aws"]
+kms-gcp = ["secrets", "tinystoragedrivers-secrets/kms-gcp"]
+# Independent s3:// blob URLs and composite storage.
+s3 = ["dep:tinystoragedrivers-s3"]
 default = []
 # `sqlite:` URLs and bare paths: the SQLite driver.
 sqlite = ["dep:tinystoragedrivers-sqlite"]

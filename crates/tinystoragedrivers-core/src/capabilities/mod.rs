@@ -28,10 +28,25 @@ pub enum Capability {
     /// handles whose writes the driver checks against a
     /// [`Fence`](crate::Fence) in the same atomic step.
     Fencing,
+    /// Direct object-store GET and PUT URLs, on the blob handle.
+    PresignedUrls,
+    /// Blob reads and writes use bounded buffers rather than whole objects.
+    StreamingBlobs,
+    /// `DocumentStore::collections` enumerates collections with records in
+    /// the handle's scope.
+    CollectionEnumeration,
 }
 
 impl Capability {
-    const ALL: [Self; 4] = [Self::FullText, Self::Transactions, Self::Ttl, Self::Fencing];
+    const ALL: [Self; 7] = [
+        Self::FullText,
+        Self::Transactions,
+        Self::Ttl,
+        Self::Fencing,
+        Self::PresignedUrls,
+        Self::StreamingBlobs,
+        Self::CollectionEnumeration,
+    ];
 
     const fn bit(self) -> u32 {
         match self {
@@ -39,6 +54,9 @@ impl Capability {
             Self::Transactions => 1 << 1,
             Self::Ttl => 1 << 2,
             Self::Fencing => 1 << 3,
+            Self::PresignedUrls => 1 << 4,
+            Self::StreamingBlobs => 1 << 5,
+            Self::CollectionEnumeration => 1 << 6,
         }
     }
 }
@@ -50,6 +68,9 @@ impl fmt::Display for Capability {
             Self::Transactions => "transactions",
             Self::Ttl => "ttl",
             Self::Fencing => "fencing",
+            Self::PresignedUrls => "presigned_urls",
+            Self::StreamingBlobs => "streaming_blobs",
+            Self::CollectionEnumeration => "collection_enumeration",
         })
     }
 }
@@ -87,7 +108,10 @@ impl Capabilities {
             Capability::FullText.bit()
                 | Capability::Transactions.bit()
                 | Capability::Ttl.bit()
-                | Capability::Fencing.bit(),
+                | Capability::Fencing.bit()
+                | Capability::PresignedUrls.bit()
+                | Capability::StreamingBlobs.bit()
+                | Capability::CollectionEnumeration.bit(),
         )
     }
 

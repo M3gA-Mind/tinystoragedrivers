@@ -67,8 +67,13 @@ mod blocking;
 #[cfg(any(test, feature = "testkit"))]
 pub mod conformance;
 
-pub use backend::{ScopedStorage, StorageBackend, validate_database};
-pub use blob::{Blob, BlobMeta, BlobStore, MAX_BLOB_KEY_LEN, clamp_range, validate_blob_key};
+pub use backend::{
+    BackendBlobs, BlobBackend, CompositeStorage, ScopedStorage, StorageBackend, validate_database,
+};
+pub use blob::{
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, clamp_range,
+    validate_blob_key,
+};
 #[cfg(any(test, feature = "blocking"))]
 pub use blocking::Blocking;
 pub use capabilities::{Capabilities, Capability};

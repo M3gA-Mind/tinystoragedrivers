@@ -52,6 +52,32 @@ pub(crate) fn encode(name: &str) -> String {
     out
 }
 
+/// Decode a complete value emitted by [`encode`].
+pub(crate) fn decode(encoded: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut rest = encoded.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let (&high, tail) = tail.split_first()?;
+            let (&low, tail) = tail.split_first()?;
+            let nibble = |digit: u8| match digit {
+                b'0'..=b'9' => Some(digit - b'0'),
+                b'A'..=b'F' => Some(digit - b'A' + 10),
+                _ => None,
+            };
+            bytes.push((nibble(high)? << 4) | nibble(low)?);
+            rest = tail;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        {
+            bytes.push(byte);
+            rest = tail;
+        } else {
+            return None;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn push_escape(out: &mut String, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     out.push('%');

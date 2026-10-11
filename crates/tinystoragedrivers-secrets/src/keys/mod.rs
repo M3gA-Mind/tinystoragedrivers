@@ -1,9 +1,10 @@
-//! Where a data key comes from: [`KeyProvider`] and its two implementations.
+//! Where a data key comes from: [`KeyProvider`], local keys and cloud envelopes.
 //!
 //! [`DocumentSecrets`](crate::DocumentSecrets) asks its provider for the key of
 //! the scope it is bound to on every operation, so a provider can hand each
-//! tenant its own key. Neither implementation here caches anything beyond the
-//! material it was built with, and neither prints it in `Debug`.
+//! tenant its own key. Local providers keep only their initial key material;
+//! [`KmsKeyProvider`](crate::KmsKeyProvider) resolves persisted cloud envelopes
+//! asynchronously. No provider prints key material in `Debug`.
 
 use std::fmt;
 
@@ -15,6 +16,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{KEY_LEN, key_from_hex};
 
 /// Hands out the 32-byte data key for a scope.
+#[async_trait::async_trait]
 pub trait KeyProvider: Send + Sync + fmt::Debug {
     /// The key that encrypts `scope`'s secrets.
     ///
@@ -24,6 +26,15 @@ pub trait KeyProvider: Send + Sync + fmt::Debug {
     /// no key can be produced, or whatever the provider's key source reports
     /// (a KMS outage would be [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable)).
     fn data_key(&self, scope: &Scope) -> Result<Zeroizing<[u8; KEY_LEN]>>;
+
+    /// Resolve a key without blocking the runtime. Local providers use the
+    /// synchronous method; remote providers override this method.
+    ///
+    /// # Errors
+    /// The configured key source failed; no fallback key is permitted.
+    async fn data_key_async(&self, scope: &Scope) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+        self.data_key(scope)
+    }
 }
 
 /// One key for every scope: key material read from the environment, or

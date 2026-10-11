@@ -118,13 +118,13 @@ impl SecretStore for DocumentSecrets {
             .ok_or_else(|| {
                 StorageError::serialization("secret document has no string ciphertext field")
             })?;
-        let key = self.keys.data_key(&self.scope)?;
+        let key = self.keys.data_key_async(&self.scope).await?;
         crypto::decrypt_enc2(&key, ciphertext).map(Some)
     }
 
     async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
         validate_name(name)?;
-        let key = self.keys.data_key(&self.scope)?;
+        let key = self.keys.data_key_async(&self.scope).await?;
         let ciphertext = crypto::encrypt_enc2(&key, value)?;
         self.documents
             .put(

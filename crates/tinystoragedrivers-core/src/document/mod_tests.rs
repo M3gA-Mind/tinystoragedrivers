@@ -260,6 +260,11 @@ async fn optional_operations_default_to_unsupported() {
     );
     let error = baseline.search("c", "x", 1).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported(Capability::FullText));
+    let error = baseline.collections("").await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::CollectionEnumeration)
+    );
     let none = Baseline;
     assert!(none.get("c", "i").await.unwrap().is_none());
     assert_eq!(

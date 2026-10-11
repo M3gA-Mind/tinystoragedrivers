@@ -1,6 +1,6 @@
 //! [`DocumentStore`] for the in-memory driver.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::state::DbState;
 use super::{Clock, MemoryDb};
-use crate::capabilities::Capabilities;
+use crate::capabilities::{Capabilities, Capability};
 use crate::document::{
     CollectionSpec, Cursor, DocumentStore, Page, Precondition, Query, SearchHit, Version,
     Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
@@ -117,7 +117,12 @@ fn parse_cursor(collection: &str, query: &Query) -> Result<usize> {
 #[async_trait]
 impl DocumentStore for MemoryDocuments {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::all()
+        Capabilities::none()
+            .with(Capability::FullText)
+            .with(Capability::Transactions)
+            .with(Capability::Ttl)
+            .with(Capability::Fencing)
+            .with(Capability::CollectionEnumeration)
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
@@ -326,5 +331,20 @@ impl DocumentStore for MemoryDocuments {
             state.remove(self.scope.as_str(), collection, &id);
         }
         Ok(())
+    }
+
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let state = self.db.lock()?;
+        let scope = self.scope.as_str();
+        let names = state
+            .docs
+            .keys()
+            .chain(state.tombstones.keys())
+            .filter(|(stored_scope, collection)| {
+                stored_scope == scope && collection.starts_with(prefix)
+            })
+            .map(|(_, collection)| collection.clone())
+            .collect::<BTreeSet<_>>();
+        Ok(names.into_iter().collect())
     }
 }

@@ -9,6 +9,8 @@
 //! version, and a compare-and-swap prepared before the deletion fails, which
 //! is what the memory driver's tombstone map provides.
 
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +20,7 @@ use tinystoragedrivers_core::{
     sort_documents, validate_collection, validate_doc, validate_id, value,
 };
 
-use crate::encode::{dir_components, file_stem};
+use crate::encode::{decode, dir_components, file_stem};
 use crate::fsio::{files_with_suffix, io_error, read_json, write_json};
 use crate::storage::Db;
 
@@ -271,6 +273,16 @@ impl Docs<'_> {
         Ok(())
     }
 
+    /// Collection names are encoded reversibly in scope-local directory
+    /// components. Only directories holding document records are reported.
+    pub(super) fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let root = self.db.scope_dir(self.scope).join("docs");
+        let mut encoded = String::new();
+        let mut found = BTreeSet::new();
+        collect_collection_dirs(&root, &mut encoded, prefix, &mut found)?;
+        Ok(found.into_iter().collect())
+    }
+
     /// Refuse a declaration whose unique indexes the stored documents of
     /// this collection already violate, in any scope. Liveness follows the
     /// declaration already stored, as in the memory driver.
@@ -291,6 +303,58 @@ impl Docs<'_> {
         }
         Ok(())
     }
+}
+
+fn collect_collection_dirs(
+    dir: &Path,
+    encoded: &mut String,
+    prefix: &str,
+    found: &mut BTreeSet<String>,
+) -> Result<()> {
+    if !files_with_suffix(dir, ".json")?.is_empty()
+        && let Some(name) = decode(encoded)
+        && name.starts_with(prefix)
+    {
+        found.insert(name);
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error("list collection directories")(error)),
+    };
+    let mut children = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_error("list collection directories"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(io_error("inspect a collection directory"))?;
+        let Some(component) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let first_component = encoded.is_empty();
+        if file_type.is_dir()
+            && if first_component {
+                !component.starts_with('+')
+            } else {
+                component.starts_with('+')
+            }
+        {
+            children.push((entry.path(), component));
+        }
+    }
+    children.sort_by(|a, b| a.1.cmp(&b.1));
+    for (child, component) in children {
+        let old_len = encoded.len();
+        if encoded.is_empty() {
+            encoded.push_str(&component);
+        } else {
+            encoded.push_str(&component[1..]);
+        }
+        collect_collection_dirs(&child, encoded, prefix, found)?;
+        encoded.truncate(old_len);
+    }
+    Ok(())
 }
 
 /// Whether `doc` has passed its collection's expiry time.
