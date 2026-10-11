@@ -724,7 +724,6 @@ fn an_unpublishable_key_name_removes_only_its_staged_object() {
     assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
 }
 
-#[cfg(unix)]
 mod publication_pause {
     use std::cell::RefCell;
     type Callback = Box<dyn FnOnce()>;
@@ -757,12 +756,10 @@ mod publication_pause {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_publication_identity() {
     publication_pause::run(false);
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_key_identity() {
     publication_pause::run(true);
 }
@@ -910,4 +907,258 @@ fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publicati
     assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
     assert!(!staged.exists());
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+}
+
+#[cfg(windows)]
+type StageCallback = Box<dyn FnOnce(&Path, &File)>;
+#[cfg(windows)]
+thread_local! {
+    static STAGE_PAUSE: std::cell::RefCell<Option<StageCallback>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(windows)]
+struct StagePause;
+#[cfg(windows)]
+impl StagePause {
+    fn install(callback: impl FnOnce(&Path, &File) + 'static) -> Self {
+        STAGE_PAUSE.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+        Self
+    }
+}
+#[cfg(windows)]
+impl Drop for StagePause {
+    fn drop(&mut self) {
+        STAGE_PAUSE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+#[cfg(windows)]
+pub(super) fn after_private_stage_reservation(path: &Path, file: &File) {
+    let callback = STAGE_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(callback) = callback {
+        callback(path, file);
+    }
+}
+
+#[cfg(windows)]
+fn windows_preserve_and_replace(source: &Path, preserved: &Path, bytes: &[u8]) -> File {
+    let namespace = open_parent(source, false).unwrap();
+    let original = namespace
+        .open_file(secure::file_name(source).unwrap(), false)
+        .unwrap();
+    let original_id = secure::identity(&original).unwrap();
+    fs::rename(source, preserved).unwrap();
+    fixture_write(source, bytes).unwrap();
+    let replacement = namespace
+        .open_file(secure::file_name(source).unwrap(), false)
+        .unwrap();
+    let distinct = secure::identity(&replacement).unwrap() != original_id;
+    assert!(distinct, "replacement must have a distinct native identity");
+    assert_eq!(
+        winapi_util::file::information(&original)
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+    assert_eq!(
+        winapi_util::file::information(&replacement)
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+    original
+}
+#[cfg(windows)]
+fn sole_staged_path(directory: &Path) -> PathBuf {
+    let paths: Vec<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect();
+    assert_eq!(paths.len(), 1);
+    paths.into_iter().next().unwrap()
+}
+#[cfg(windows)]
+fn assert_private_bytes(path: &Path, expected: &[u8]) {
+    let unchanged = fs::read(path).unwrap().as_slice() == expected;
+    assert!(unchanged, "private fixture bytes differ");
+}
+
+#[cfg(windows)]
+#[test]
+fn replaced_private_staging_object_is_rejected_before_payload_and_only_substitute_is_cleaned() {
+    let root = TempDir::new("stage-reservation-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("preserved-empty-stage");
+    let original = preserved.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = StagePause::install(move |source, reserved| {
+        assert_eq!(reserved.metadata().unwrap().len(), 0);
+        let file = windows_preserve_and_replace(source, &original, b"");
+        let same_reserved = secure::identity(&file).unwrap() == secure::identity(reserved).unwrap();
+        assert!(
+            same_reserved,
+            "retained observer must identify the reserved object"
+        );
+        retained.borrow_mut().replace(file);
+    });
+    let error = stage(&target, b"must never be written", &mut next_temp_seq).unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(native.kind(), std::io::ErrorKind::PermissionDenied);
+    let correct_reason = native.to_string() == "staged file identity changed";
+    assert!(correct_reason, "staging must reject changed identity");
+    assert_private_bytes(&preserved, b"");
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    assert!(!target.exists());
+    let guard = observer.borrow();
+    let file = guard.as_ref().unwrap();
+    assert_eq!(
+        winapi_util::file::information(file)
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+    let same_preserved = secure::identity(file).unwrap()
+        == secure::identity(&File::open(&preserved).unwrap()).unwrap();
+    assert!(same_preserved, "preserved object identity changed");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_substituted_staged_ciphertext_is_not_acknowledged() {
+    let root = TempDir::new("ciphertext-identity-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    write_atomic(&target, b"previous ciphertext").unwrap();
+    let preserved = root.0.join("preserved-staged-ciphertext");
+    let directory = root.0.clone();
+    let original = preserved.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let source = sole_staged_path(&directory);
+        retained.borrow_mut().replace(windows_preserve_and_replace(
+            &source,
+            &original,
+            b"substitute ciphertext",
+        ));
+    });
+    let error = write_atomic(&target, b"verified staged ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.message(), "published secrets identity changed");
+    assert_private_bytes(&preserved, b"verified staged ciphertext");
+    assert_private_bytes(&target, b"substitute ciphertext");
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+    assert_eq!(
+        winapi_util::file::information(observer.borrow().as_ref().unwrap())
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_same_identity_staged_byte_mutation_fails_published_readback() {
+    let root = TempDir::new("ciphertext-readback-mutation");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let directory = root.0.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let source = sole_staged_path(&directory);
+        let namespace = open_parent(&source, false).unwrap();
+        let mut file = namespace
+            .open_file(secure::file_name(&source).unwrap(), true)
+            .unwrap();
+        let before = secure::identity(&file).unwrap();
+        file.set_len(0).unwrap();
+        file.write_all(b"changed ciphertext").unwrap();
+        file.sync_all().unwrap();
+        let same_object = secure::identity(&file).unwrap() == before;
+        assert!(same_object, "mutation must preserve native identity");
+        retained.borrow_mut().replace(file);
+    });
+    let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.message(), "published secrets readback differs");
+    assert_private_bytes(&target, b"changed ciphertext");
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    let file = observer.borrow();
+    let same_published = secure::identity(file.as_ref().unwrap()).unwrap()
+        == secure::identity(&File::open(&target).unwrap()).unwrap();
+    assert!(
+        same_published,
+        "mutation observer must identify published object"
+    );
+    assert_eq!(
+        winapi_util::file::information(file.as_ref().unwrap())
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_substituted_staged_key_retains_both_objects_without_acceptance() {
+    let root = TempDir::new("key-identity-substitution");
+    let target = root.0.join(KEY_FILE_NAME);
+    let expected = key_to_hex(&fixture_key());
+    let substitute = key_to_hex(&[42; KEY_LEN]);
+    let staged = stage(&target, expected.as_bytes(), &mut next_temp_seq).unwrap();
+    let preserved = root.0.join("preserved-staged-key");
+    let original = preserved.clone();
+    let source = staged.clone();
+    let changed = substitute.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(true, move || {
+        retained.borrow_mut().replace(windows_preserve_and_replace(
+            &source,
+            &original,
+            changed.as_bytes(),
+        ));
+    });
+    let result = publish_key(&staged, &target, fixture_key());
+    assert!(result.is_err(), "substituted key must not be accepted");
+    let error = result.err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(error.message(), "published key object changed");
+    assert_private_bytes(&preserved, expected.as_bytes());
+    assert_private_bytes(&target, substitute.as_bytes());
+    assert!(!staged.exists());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+    assert_eq!(
+        winapi_util::file::information(observer.borrow().as_ref().unwrap())
+            .unwrap()
+            .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_staging_parent_fails_once_without_creating_sibling() {
+    let root = TempDir::new("reservation-missing-parent");
+    let missing = root.0.join("absent");
+    let target = missing.join(SECRETS_FILE_NAME);
+    let mut attempts = 0;
+    let result = reserve_temp_file(&target, &mut || {
+        attempts += 1;
+        7
+    });
+    assert!(result.is_err(), "missing parent must fail reservation");
+    let error = result.err().unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(error.message(), "could not reserve a private staging file");
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(native.kind(), std::io::ErrorKind::NotFound);
+    assert!(!missing.exists());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
 }
