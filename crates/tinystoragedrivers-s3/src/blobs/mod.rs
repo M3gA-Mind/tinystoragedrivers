@@ -96,6 +96,20 @@ impl S3Config {
         })
     }
 
+    fn configure(&self, builder: AmazonS3Builder) -> AmazonS3Builder {
+        let mut builder = builder
+            .with_bucket_name(&self.bucket)
+            .with_region(&self.region);
+        if let Some(endpoint) = &self.endpoint {
+            builder = builder
+                .with_endpoint(endpoint)
+                .with_config(object_store::aws::AmazonS3ConfigKey::S3Endpoint, endpoint)
+                .with_allow_http(endpoint.starts_with("http://"))
+                .with_virtual_hosted_style_request(false);
+        }
+        builder
+    }
+
     /// Construct a scoped blob handle, using path-style requests for compatible
     /// endpoints. Construction performs no network request.
     ///
@@ -103,15 +117,7 @@ impl S3Config {
     ///
     /// `InvalidInput` for an invalid database name, prefix, or client configuration.
     pub fn blobs(&self, scope: &Scope, database: &str) -> Result<S3Blobs> {
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&self.bucket)
-            .with_region(&self.region);
-        if let Some(endpoint) = &self.endpoint {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_allow_http(endpoint.starts_with("http://"))
-                .with_virtual_hosted_style_request(false);
-        }
+        let builder = self.configure(AmazonS3Builder::from_env());
         let client = Arc::new(builder.build().map_err(map_error)?);
         S3Blobs::with_store(client.clone(), Some(client), &self.prefix, scope, database)
     }
@@ -133,15 +139,7 @@ impl S3Storage {
     ///
     /// Invalid configuration or client construction failure.
     pub fn open(config: &S3Config) -> Result<Self> {
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&config.bucket)
-            .with_region(&config.region);
-        if let Some(endpoint) = &config.endpoint {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_allow_http(endpoint.starts_with("http://"))
-                .with_virtual_hosted_style_request(false);
-        }
+        let builder = config.configure(AmazonS3Builder::from_env());
         let client = Arc::new(builder.build().map_err(map_error)?);
         Self::with_store(client.clone(), Some(client), &config.prefix)
     }

@@ -402,3 +402,18 @@ async fn small_upload_reader_failure_preserves_its_source() {
     );
     assert!(store.head("failed").await.unwrap().is_none());
 }
+
+#[test]
+fn explicit_endpoint_overrides_inherited_service_endpoint() {
+    use object_store::aws::AmazonS3ConfigKey;
+    let config = S3Config::parse("s3://bucket?endpoint=http%3A%2F%2Flocalhost%3A9000").unwrap();
+    let inherited = AmazonS3Builder::new()
+        .with_config(AmazonS3ConfigKey::S3Endpoint, "https://ambient.example.com");
+    let builder = config.configure(inherited);
+    assert_eq!(
+        builder
+            .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
+            .as_deref(),
+        config.endpoint.as_deref()
+    );
+}
