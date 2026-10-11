@@ -672,6 +672,55 @@ fn native_junction_ancestor_is_rejected_without_source_mutation() {
 }
 
 #[cfg(windows)]
+fn set_fixture_owner_preserving_inherited_dacl(file: &File, path: &Path, user: &str) {
+    use windows_permissions::{
+        LocalBox, SecurityDescriptor,
+        constants::{SeObjectType, SecurityInformation},
+        wrappers,
+    };
+    let birth_identity = secure::identity(file).unwrap();
+    let birth_descriptor = native_descriptor(file);
+    let birth_sddl = birth_descriptor.as_sddl().unwrap().into_string().unwrap();
+    let birth_dacl = birth_sddl.split("D:").nth(1).unwrap();
+    // Ordinary native creation can choose a different token default owner.
+    // Set only this disposable fixture's owner before any key bytes arrive;
+    // preserve its genuinely inherited DACL and opened object identity.
+    let Ok(owner_descriptor) = format!("O:{user}").parse::<LocalBox<SecurityDescriptor>>() else {
+        panic!("fixture owner descriptor must be valid");
+    };
+    assert!(
+        wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+            owner_descriptor.owner(),
+            None,
+            None,
+            None,
+        )
+        .is_ok(),
+        "fixture owner setup must succeed"
+    );
+    let descriptor = native_descriptor(file);
+    let owned_sddl = descriptor.as_sddl().unwrap().into_string().unwrap();
+    let dacl_unchanged = owned_sddl.split("D:").nth(1) == Some(birth_dacl);
+    assert!(dacl_unchanged, "fixture owner setup must preserve the DACL");
+    assert!(
+        birth_dacl
+            .split('(')
+            .next()
+            .is_some_and(|flags| !flags.contains('P')),
+        "fixture DACL must remain unprotected and inherited"
+    );
+    assert_eq!(secure::identity(file).unwrap(), birth_identity);
+    let owner_matches = native_owner(file) == user;
+    assert!(
+        owner_matches,
+        "fixture must have the current token user owner"
+    );
+}
+
+#[cfg(windows)]
 #[test]
 fn native_owner_only_inherited_dacl_is_admitted_without_repair() {
     use std::io::Write;
@@ -692,10 +741,10 @@ fn native_owner_only_inherited_dacl_is_admitted_without_repair() {
         .create_new(true)
         .open(&path)
         .unwrap();
-    file.write_all(&encoded()).unwrap();
+    let effective_user = native_effective_user();
+    set_fixture_owner_preserving_inherited_dacl(&file, &path, &effective_user);
     let descriptor = native_descriptor(&file);
     let acl = descriptor.dacl().unwrap();
-    let effective_user = native_effective_user();
     let ace = acl.get_ace(0);
     let ace_user = ace
         .and_then(|ace| ace.sid())
@@ -727,15 +776,24 @@ fn native_owner_only_inherited_dacl_is_admitted_without_repair() {
             .flags()
             .contains(AceFlags::Inherited)
     );
+    assert!(ace.is_some_and(|ace| ace.mask().bits() == 0x001f_01ff));
+    let ace_matches_user = ace_user.as_deref() == Some(effective_user.as_str());
+    assert!(
+        ace_matches_user,
+        "inherited ACE must grant the current token user"
+    );
+    file.write_all(&encoded()).unwrap();
     let before = descriptor.as_sddl().unwrap().into_string().unwrap();
     assert_eq!(read_encoded(&path).unwrap().unwrap(), encoded());
-    assert_eq!(
-        native_descriptor(&file)
-            .as_sddl()
-            .unwrap()
-            .into_string()
-            .unwrap(),
-        before
+    let reader_preserved_descriptor = native_descriptor(&file)
+        .as_sddl()
+        .unwrap()
+        .into_string()
+        .unwrap()
+        == before;
+    assert!(
+        reader_preserved_descriptor,
+        "reader must preserve the source descriptor"
     );
     assert_eq!(inventory(&dir), ["registered"]);
 }
@@ -758,6 +816,7 @@ struct ObservedReader {
     spans: Vec<(usize, usize, usize)>,
     chunk: usize,
     interrupted: bool,
+    terminal_error_after: Option<usize>,
 }
 
 impl ObservedReader {
@@ -772,6 +831,7 @@ impl ObservedReader {
             spans: Vec::new(),
             chunk,
             interrupted: false,
+            terminal_error_after: None,
         }
     }
 }
@@ -783,6 +843,15 @@ impl Read for ObservedReader {
         if self.interrupted {
             self.interrupted = false;
             return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        if self
+            .terminal_error_after
+            .is_some_and(|limit| self.used >= limit)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "synthetic-private-payload",
+            ));
         }
         let count = destination
             .len()
@@ -844,6 +913,32 @@ fn bounded_short_reads_stop_at_eof_or_the_single_overflow_byte() {
             assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
         }
     }
+}
+
+#[test]
+fn interrupted_short_reads_followed_by_timeout_never_return_a_partial_key() {
+    use std::error::Error;
+    let mut reader = ObservedReader::new(64, 17);
+    reader.interrupted = true;
+    reader.terminal_error_after = Some(51);
+    let error = read_bounded(&mut reader).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(error.source().is_none());
+    let diagnostics = format!("{error} {error:?}");
+    assert!(!diagnostics.contains("synthetic-private-payload"));
+    assert!(!diagnostics.contains("AbAb"));
+    assert_eq!(reader.used, 51);
+    assert_eq!(reader.spans.len(), 5);
+    let limit = MAX_HEX_KEY_FILE_BYTES + 1;
+    let base = reader.spans[0].0;
+    assert_eq!(reader.spans[0].1, limit);
+    // Addresses describe only live read destinations; never inspect freed data.
+    assert!(
+        reader
+            .spans
+            .iter()
+            .all(|&(address, span, used)| address == base + used && span == limit - used)
+    );
 }
 
 struct ErroredRead {
