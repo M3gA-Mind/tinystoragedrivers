@@ -360,7 +360,7 @@ fn write_atomic_in(namespace: &secure::Namespace, path: &Path, bytes: &[u8]) -> 
     let expected =
         secure::identity(&staged).map_err(|e| io_error("read the staged identity", e))?;
     drop(staged);
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     tests::after_staged_publication_identity();
     namespace.replace(tmp_name, name).map_err(|e| {
         let _ = namespace.remove(tmp_name);
@@ -564,7 +564,7 @@ fn publish_key(
         .map_err(|e| io_error("retain the staged key identity", e))?;
     let expected =
         secure::identity(&staged).map_err(|e| io_error("inspect the staged key identity", e))?;
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     tests::after_staged_key_identity();
     let linked = namespace.link(temporary, target);
     let cleanup = namespace.remove(temporary);

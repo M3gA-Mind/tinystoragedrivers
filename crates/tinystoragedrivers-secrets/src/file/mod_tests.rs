@@ -724,7 +724,6 @@ fn an_unpublishable_key_name_removes_only_its_staged_object() {
     assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
 }
 
-#[cfg(unix)]
 mod publication_pause {
     use std::cell::RefCell;
     type Callback = Box<dyn FnOnce()>;
@@ -757,12 +756,10 @@ mod publication_pause {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_publication_identity() {
     publication_pause::run(false);
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_key_identity() {
     publication_pause::run(true);
 }
@@ -842,7 +839,6 @@ fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_
     assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publication() {
     let root = TempDir::new("staged-ciphertext-replacement");
@@ -866,7 +862,6 @@ fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publica
     assert_eq!(fs::read(target).unwrap(), b"substitute ciphertext");
 }
 
-#[cfg(unix)]
 #[test]
 fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_material() {
     let root = TempDir::new("staged-ciphertext-mutation");
@@ -878,7 +873,14 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
             .unwrap();
-        fixture_write(staged, b"changed ciphertext").unwrap();
+        // Mutate the admitted object in place, preserving its private ACL and identity.
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(staged)
+            .unwrap()
+            .write_all(b"changed ciphertext")
+            .unwrap();
     });
     let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
@@ -887,7 +889,6 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publication() {
     let root = TempDir::new("staged-key-replacement");
@@ -910,4 +911,27 @@ fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publicati
     assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
     assert!(!staged.exists());
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+}
+
+#[test]
+fn borrowed_namespace_path_reopens_the_same_private_master_key() {
+    let directory = TempDir::new("borrowed-master");
+    let path: &Path = directory.0.as_path();
+    let first = EncryptedFileSecrets::with_key_file(path).unwrap();
+    let bytes = fs::read(path.join(KEY_FILE_NAME)).unwrap();
+    let second = EncryptedFileSecrets::with_key_file(path).unwrap();
+    assert_eq!(*first.inner.key, *second.inner.key);
+    assert_eq!(fs::read(path.join(KEY_FILE_NAME)).unwrap(), bytes);
+    assert_eq!(
+        fs::read_dir(path)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|value| value == "tmp")
+                    .then_some(path)
+            })
+            .count(),
+        0
+    );
 }
