@@ -31,6 +31,17 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// Driver name, for logs: `"memory"`, `"sqlite"`, `"mongodb"`, `"file"`.
     fn driver(&self) -> &'static str;
 
+    /// Native driver supplying this backend's documents and streams.
+    ///
+    /// Ordinary backends report their own driver. Compositions and wrappers
+    /// must preserve the originating record driver rather than a blob driver
+    /// or wrapper label. Hosts can use this identity for their coordination
+    /// policy; it does not grant fencing or prove any optional capability.
+    /// This is immutable metadata and must not open scopes or perform I/O.
+    fn document_driver(&self) -> &'static str {
+        self.driver()
+    }
+
     /// Optional abilities every handle from this backend has.
     fn capabilities(&self) -> Capabilities;
 
