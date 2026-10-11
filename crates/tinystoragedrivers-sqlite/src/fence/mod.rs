@@ -71,11 +71,23 @@ impl Fencing {
         if file.as_os_str().is_empty() {
             return Ok(());
         }
-        conn.execute(
-            "ATTACH DATABASE ?1 AS tsd_fence_guard",
-            [file.to_string_lossy().as_ref()],
-        )
-        .map_err(during("attach guard database"))?;
+        // SQLite accepts filename bytes as TEXT on Unix, just as its native
+        // open path does. A lossy string could attach a different database.
+        #[cfg(unix)]
+        let filename = {
+            use std::os::unix::ffi::OsStrExt;
+            rusqlite::types::ToSqlOutput::Borrowed(rusqlite::types::ValueRef::Text(
+                file.as_os_str().as_bytes(),
+            ))
+        };
+        #[cfg(not(unix))]
+        let filename = file.to_str().ok_or_else(|| {
+            tinystoragedrivers_core::StorageError::invalid_input(
+                "guard database path must be valid Unicode on this platform",
+            )
+        })?;
+        conn.execute("ATTACH DATABASE ?1 AS tsd_fence_guard", [filename])
+            .map_err(during("attach guard database"))?;
         Ok(())
     }
 

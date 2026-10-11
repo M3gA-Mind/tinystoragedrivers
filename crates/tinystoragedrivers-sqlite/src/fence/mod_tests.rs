@@ -206,3 +206,60 @@ fn cross_database_write_cleans_up_attachments_on_success_and_refusal() {
     );
     assert_eq!(attached(&target), 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_guard_path_attaches_the_original_database() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let guard_path = dir.path().join(OsStr::from_bytes(b"guard-\xff.db"));
+    let guard = Connection::open(&guard_path).unwrap();
+    let tables = Arc::new(Tables::new(""));
+    tables.ensure(&guard).unwrap();
+    let ctx = Ctx {
+        tables: &tables,
+        scope: "cluster",
+        now_ms: 1000,
+    };
+    ops::put(
+        &guard,
+        ctx,
+        "leases",
+        "l1",
+        &json!({"epoch": 7}),
+        Precondition::None,
+    )
+    .unwrap();
+    let mut target = Connection::open(dir.path().join("target.db")).unwrap();
+    tables.ensure(&target).unwrap();
+    let fence = Fencing::in_database(
+        fencing(7).fence,
+        Arc::new(|| 1000),
+        Some(guard_path.clone()),
+        Arc::clone(&tables),
+    );
+    let lossy_path = std::path::PathBuf::from(guard_path.to_string_lossy().as_ref());
+    let result = write(&mut target, Some(&fence), &tables, |_| Ok(42));
+    assert_eq!(result.unwrap(), 42);
+    assert!(
+        !lossy_path.exists(),
+        "attachment must not create a replacement filename"
+    );
+    ops::put(
+        &guard,
+        ctx,
+        "leases",
+        "l1",
+        &json!({"epoch": 8}),
+        Precondition::None,
+    )
+    .unwrap();
+    assert_eq!(
+        write(&mut target, Some(&fence), &tables, |_| Ok(42))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+}
