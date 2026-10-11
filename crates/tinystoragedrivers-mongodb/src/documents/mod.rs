@@ -207,6 +207,7 @@ impl DocumentStore for MongoDocuments {
             base.with(Capability::Transactions)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
+                .with(Capability::CrossDatabaseFencing)
         } else {
             base
         }
