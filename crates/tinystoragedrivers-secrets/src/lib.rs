@@ -48,8 +48,8 @@
 //! # Features
 //!
 //! - `keyring`: `KeyringSecrets`, over the `keyring` crate's native stores.
-//! - `kms-aws`: `kms::AwsKms`, AWS KMS with `SigV4` and refreshable credentials.
-//! - `kms-gcp`: `kms::GcpKms`, Google Cloud KMS with scope AAD and refreshable tokens.
+//! - `kms-aws`: `AwsKms`, AWS KMS with `SigV4` and refreshable credentials.
+//! - `kms-gcp`: `GcpKms`, Google Cloud KMS with scope AAD and refreshable tokens.
 //! - `testkit`: `testkit::secrets_conformance`, the suite every driver runs.
 //!
 //! This crate holds no policy: which secrets exist, how names are namespaced
@@ -61,7 +61,7 @@ mod file;
 #[cfg(feature = "keyring")]
 mod keyring;
 mod keys;
-pub mod kms;
+mod kms;
 mod memory;
 mod store;
 mod task;
@@ -74,7 +74,11 @@ pub use file::{EncryptedFileSecrets, KEY_FILE_NAME, SECRETS_FILE_NAME, load_or_c
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
 pub use keys::{DerivedKeys, KeyProvider, StaticKey};
-pub use kms::{KmsClient, KmsKeyProvider};
+#[cfg(feature = "kms-aws")]
+pub use kms::{AwsCredentials, AwsCredentialsProvider, AwsKms};
+pub use kms::{ENVELOPE_COLLECTION, ENVELOPE_ID, KmsClient, KmsKeyProvider};
+#[cfg(feature = "kms-gcp")]
+pub use kms::{GcpAccessTokenProvider, GcpKms};
 pub use memory::MemorySecrets;
 pub use store::{MAX_SECRET_NAME_LEN, SecretStore, validate_name, validate_prefix};
 

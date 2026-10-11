@@ -34,8 +34,8 @@ fs4 = { version = "1", default-features = false, features = ["sync"] }
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
 
 # Cloud KMS transports are opt-in; no cloud SDK enters desktop builds.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-bytes = { version = "1", optional = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
+bytes = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 hmac = { version = "0.12", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
