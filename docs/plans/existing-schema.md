@@ -28,17 +28,22 @@ zero create/createIndexes/dropIndexes/drop/collMod commands after trusted schema
 preparation. Scoped document deletion remains permitted and fenced.
 
 Fresh strict all-target/all-feature Clippy, all-target/all-feature build,
-formatting and diff checks pass. Full fresh coverage is still required before
-publication: the canonical Secret Service supplement currently reads a hardcoded
-`tinystoragedrivers-profraw-list`, whereas cargo-llvm-cov names the inventory after
-the linked checkout. The existing fail-closed `profile_directory` selector and
-two tests cover this distinction for the I/O and key-race helpers; the newly
-merged Secret Service helper needs the same selection. No inventory alias,
-ignored supplement or relaxed coverage threshold is used.
+warnings-denied rustdoc, formatting and diff checks pass. The default workspace
+run passed 510 Rust tests and 25 doctests without live-service environment
+variables. Fresh full coverage passed 547 Rust tests with both Mongo fixtures,
+eight actual native syscall failure injections, the actual two-link key publisher
+and concurrent reader proof, and actual isolated Secret Service. All 75 executable
+production files have at least 90% line coverage (minimum 90.1515%). The linked
+checkout coverage selector is an explicit pure-tooling dependency on PR20
+(`a44e09f`), merged with preserved history while that PR awaits canonical publication.
+It fixes all three native supplements, including the newly merged Secret Service
+helper, and fails closed for an absent, empty or ambiguous current inventory.
+Two Python tests passed, including a probe through the actual I/O helper entry
+point with a misleading stale inventory present. No inventory alias, ignored
+supplement or relaxed coverage threshold is used.
 
-Earlier measured coverage (533 tests, native failure/concurrency supplements,
-75 executable production files each at least 90%) predates this final canonical
-merge and is historical evidence only. Constructor and native-port acceptance
+Earlier measured coverage (533 tests) predates this final canonical merge and is
+historical evidence only. Constructor and native-port acceptance
 here do not prove OpenHuman ProfileHost binding. That host composition, the
 TinyAgents restricted initialization mode, and migration/import authority remain
 separate integrations; no local-file fallback is introduced by this contract.
