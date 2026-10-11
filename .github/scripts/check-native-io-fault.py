@@ -11,7 +11,7 @@ from pathlib import Path
 
 import sys
 sys.dont_write_bytecode = True
-from native_provenance import capture_provenance
+from native_provenance import capture_provenance, profile_directory
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST = "file::migration::tests::native_io_fault_preserves_source_and_reconciles_publication"
@@ -35,11 +35,7 @@ def main():
     profile_env = subprocess.check_output(["cargo", "llvm-cov", "show-env"], cwd=ROOT, text=True)
     profile = next(shlex.split(line.split("=", 1)[1])[0] for line in profile_env.splitlines()
                    if line.startswith("LLVM_PROFILE_FILE="))
-    report_profiles = (ROOT / "target/llvm-cov-target/tinystoragedrivers-profraw-list").read_text().splitlines()
-    directories = {Path(name).parent for name in report_profiles if name}
-    if len(directories) != 1:
-        raise RuntimeError("native report profile directory is ambiguous")
-    profile = str(directories.pop() / Path(profile).name)
+    profile = str(profile_directory(ROOT) / Path(profile).name)
     environment = {**os.environ, "LLVM_PROFILE_FILE": profile}
     trace = evidence / "baseline.trace"
     base = subprocess.run(["strace", "-f", "-qq", "-yy", "-e", "trace=fsync,renameat", "-o", str(trace), *command],

@@ -19,6 +19,7 @@ cargo llvm-cov \
 
 # Include the real native publication failure and concurrency executions in
 # this full-workspace report, just as the dedicated native secrets lane does.
+python3 .github/scripts/native_profile_tests.py
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
 python3 .github/scripts/check-native-secret-service.py --coverage
