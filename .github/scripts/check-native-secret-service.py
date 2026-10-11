@@ -16,6 +16,10 @@ import sys
 import tempfile
 import time
 
+sys.dont_write_bytecode = True
+
+from native_provenance import profile_directory
+
 ROOT = Path(__file__).resolve().parents[2]
 RECEIPT_FIELDS = {"private_bus_owner", "default_collection_unlocked",
                   "set_get_exact_readback_delete_no_entry", "locked_fixture_seeded",
@@ -181,12 +185,10 @@ def main():
             profile = next(shlex.split(line.split("=", 1)[1])[0]
                            for line in result.stdout.decode().splitlines()
                            if line.startswith("LLVM_PROFILE_FILE="))
-            directories = {Path(name).parent for name in
-                           (ROOT / "target/llvm-cov-target/tinystoragedrivers-profraw-list").read_text().splitlines() if name}
-            if result.returncode or len(directories) != 1:
+            if result.returncode:
                 print("isolated_secret_service_admitted=false")
                 return 1
-            env["LLVM_PROFILE_FILE"] = str(directories.pop() / Path(profile).name)
+            env["LLVM_PROFILE_FILE"] = str(profile_directory(ROOT) / Path(profile).name)
         config = state / "bus.conf"
         config.write_text(bus_configuration())
         command = ["dbus-run-session", "--config-file", str(config), "--", sys.executable,
