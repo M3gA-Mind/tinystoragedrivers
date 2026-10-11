@@ -10,8 +10,19 @@ async fn live_a_newer_search_declaration_retries_the_index_build_before_publicat
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return Ok(());
     };
-    let database = format!("spec_merge_{}", std::process::id());
-    let backend = MongoStorage::connect(&url, &database).await.unwrap();
+    let configured = mongodb::options::ClientOptions::parse(&url)
+        .await
+        .unwrap()
+        .default_database
+        .unwrap_or_else(|| "tsd_test".into());
+    let fixture = format!("spec_merge_{}", mongodb::bson::oid::ObjectId::new());
+    let backend = MongoStorage::connect(&url, &configured)
+        .await
+        .unwrap()
+        .fixture_named(&fixture)
+        .unwrap();
+    assert_eq!(backend.shared.db.name(), configured);
+    assert!(!backend.shared.prefix.is_empty());
     let name = "search_union";
     let first = CollectionSpec::new(name).searchable(["first"]);
     let second = CollectionSpec::new(name).searchable(["second"]);
