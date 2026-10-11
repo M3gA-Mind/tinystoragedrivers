@@ -55,6 +55,11 @@ file keeps the operation pending and causes manifest replanning.
 MongoDB standalone deployments refuse ScopePurge. MongoDB Atomic mode and
 native fenced GridFS purge refuse their unsupported guarantees before starting.
 Native error kinds and causes remain intact. Corrupt authority fails closed.
+A pre-reset registration may omit reset fields; once any reset marker exists,
+all authority fields are required. Manifest publication, chunk deletion,
+file/manifest removal and completion validate and write the same native
+authority row in their transactions. A delayed overlapping reset stage cannot
+commit destructive work against replacement data after completion.
 
 ## Invariants
 
@@ -73,7 +78,8 @@ Conformance must exercise default and named databases, supported mode selection,
 all-port replacement preservation, and historical status/retry after two resets.
 Native tests must also prove persisted reopen, upgrade backfill, corruption,
 rollback, staged interruption/resume, late GridFS files and stale-generation
-reads. Live MongoDB checks use local replica and standalone fixtures.
+reads. Missing reset authority fields and delayed overlapping planner/eraser
+stages must fail closed while replacement blobs remain intact. Live MongoDB checks use local replica and standalone fixtures.
 
 Before publication, run the owning workspace gates, strict Clippy/rustdoc and
 per-file coverage. The [publication plan](../plans/scope-purge.md) tracks the

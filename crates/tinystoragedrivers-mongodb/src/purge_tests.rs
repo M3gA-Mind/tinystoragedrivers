@@ -62,7 +62,9 @@ fn admission_and_receipts_fail_closed_on_malformed_authority() {
     );
     assert_eq!(
         verify(
-            Some(&doc! {"generation": 0_i64, "pending": true}),
+            Some(
+                &doc! {"generation": 0_i64, "pending": true, "operation": "r", "stage": "records"}
+            ),
             ScopeGeneration::default()
         )
         .unwrap_err()
@@ -80,6 +82,135 @@ fn admission_and_receipts_fail_closed_on_malformed_authority() {
             ErrorKind::Serialization
         );
     }
+}
+
+#[tokio::test]
+async fn missing_reset_authority_fields_never_reopen_retired_or_pending_ports() {
+    for missing in ["generation", "pending"] {
+        let Some((backend, scope)) = live(missing).await else {
+            return;
+        };
+        let original = backend.for_scope(&scope).unwrap();
+        let request = PurgeRequest {
+            operation_id: "authority_reset".into(),
+            mode: PurgeMode::Quiescent,
+        };
+        let reset = port(&backend, &scope);
+        let receipt = if missing == "generation" {
+            reset.purge(&request).await.unwrap()
+        } else {
+            reset.begin(&request).await.unwrap()
+        };
+        let current = backend
+            .for_scope_generation(&scope, receipt.generation)
+            .unwrap();
+        if missing == "generation" {
+            current
+                .documents()
+                .put(
+                    "records",
+                    "replacement",
+                    json!({"keep":true}),
+                    Precondition::Absent,
+                )
+                .await
+                .unwrap();
+            current.streams().append("events", json!(1)).await.unwrap();
+            current
+                .blobs()
+                .put("replacement", vec![7], None)
+                .await
+                .unwrap();
+        }
+        let mut unset = Document::new();
+        unset.insert(missing, "");
+        backend
+            .shared
+            .raw(ADMISSIONS)
+            .update_one(doc! {"_id": scope_key(&scope)}, doc! {"$unset": unset})
+            .await
+            .unwrap();
+        let rejected = if missing == "generation" {
+            &original
+        } else {
+            &current
+        };
+        let kinds = [
+            rejected
+                .documents()
+                .get("records", "replacement")
+                .await
+                .err()
+                .map(|e| e.kind()),
+            rejected
+                .streams()
+                .len("events")
+                .await
+                .err()
+                .map(|e| e.kind()),
+            rejected
+                .blobs()
+                .get("replacement")
+                .await
+                .err()
+                .map(|e| e.kind()),
+        ];
+        assert_eq!(
+            kinds,
+            [Some(ErrorKind::Serialization); 3],
+            "missing {missing} must not reopen ports"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delayed_overlapping_reset_stages_never_delete_replacement_blobs() {
+    let Some((backend, scope)) = live("overlapping_resume").await else {
+        return;
+    };
+    let reset = port(&backend, &scope);
+    let request = PurgeRequest {
+        operation_id: "overlapping_reset".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    reset.begin(&request).await.unwrap();
+    reset.records(&request.operation_id).await.unwrap();
+    // A planner has selected this stage but is delayed before it enumerates.
+    assert_eq!(
+        reset.begin(&request).await.unwrap().stage,
+        PurgeStage::BlobManifest
+    );
+    reset.plan_blobs(&request.operation_id).await.unwrap();
+    // Another caller selects erasure and is delayed before reading its manifest.
+    assert_eq!(
+        reset.begin(&request).await.unwrap().stage,
+        PurgeStage::Blobs
+    );
+    let receipt = reset.purge(&request).await.unwrap();
+    let current = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![9; 600_000], None)
+        .await
+        .unwrap();
+    let planner = reset.plan_blobs(&request.operation_id).await;
+    let manifest_count = backend
+        .shared
+        .raw(MANIFEST)
+        .count_documents(doc! {"scope":scope.as_str(),"operation":&request.operation_id})
+        .await
+        .unwrap();
+    let eraser = reset.erase_blobs(&request.operation_id).await;
+    let replacement = current.blobs().get("replacement").await.unwrap();
+    assert!(planner.is_err() && eraser.is_err());
+    assert!(
+        manifest_count == 0 && replacement.is_some(),
+        "stale stages recorded {manifest_count} replacement entries; replacement survived={}",
+        replacement.is_some()
+    );
+    assert_eq!(replacement.unwrap().bytes, vec![9; 600_000]);
 }
 
 #[tokio::test]

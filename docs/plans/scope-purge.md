@@ -30,3 +30,19 @@ and every native supplement passed the 90 percent gate across 81 production
 files. Strict workspace Clippy, build, rustdoc, formatting and default-feature
 tests also passed, followed by all 27 all-feature doctests. Upstream publication
 and hosted CI remain pending; host integration is outside this native review.
+
+Independent review found two MongoDB authority defects before publication:
+missing generation/pending fields admitted invalid handles, and delayed reset
+stages could publish and erase replacement blob IDs after completion. Both
+behavioral regressions failed against the unfixed implementation. Complete
+authority decoding and transactions sharing the scope authority row now pass
+all 13 focused real-replica purge tests, including partial chunk failure and
+late-writer replanning. Independent read-only rereview approves these fixes.
+The earlier full-gate results above precede these changes. Fresh full coverage
+now passes all 81 production files at 90 percent or above, including Mongo purge
+at 238/264 lines (90.15 percent), with real replica/standalone fixtures and all
+native supplements. Fresh strict workspace Clippy, build and rustdoc pass;
+default workspace tests pass (544 reported cases, live-only cases explicitly
+gated without native URLs in that run), and all 27 all-feature doctests pass.
+The full coverage run separately supplied actual replica/standalone fixtures.
+All local publication gates are now green; hosted checks remain pending.

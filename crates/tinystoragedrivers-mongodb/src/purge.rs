@@ -12,25 +12,24 @@ pub(crate) fn scope_key(scope: &Scope) -> String {
 }
 
 fn verify(document: Option<&Document>, expected: ScopeGeneration) -> Result<()> {
-    let current = match &document {
-        Some(record) if record.contains_key("generation") => record
-            .get_i64("generation")
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| StorageError::serialization("malformed scope generation"))?,
-        _ => 0,
-    };
-    let pending = document
-        .as_ref()
-        .filter(|record| record.contains_key("pending"))
-        .map(|record| {
-            record
-                .get_bool("pending")
-                .map_err(|_| StorageError::serialization("malformed reset admission"))
+    // Before the first reset, scope-validation registrations have no reset
+    // fields. Any reset marker requires the complete authority record.
+    let receipt = document
+        .filter(|record| {
+            ["generation", "pending", "operation", "stage"]
+                .iter()
+                .any(|field| record.contains_key(*field))
         })
-        .transpose()?
-        .unwrap_or(false);
-    if pending || current != expected.0 {
+        .map(decode)
+        .transpose()?;
+    let current = receipt
+        .as_ref()
+        .map_or(ScopeGeneration::default(), |receipt| receipt.generation);
+    if receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.status == PurgeStatus::Pending)
+        || current != expected
+    {
         return Err(StorageError::fenced(
             "scope reset is pending or this handle generation has retired",
         ));
@@ -156,19 +155,21 @@ impl MongoPurge {
         self.shared.prepare_validation(Some(&self.scope)).await?;
         // Initialize the internal collection before a transaction could need
         // to create it. This is trusted native reset metadata, never tenant data.
-        let initialized = self
-            .shared
-            .raw(RECEIPTS)
-            .update_one(
-                doc! {"_id": "metadata"},
-                doc! {"$setOnInsert": {"version": 1_i64}},
-            )
-            .upsert(true)
-            .await;
-        if let Err(error) = initialized {
-            let error = errors::map(error, "initialize reset receipt metadata");
-            if error.kind() != tinystoragedrivers_core::ErrorKind::AlreadyExists {
-                return Err(error);
+        for collection in [RECEIPTS, MANIFEST] {
+            let initialized = self
+                .shared
+                .raw(collection)
+                .update_one(
+                    doc! {"_id": "metadata"},
+                    doc! {"$setOnInsert": {"version": 1_i64}},
+                )
+                .upsert(true)
+                .await;
+            if let Err(error) = initialized {
+                let error = errors::map(error, "initialize reset metadata");
+                if error.kind() != tinystoragedrivers_core::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
             }
         }
         in_write!(&self.shared, None, session => {
@@ -285,6 +286,12 @@ impl MongoPurge {
 
     /// Keep one durable manifest record per file, avoiding BSON document limits.
     async fn plan_blobs(&self, operation: &str) -> Result<()> {
+        let admitted = in_write!(&self.shared, None, session => {
+            Ok(self.pending(operation, session).await?.stage == PurgeStage::BlobManifest)
+        })?;
+        if !admitted {
+            return Ok(());
+        }
         let mut files = self
             .shared
             .raw(&format!("{BLOBS}.files"))
@@ -300,14 +307,24 @@ impl MongoPurge {
             let id = file
                 .get("_id")
                 .ok_or_else(|| StorageError::serialization("blob has no identity"))?;
-            manifest.update_one(
-                doc! {"_id": {"s": self.scope.as_str(), "o": operation, "f": id}},
-                doc! {"$setOnInsert": {"scope": self.scope.as_str(), "operation": operation, "file_id": id}},
-            ).upsert(true).await.map_err(errors::failed("persist reset blob manifest"))?;
+            // Completion and every manifest publication touch the same native
+            // authority row. A stale planner cannot commit replacement IDs.
+            let recorded = in_write!(&self.shared, None, session => {
+                if self.pending(operation, &mut *session).await?.stage != PurgeStage::BlobManifest {
+                    return Ok(false);
+                }
+                manifest.update_one(
+                    doc! {"_id": {"s": self.scope.as_str(), "o": operation, "f": id}},
+                    doc! {"$setOnInsert": {"scope": self.scope.as_str(), "operation": operation, "file_id": id}},
+                ).upsert(true).session(session).await.map_err(errors::failed("persist reset blob manifest"))?;
+                Ok(true)
+            })?;
+            if !recorded {
+                break;
+            }
         }
         in_write!(&self.shared, None, session => {
-            let receipt = self.pending(operation, &mut *session).await?;
-            if receipt.stage == PurgeStage::BlobManifest {
+            if self.pending(operation, &mut *session).await?.stage == PurgeStage::BlobManifest {
                 self.advance(operation, "blobs", session).await?;
             }
             Ok(())
@@ -316,6 +333,12 @@ impl MongoPurge {
 
     /// Chunks precede file deletion: on any failure the manifest retains ownership.
     async fn erase_blobs(&self, operation: &str) -> Result<()> {
+        in_write!(&self.shared, None, session => {
+            if self.pending(operation, session).await?.stage != PurgeStage::Blobs {
+                return Err(StorageError::conflict("reset blob stage changed"));
+            }
+            Ok(())
+        })?;
         let manifest = self.shared.raw(MANIFEST);
         let mut entries = manifest
             .find(doc! {"scope": self.scope.as_str(), "operation": operation})
@@ -329,61 +352,58 @@ impl MongoPurge {
             let id = entry
                 .get("file_id")
                 .ok_or_else(|| StorageError::serialization("manifest has no blob identity"))?;
-            self.shared
-                .raw(&format!("{BLOBS}.chunks"))
-                .delete_many(doc! {"files_id": id})
-                .await
-                .map_err(errors::failed("erase reset blob chunks"))?;
+            // Each destructive commit validates pending authority in the same
+            // transaction. Completion cannot race a delayed destructive step.
+            in_write!(&self.shared, None, session => {
+                if self.pending(operation, &mut *session).await?.stage != PurgeStage::Blobs {
+                    return Err(StorageError::conflict("reset blob stage changed"));
+                }
+                self.shared.raw(&format!("{BLOBS}.chunks"))
+                    .delete_many(doc! {"files_id": id}).session(session).await
+                    .map_err(errors::failed("erase reset blob chunks"))?;
+                Ok(())
+            })?;
             #[cfg(test)]
             if self.fail_after_chunks {
                 return Err(StorageError::backend(
                     "injected failure after durable chunk erasure",
                 ));
             }
-
-            self.shared
-                .raw(&format!("{BLOBS}.files"))
-                .delete_one(doc! {"_id": id, "metadata._scope": self.scope.as_str()})
-                .await
-                .map_err(errors::failed("erase reset blob file"))?;
-            manifest
-                .delete_one(doc! {"_id": entry.get("_id").cloned().unwrap_or_default()})
-                .await
-                .map_err(errors::failed("finish reset blob manifest entry"))?;
-        }
-        if manifest
-            .count_documents(doc! {"scope": self.scope.as_str(), "operation": operation})
-            .await
-            .map_err(errors::failed("verify reset blob manifest"))?
-            != 0
-        {
-            return Err(StorageError::unavailable(
-                "reset blob manifest is not empty; resume",
-            ));
-        }
-        if self
-            .shared
-            .raw(&format!("{BLOBS}.files"))
-            .count_documents(doc! {"metadata._scope": self.scope.as_str()})
-            .await
-            .map_err(errors::failed("verify reset blobs"))?
-            != 0
-        {
             in_write!(&self.shared, None, session => {
-                self.pending(operation, &mut *session).await?;
-                self.advance(operation, "blob_manifest", session).await
+                if self.pending(operation, &mut *session).await?.stage != PurgeStage::Blobs {
+                    return Err(StorageError::conflict("reset blob stage changed"));
+                }
+                self.shared.raw(&format!("{BLOBS}.files"))
+                    .delete_one(doc! {"_id": id, "metadata._scope": self.scope.as_str()})
+                    .session(&mut *session).await.map_err(errors::failed("erase reset blob file"))?;
+                manifest.delete_one(doc! {"_id": entry.get("_id").cloned().unwrap_or_default()})
+                    .session(session).await.map_err(errors::failed("finish reset blob manifest entry"))?;
+                Ok(())
             })?;
+        }
+        let complete = in_write!(&self.shared, None, session => {
+            if self.pending(operation, &mut *session).await?.stage != PurgeStage::Blobs {
+                return Err(StorageError::conflict("reset blob stage changed"));
+            }
+            if manifest.count_documents(doc! {"scope": self.scope.as_str(), "operation": operation})
+                .session(&mut *session).await.map_err(errors::failed("verify reset blob manifest"))? != 0 {
+                return Err(StorageError::unavailable("reset blob manifest is not empty; resume"));
+            }
+            if self.shared.raw(&format!("{BLOBS}.files"))
+                .count_documents(doc! {"metadata._scope": self.scope.as_str()})
+                .session(&mut *session).await.map_err(errors::failed("verify reset blobs"))? != 0 {
+                self.advance(operation, "blob_manifest", session).await?;
+                return Ok(false);
+            }
+            self.advance(operation, "complete", session).await?;
+            Ok(true)
+        })?;
+        if !complete {
             return Err(StorageError::unavailable(
                 "blob writers were not drained; reset remains pending and must replan",
             ));
         }
-        in_write!(&self.shared, None, session => {
-            let receipt = self.pending(operation, &mut *session).await?;
-            if receipt.stage != PurgeStage::Blobs {
-                return Err(StorageError::conflict("reset blob stage changed"));
-            }
-            self.advance(operation, "complete", session).await
-        })
+        Ok(())
     }
 }
 
