@@ -29,21 +29,20 @@ use mongodb::ClientSession;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Filter, Page, Precondition,
-    Query, RESERVED_PREFIX, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
-    WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
+    Query, RESERVED_PREFIX, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
+    Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
 use crate::errors;
-use crate::fence::in_fence;
+use crate::fence::in_write;
 use crate::naming::{decode_cursor, encode_cursor};
 use crate::scoped::ScopedCollection;
 
 /// How many times a claim retries after another claimer took its pick.
 const CLAIM_ATTEMPTS: usize = 64;
 
-/// How many times a batch retries a transaction the server aborted as
-/// transient.
+/// Retry an uncertain commit without replaying the transaction.
 const TRANSACTION_ATTEMPTS: usize = 8;
 
 /// What a failed commit means for the batch.
@@ -103,7 +102,17 @@ impl MongoDocuments {
         validate_collection(collection)?;
         self.prepare(collection).await?;
         self.shared.spec(collection).await?;
+        self.shared.prepare_validation(Some(&self.scope)).await?;
         Ok(())
+    }
+
+    /// Every logical document mutation and checked batch writes this driver
+    /// metadata in its transaction. This prevents Mongo snapshot write skew
+    /// without rewriting dependencies or changing their logical versions.
+    pub(crate) async fn hold_validation(&self, session: &mut ClientSession) -> Result<()> {
+        self.shared
+            .hold_validation(Some(&self.scope), session)
+            .await
     }
 
     /// One claim attempt: pick the first match and compare-and-swap it.
@@ -154,6 +163,10 @@ impl MongoDocuments {
     ) -> Result<Vec<WriteResult>> {
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
+            let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+            self.shared
+                .spec_in_session(collection, &mut *session)
+                .await?;
             results.push(match op {
                 WriteOp::Put {
                     collection,
@@ -205,6 +218,7 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
         } else {
@@ -235,21 +249,25 @@ impl DocumentStore for MongoDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
-        let Some(fence) = &self.fence else {
+        if !self.shared.physical_transactions {
             return self.put_one(collection, id, &doc, precondition, None).await;
-        };
+        }
         self.ready(collection).await?;
-        in_fence!(&self.shared, fence, session => {
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            self.shared.spec_in_session(collection, &mut *session).await?;
             self.put_one(collection, id, &doc, precondition, Some(session)).await
         })
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
-        let Some(fence) = &self.fence else {
+        if !self.shared.physical_transactions {
             return self.delete_one(collection, id, precondition, None).await;
-        };
+        }
         self.ready(collection).await?;
-        in_fence!(&self.shared, fence, session => {
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            self.shared.spec_in_session(collection, &mut *session).await?;
             self.delete_one(collection, id, precondition, Some(session)).await
         })
     }
@@ -274,12 +292,14 @@ impl DocumentStore for MongoDocuments {
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
-        let Some(fence) = &self.fence else {
+        if !self.shared.physical_transactions {
             let pairs = self.live_pairs(collection, filter).await?;
             return self.remove(collection, &pairs, None).await;
-        };
+        }
         self.ready(collection).await?;
-        in_fence!(&self.shared, fence, session => {
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            self.shared.spec_in_session(collection, &mut *session).await?;
             match self.live_pairs(collection, filter).await {
                 Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
                 Err(error) => Err(error),
@@ -297,16 +317,14 @@ impl DocumentStore for MongoDocuments {
         validate_doc(patch)?;
         validate_collection(collection)?;
         filter.validate()?;
-        if self.fence.is_some() {
+        if self.shared.physical_transactions {
             self.ready(collection).await?;
         }
         for _ in 0..CLAIM_ATTEMPTS {
-            let outcome = match &self.fence {
-                None => self.claim_once(collection, filter, sort, patch, None).await,
-                // A lost compare-and-swap commits nothing but the fence hold
-                // and comes back as `None`, so the claim retries rather than
-                // failing out of the fenced transaction.
-                Some(fence) => in_fence!(&self.shared, fence, session => {
+            let outcome = if self.shared.physical_transactions {
+                in_write!(&self.shared, self.fence.as_deref(), session => {
+                    self.hold_validation(session).await?;
+                    self.shared.spec_in_session(collection, &mut *session).await?;
                     match self.claim_once(collection, filter, sort, patch, Some(session)).await {
                         Err(error) if error.kind() == ErrorKind::Conflict => Ok(None),
                         other => other.map(Some),
@@ -314,7 +332,9 @@ impl DocumentStore for MongoDocuments {
                 })
                 .and_then(|step| {
                     step.ok_or_else(|| StorageError::conflict("claim lost to a concurrent claimer"))
-                }),
+                })
+            } else {
+                self.claim_once(collection, filter, sort, patch, None).await
             };
             match outcome {
                 Ok(claimed) => return Ok(claimed),
@@ -328,69 +348,46 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        if let Some(fence) = &self.fence {
-            for op in &ops {
-                let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
-                self.ready(collection).await?;
-            }
-            return in_fence!(&self.shared, fence, session => {
-                self.run_batch(&ops, session).await
-            });
-        }
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
                 Capability::Transactions,
-                "this MongoDB deployment is not a replica set or sharded cluster",
+                "this MongoDB handle disables public transactions",
             ));
         }
-        // Index builds cannot run inside a transaction: do them first.
+        self.atomic_batch_checked(Vec::new(), ops).await
+    }
+
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::ValidatedBatch,
+                "this MongoDB handle disables validated batches",
+            ));
+        }
+        self.shared.prepare_validation(Some(&self.scope)).await?;
+        for check in &checks {
+            check.validate()?;
+            self.ready(&check.collection).await?;
+        }
         for op in &ops {
             let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
-            validate_collection(collection)?;
-            self.prepare(collection).await?;
-            self.shared.spec(collection).await?;
+            self.ready(collection).await?;
         }
-        let mut session = self
-            .shared
-            .client
-            .start_session()
-            .await
-            .map_err(errors::failed("start a session"))?;
-        let mut last = StorageError::unavailable("transaction kept aborting; retry");
-        for _ in 0..TRANSACTION_ATTEMPTS {
-            session
-                .start_transaction()
-                .await
-                .map_err(errors::failed("start a transaction"))?;
-            let outcome = self.run_batch(&ops, &mut session).await;
-            let results = match outcome {
-                Ok(results) => results,
-                Err(error) => {
-                    let _ = session.abort_transaction().await;
-                    if error.is_retryable() {
-                        last = error;
-                        continue;
-                    }
-                    return Err(error);
-                }
-            };
-            match Self::commit(&mut session).await {
-                Ok(()) => return Ok(results),
-                Err(error) => match commit_failure(&error) {
-                    CommitFailure::Aborted => last = errors::map(error, "commit a transaction"),
-                    CommitFailure::Unknown => {
-                        return Err(StorageError::backend(
-                            "the transaction may or may not have committed; read before retrying",
-                        )
-                        .with_source(error));
-                    }
-                    CommitFailure::Failed => {
-                        return Err(errors::map(error, "commit a transaction"));
-                    }
-                },
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            for check in &checks {
+                let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
+                let now = self.shared.now();
+                let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
+                    .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
+                check.verify(current)?;
             }
-        }
-        Err(last)
+            self.run_batch(&ops, session).await
+        })
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
@@ -400,13 +397,15 @@ impl DocumentStore for MongoDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
-        let Some(fence) = &self.fence else {
+        if !self.shared.physical_transactions {
             let pairs = self.matching_pairs(collection, &Filter::All).await?;
             self.remove(collection, &pairs, None).await?;
             return Ok(());
-        };
+        }
         self.ready(collection).await?;
-        in_fence!(&self.shared, fence, session => {
+        in_write!(&self.shared, self.fence.as_deref(), session => {
+            self.hold_validation(session).await?;
+            self.shared.spec_in_session(collection, &mut *session).await?;
             match self.matching_pairs(collection, &Filter::All).await {
                 Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
                 Err(error) => Err(error),
