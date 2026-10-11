@@ -240,6 +240,9 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.shared.existing {
+            return self.shared.ensure(spec, &self.scope, self.generation).await;
+        }
         crate::purge::admitted!(
             self,
             self.shared.ensure(spec, &self.scope, self.generation).await
@@ -247,25 +250,27 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
-        required.validate()?;
-        let stored = self.shared.persisted_spec(&required.name).await?;
-        if stored.merge(required)? != stored {
-            return Err(StorageError::invalid_input(
-                "stored declaration lacks required features",
-            ));
-        }
-        let mut models = vec![scope_key_model()];
-        models.extend(crate::backend::specs::index_models(&stored)?);
-        if let Some(model) = stored
-            .search
-            .as_ref()
-            .map(crate::backend::specs::text_model)
-            .transpose()?
-            .flatten()
-        {
-            models.push(model);
-        }
-        self.shared.validate_indexes(&stored.name, &models).await
+        crate::purge::admitted!(self, {
+            required.validate()?;
+            let stored = self.shared.persisted_spec(&required.name).await?;
+            if stored.merge(required)? != stored {
+                return Err(StorageError::invalid_input(
+                    "stored declaration lacks required features",
+                ));
+            }
+            let mut models = vec![scope_key_model()];
+            models.extend(crate::backend::specs::index_models(&stored)?);
+            if let Some(model) = stored
+                .search
+                .as_ref()
+                .map(crate::backend::specs::text_model)
+                .transpose()?
+                .flatten()
+            {
+                models.push(model);
+            }
+            self.shared.validate_indexes(&stored.name, &models).await
+        })
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {

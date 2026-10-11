@@ -440,12 +440,17 @@ impl StorageBackend for MongoStorage {
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation);
         if self.shared.transactions {
-            base.with(Capability::Transactions)
+            let fenced = base
+                .with(Capability::Transactions)
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
-                .with(Capability::CrossDatabaseFencing)
-                .with(Capability::ScopePurge)
+                .with(Capability::CrossDatabaseFencing);
+            if self.shared.existing {
+                fenced
+            } else {
+                fenced.with(Capability::ScopePurge)
+            }
         } else {
             base
         }
@@ -497,9 +502,7 @@ impl StorageBackend for MongoStorage {
                 &format!("{BLOBS}.files"),
                 vec![
                     crate::blobs::file_index(),
-                    mongodb::IndexModel::builder()
-                        .keys(doc! {"filename": 1, "uploadDate": 1})
-                        .build(),
+                    crate::blobs::standard_file_index(),
                 ],
             )
             .await?;

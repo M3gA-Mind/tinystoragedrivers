@@ -441,6 +441,12 @@ impl MongoPurge {
 impl ScopePurge for MongoPurge {
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
+        if self.shared.existing {
+            return Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "existing-schema handles cannot initialize reset metadata",
+            ));
+        }
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
                 Capability::ScopePurge,

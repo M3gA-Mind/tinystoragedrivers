@@ -554,3 +554,134 @@ async fn live_existing_schema_missing_validation_registry_is_not_created() {
     );
     assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
 }
+
+#[tokio::test]
+async fn live_existing_schema_refuses_missing_or_incompatible_standard_gridfs_files_index() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let mut outcomes = Vec::new();
+    for incompatible in [false, true] {
+        let (storage, prefix) = configured_fixture(&url).await;
+        storage.prepare_schema().await.unwrap();
+        let files = storage.shared.raw(&format!("{BLOBS}.files"));
+        let indexes: Vec<_> = files
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let index = indexes
+            .iter()
+            .find(|index| index.keys == doc! {"filename": 1, "uploadDate": 1})
+            .unwrap();
+        files
+            .drop_index(index.options.as_ref().unwrap().name.as_ref().unwrap())
+            .await
+            .unwrap();
+        if incompatible {
+            files
+                .create_index(
+                    mongodb::IndexModel::builder()
+                        .keys(doc! {"filename": 1, "uploadDate": 1})
+                        .options(
+                            mongodb::options::IndexOptions::builder()
+                                .unique(true)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await
+                .unwrap();
+        }
+        let actor = storage
+            .existing_schema()
+            .unwrap()
+            .for_scope(&Scope::local())
+            .unwrap();
+        outcomes.push(actor.blobs().get("missing").await.err().map(|e| e.kind()));
+        cleanup_fixture(&storage, &prefix).await;
+    }
+    assert_eq!(outcomes, [Some(ErrorKind::InvalidInput); 2]);
+}
+
+#[tokio::test]
+async fn live_existing_schema_validation_refuses_retired_generation_after_purge() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let scope = Scope::local();
+    let raw = storage.for_scope(&scope).unwrap();
+    let spec = CollectionSpec::new("notes");
+    raw.documents().ensure_collection(&spec).await.unwrap();
+    let restricted = storage.existing_schema().unwrap();
+    let stale = restricted.for_scope(&scope).unwrap();
+    stale
+        .documents()
+        .validate_collection_spec(&spec)
+        .await
+        .unwrap();
+    let receipt = raw
+        .purge(&tinystoragedrivers_core::PurgeRequest {
+            operation_id: "schema_validation_reset".into(),
+            mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    let outcome = stale.documents().validate_collection_spec(&spec).await;
+    restricted
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap()
+        .documents()
+        .validate_collection_spec(&spec)
+        .await
+        .unwrap();
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.err().map(|e| e.kind()), Some(ErrorKind::Fenced));
+}
+
+#[tokio::test]
+async fn live_existing_schema_refuses_purge_before_metadata_initialization_or_data_erasure() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let scope = Scope::local();
+    let raw = storage.for_scope(&scope).unwrap();
+    raw.documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    raw.documents()
+        .put("notes", "n", json!({"keep":true}), Precondition::None)
+        .await
+        .unwrap();
+    let mut before = storage.shared.db.list_collection_names().await.unwrap();
+    before.retain(|name| name.starts_with(&storage.shared.prefix));
+    before.sort();
+    let restricted = storage.existing_schema().unwrap();
+    let advertised = restricted.capabilities().contains(Capability::ScopePurge);
+    let actor = restricted.for_scope(&scope).unwrap();
+    let outcome = actor
+        .purge(&tinystoragedrivers_core::PurgeRequest {
+            operation_id: "restricted_reset".into(),
+            mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+        })
+        .await;
+    let mut after = storage.shared.db.list_collection_names().await.unwrap();
+    after.retain(|name| name.starts_with(&storage.shared.prefix));
+    after.sort();
+    let retained = raw.documents().get("notes", "n").await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(
+        outcome.err().map(|e| e.kind()),
+        Some(ErrorKind::Unsupported(Capability::ScopePurge))
+    );
+    assert!(!advertised);
+    assert_eq!(before, after);
+    assert!(retained.unwrap().is_some());
+}

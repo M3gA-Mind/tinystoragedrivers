@@ -257,3 +257,133 @@ async fn existing_schema_checked_dependencies_require_declarations() {
         ErrorKind::NotFound
     );
 }
+
+#[tokio::test]
+async fn existing_schema_validates_all_operation_inputs_before_declaration_lookup() {
+    let root = MemoryStorage::new();
+    let storage = root.existing_schema().unwrap();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    let docs = scoped.documents();
+    let bad_filter = Filter::eq("", 1);
+    let kinds = [
+        docs.get("missing", "")
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.put("missing", "", json!({}), Precondition::None)
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.put("missing", "n", json!([]), Precondition::None)
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.delete("missing", "", Precondition::None)
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.query("missing", &crate::Query::filter(bad_filter.clone()))
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.query(
+            "missing",
+            &crate::Query::all().after(crate::Cursor("forged".into())),
+        )
+        .await
+        .map(|_| ())
+        .err()
+        .map(|e| e.kind()),
+        docs.count("missing", &bad_filter)
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.delete_where("missing", &bad_filter)
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.claim("missing", &bad_filter, &[], &json!({}))
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+        docs.claim("missing", &Filter::All, &[], &json!([]))
+            .await
+            .map(|_| ())
+            .err()
+            .map(|e| e.kind()),
+    ];
+    assert_eq!(kinds, [Some(ErrorKind::InvalidInput); 10]);
+    assert!(root.db.lock().unwrap().specs.is_empty());
+}
+
+#[test]
+fn existing_schema_rejects_missing_named_target_and_guard_without_creating_them() {
+    let root = MemoryStorage::new();
+    let actor = root.existing_schema().unwrap();
+    let target = actor.database("missing").err().map(|e| e.kind());
+    let fence = Fence::new(Scope::local(), "leases", "n", Filter::All);
+    let guard = actor
+        .for_scope_fenced_in_database(
+            &Scope::local(),
+            &fence,
+            &GuardDatabase::Named("guard".into()),
+        )
+        .err()
+        .map(|e| e.kind());
+    let generation_guard = actor
+        .for_scope_fenced_in_database_generation(
+            &Scope::local(),
+            crate::ScopeGeneration::default(),
+            &fence,
+            &GuardDatabase::Named("generation_guard".into()),
+        )
+        .err()
+        .map(|e| e.kind());
+    assert_eq!(
+        [target, guard, generation_guard],
+        [Some(ErrorKind::NotFound); 3]
+    );
+    assert!(root.databases.lock().unwrap().is_empty());
+    root.database("prepared").unwrap();
+    actor.database("prepared").unwrap();
+}
+
+#[tokio::test]
+async fn existing_schema_validation_refuses_retired_generation_after_purge() {
+    let root = MemoryStorage::new();
+    let scope = Scope::local();
+    let raw = root.for_scope(&scope).unwrap();
+    let spec = CollectionSpec::new("notes");
+    raw.documents().ensure_collection(&spec).await.unwrap();
+    let restricted = root.existing_schema().unwrap();
+    let stale = restricted.for_scope(&scope).unwrap();
+    stale
+        .documents()
+        .validate_collection_spec(&spec)
+        .await
+        .unwrap();
+    let receipt = raw
+        .purge(&crate::PurgeRequest {
+            operation_id: "schema_validation_reset".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let result = stale.documents().validate_collection_spec(&spec).await;
+    restricted
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap()
+        .documents()
+        .validate_collection_spec(&spec)
+        .await
+        .unwrap();
+    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Fenced));
+}

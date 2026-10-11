@@ -69,6 +69,13 @@ pub(crate) fn chunk_span(range: &Range<usize>, chunk_size: usize) -> (usize, usi
     (first, last, range.start - first * size)
 }
 
+/// The standard filename/upload-date index required by the GridFS driver.
+pub(crate) fn standard_file_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {"filename": 1, "uploadDate": 1})
+        .build()
+}
+
 pub(crate) fn file_index() -> IndexModel {
     IndexModel::builder()
         .keys(doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1})
@@ -131,9 +138,13 @@ impl MongoBlobs {
                 .await?;
         }
         let name = format!("{}{BLOBS}", self.shared.prefix);
-        let model = file_index();
+        let models = if self.shared.existing {
+            vec![file_index(), standard_file_index()]
+        } else {
+            vec![file_index()]
+        };
         self.shared
-            .prepare(&format!("{BLOBS}.files"), vec![model])
+            .prepare(&format!("{BLOBS}.files"), models)
             .await?;
         Ok(self
             .shared

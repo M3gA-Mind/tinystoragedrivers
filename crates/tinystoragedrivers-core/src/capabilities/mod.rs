@@ -52,7 +52,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 14] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
