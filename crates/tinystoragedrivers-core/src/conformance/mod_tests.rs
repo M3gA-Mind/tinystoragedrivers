@@ -98,6 +98,10 @@ mod baseline {
         async fn drop_collection(&self, c: &str) -> Result<()> {
             self.0.drop_collection(c).await
         }
+
+        async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+            self.0.collections(prefix).await
+        }
     }
 
     impl StorageBackend for Narrow {

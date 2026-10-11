@@ -13,6 +13,15 @@ fn keeps_the_safe_alphabet_and_escapes_the_rest() {
 }
 
 #[test]
+fn encoded_names_decode_without_losing_case_or_unicode() {
+    for name in ["local", "Tasks", "a/b.c", "é", "..", "con"] {
+        assert_eq!(decode(&encode(name)).as_deref(), Some(name));
+    }
+    assert_eq!(decode("%G0"), None);
+    assert_eq!(decode("%C3"), None);
+}
+
+#[test]
 fn names_differing_only_in_case_stay_distinct_when_case_folded() {
     let upper = encode("Tasks").to_lowercase();
     let lower = encode("tasks").to_lowercase();

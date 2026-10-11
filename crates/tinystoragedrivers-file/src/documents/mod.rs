@@ -272,6 +272,11 @@ impl DocumentStore for FileDocuments {
         self.write(move |docs| docs.drop_collection(&collection))
             .await
     }
+
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let prefix = prefix.to_owned();
+        self.with(move |docs| docs.collections(&prefix)).await
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     expiry(storage).await;
     batches(storage).await;
     search(storage).await;
+    collection_listing(storage).await;
 }
 
 async fn crud(storage: &ScopedStorage) {
@@ -66,6 +67,55 @@ async fn crud(storage: &ScopedStorage) {
     assert_eq!(
         ok(docs.count(&coll, &Filter::All).await, "count dropped"),
         0
+    );
+}
+
+async fn collection_listing(storage: &ScopedStorage) {
+    let docs = storage.documents();
+    let prefix = unique("collections");
+    let first = format!("{prefix}_first");
+    let second = format!("{prefix}_second");
+    let escaped = format!("{prefix}.Upper");
+    let unrelated = unique("unrelated_collection");
+
+    empty(
+        &ok(docs.collections(&prefix).await, "list empty collections"),
+        "an empty scope has no collections",
+    );
+    ok(
+        docs.put(&second, "b", json!({}), Precondition::None).await,
+        "put second collection",
+    );
+    ok(
+        docs.put(&unrelated, "c", json!({}), Precondition::None)
+            .await,
+        "put unrelated collection",
+    );
+    ok(
+        docs.put(&first, "a", json!({}), Precondition::None).await,
+        "put first collection",
+    );
+    ok(
+        docs.put(&escaped, "d", json!({}), Precondition::None).await,
+        "put escaped collection",
+    );
+
+    let mut expected = vec![first.clone(), second, escaped];
+    expected.sort();
+
+    assert_eq!(
+        ok(docs.collections(&prefix).await, "list matching collections"),
+        expected.clone(),
+        "collection names are prefix-filtered and sorted"
+    );
+    ok(
+        docs.delete(&first, "a", Precondition::None).await,
+        "delete only record",
+    );
+    assert_eq!(
+        ok(docs.collections(&prefix).await, "list tombstone collection"),
+        expected,
+        "tombstones remain enumerable for complete cleanup"
     );
 }
 

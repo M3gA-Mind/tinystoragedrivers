@@ -27,8 +27,8 @@ use mongodb::ClientSession;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Fence, Filter, Page,
-    Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
-    WriteResult, validate_collection, validate_doc, validate_id, value,
+    Precondition, Query, RESERVED_PREFIX, Result, Scope, SearchHit, Sort, StorageError, Version,
+    Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
@@ -199,7 +199,8 @@ impl DocumentStore for MongoDocuments {
     fn capabilities(&self) -> Capabilities {
         let base = Capabilities::none()
             .with(Capability::FullText)
-            .with(Capability::Ttl);
+            .with(Capability::Ttl)
+            .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
                 .with(Capability::Fencing)
@@ -409,6 +410,39 @@ impl DocumentStore for MongoDocuments {
             }
         })?;
         Ok(())
+    }
+
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let physical_prefix = &self.shared.prefix;
+        let names = self
+            .shared
+            .db
+            .list_collection_names()
+            .await
+            .map_err(errors::failed("list document collections"))?;
+        let mut found = Vec::new();
+        for physical in names {
+            let Some(name) = physical.strip_prefix(physical_prefix) else {
+                continue;
+            };
+            if name.starts_with(RESERVED_PREFIX)
+                || !name.starts_with(prefix)
+                || validate_collection(name).is_err()
+            {
+                continue;
+            }
+            let count = self
+                .shared
+                .raw(name)
+                .count_documents(mongodb::bson::doc! {"_scope": self.scope.as_str()})
+                .await
+                .map_err(errors::failed("list scoped document collections"))?;
+            if count > 0 {
+                found.push(name.to_owned());
+            }
+        }
+        found.sort();
+        Ok(found)
     }
 }
 

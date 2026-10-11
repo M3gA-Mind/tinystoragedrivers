@@ -114,6 +114,24 @@ jobs:
       - name: Test the facade's mongodb feature
         run: cargo test -p tinystoragedrivers --features mongodb
 
+  s3:
+    name: S3-compatible blob driver
+    runs-on: ubuntu-latest
+    env:
+      TSD_S3_URL: s3://tsd-test/ci?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A19000
+      AWS_ACCESS_KEY_ID: tsd-test-access
+      AWS_SECRET_ACCESS_KEY: tsd-test-secret
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: MinIO conformance, presigned URLs and 500 MiB streaming roundtrip
+        run: .github/scripts/test-minio.sh
+      - name: Test composite URL selection
+        run: cargo test -p tinystoragedrivers --features s3
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

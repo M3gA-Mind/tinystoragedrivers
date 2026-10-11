@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::{empty, fails, ok, unique};
-use crate::backend::StorageBackend;
+use crate::backend::{ScopedStorage, StorageBackend};
 use crate::document::Precondition;
 use crate::error::ErrorKind;
 use crate::filter::Filter;
@@ -36,6 +36,7 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
             .await,
         "b may create the same id",
     );
+    collection_listing(&a, &b).await;
     assert_eq!(
         ok(a.documents().count(&coll, &Filter::All).await, "a count"),
         1
@@ -86,6 +87,39 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
     );
 
     assert_eq!(b.scope().as_str(), "conformance-b");
+}
+
+async fn collection_listing(a: &ScopedStorage, b: &ScopedStorage) {
+    let only_a = unique("iso_only_a");
+    let only_b = unique("iso_only_b");
+    ok(
+        a.documents()
+            .put(&only_a, "only", json!({}), Precondition::None)
+            .await,
+        "a put in an A-only collection",
+    );
+    ok(
+        b.documents()
+            .put(&only_b, "only", json!({}), Precondition::None)
+            .await,
+        "b put in a B-only collection",
+    );
+    assert_eq!(
+        ok(
+            a.documents().collections("iso_only_b").await,
+            "a list B-only"
+        ),
+        Vec::<String>::new(),
+        "A cannot enumerate B-only collections"
+    );
+    assert_eq!(
+        ok(
+            b.documents().collections("iso_only_a").await,
+            "b list A-only"
+        ),
+        Vec::<String>::new(),
+        "B cannot enumerate A-only collections"
+    );
 }
 
 /// Named databases on one backend are independent of each other and of the

@@ -37,3 +37,31 @@ fn metadata_omits_a_missing_content_type() {
         r#"{"key":"k","len":1}"#
     );
 }
+
+#[tokio::test]
+async fn default_streaming_checks_length_before_publishing() {
+    use crate::{MemoryStorage, Scope, StorageBackend};
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let blobs = storage.blobs();
+    blobs.put("old", vec![9], None).await.unwrap();
+    for len in [1, 3] {
+        let result = blobs
+            .put_stream("old", Box::pin(std::io::Cursor::new(vec![1, 2])), len, None)
+            .await;
+        assert!(result.is_err());
+        assert_eq!(blobs.get("old").await.unwrap().unwrap().bytes, [9]);
+    }
+    assert!(!blobs.capabilities().contains(Capability::StreamingBlobs));
+    assert_eq!(
+        blobs
+            .presign_put("old", Duration::from_secs(60))
+            .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::PresignedUrls)
+    );
+    let mut stream = blobs.get_stream("old").await.unwrap().unwrap();
+    let mut bytes = Vec::new();
+    stream.reader.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes, [9]);
+}

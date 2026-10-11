@@ -21,6 +21,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+# Scoped S3-compatible streaming blobs, optional in the facade.
+tinystoragedrivers-s3 = { path = "crates/tinystoragedrivers-s3" }
 # The storage ports, the in-memory driver and the conformance suite. Every
 # driver crate and the facade depend on it, so a value written through one
 # driver has exactly one set of types to describe it.

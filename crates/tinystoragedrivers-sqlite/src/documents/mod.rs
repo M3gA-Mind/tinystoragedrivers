@@ -19,9 +19,9 @@ use std::sync::Arc;
 use rusqlite::{Connection, TransactionBehavior};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition, Query, Result,
-    Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp, WriteResult, async_trait,
-    validate_doc, value,
+    Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
+    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp, WriteResult,
+    async_trait, validate_doc, value,
 };
 
 use crate::connection::Db;
@@ -34,7 +34,12 @@ use ops::Ctx;
 
 /// What this driver supports.
 pub(crate) fn capabilities() -> Capabilities {
-    Capabilities::all()
+    Capabilities::none()
+        .with(Capability::FullText)
+        .with(Capability::Transactions)
+        .with(Capability::Ttl)
+        .with(Capability::Fencing)
+        .with(Capability::CollectionEnumeration)
 }
 
 /// SQLite documents bound to one scope.
@@ -308,6 +313,14 @@ impl DocumentStore for SqliteDocuments {
         let collection = collection.to_owned();
         self.with(Access::Write, move |conn, ctx| {
             ops::drop_collection(conn, ctx, &collection)
+        })
+        .await
+    }
+
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let prefix = prefix.to_owned();
+        self.with(Access::Read, move |conn, ctx| {
+            ops::collections(conn, ctx, &prefix)
         })
         .await
     }

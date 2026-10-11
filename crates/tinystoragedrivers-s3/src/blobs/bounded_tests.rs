@@ -1,0 +1,124 @@
+//! Large synthetic uploads into a multipart recorder without retaining the body.
+
+use super::*;
+use futures_util::stream::BoxStream;
+use object_store::{MultipartUpload, PutPayload, PutResult, UploadPart};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[derive(Debug, Default)]
+struct Totals {
+    bytes: AtomicU64,
+    parts: AtomicUsize,
+    maximum: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct Recorder {
+    inner: object_store::memory::InMemory,
+    totals: Arc<Totals>,
+}
+
+impl std::fmt::Display for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("recorder")
+    }
+}
+
+#[derive(Debug)]
+struct Upload(Arc<Totals>);
+
+#[async_trait]
+impl MultipartUpload for Upload {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        let totals = self.0.clone();
+        Box::pin(async move {
+            let size = payload.content_length();
+            totals.bytes.fetch_add(size as u64, Ordering::Relaxed);
+            totals.parts.fetch_add(1, Ordering::Relaxed);
+            totals.maximum.fetch_max(size, Ordering::Relaxed);
+            Ok(())
+        })
+    }
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.0.completed.fetch_add(1, Ordering::Relaxed);
+        Ok(PutResult {
+            e_tag: None,
+            version: None,
+        })
+    }
+    async fn abort(&mut self) -> object_store::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ObjectStore for Recorder {
+    async fn put_opts(
+        &self,
+        path: &Path,
+        data: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(path, data, options).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        _: &Path,
+        _: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        Ok(Box::new(Upload(self.totals.clone())))
+    }
+    async fn get_opts(
+        &self,
+        path: &Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(path, options).await
+    }
+    async fn delete(&self, path: &Path) -> object_store::Result<()> {
+        self.inner.delete(path).await
+    }
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+#[tokio::test]
+async fn a_500_mib_source_is_uploaded_in_bounded_parts() {
+    let totals = Arc::new(Totals::default());
+    let recorder = Arc::new(Recorder {
+        inner: object_store::memory::InMemory::new(),
+        totals: totals.clone(),
+    });
+    let blobs = S3Blobs::with_store(recorder, None, "test", &Scope::local(), "media").unwrap();
+    let len = 500 * 1024 * 1024;
+    blobs
+        .put_stream(
+            "large",
+            Box::pin(tokio::io::repeat(42).take(len)),
+            len,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(totals.bytes.load(Ordering::Relaxed), len);
+    assert_eq!(totals.parts.load(Ordering::Relaxed), 63);
+    assert_eq!(totals.maximum.load(Ordering::Relaxed), PART_SIZE);
+    assert_eq!(totals.completed.load(Ordering::Relaxed), 1);
+}

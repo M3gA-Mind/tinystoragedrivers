@@ -1,0 +1,32 @@
+[package]
+name = "tinystoragedrivers-s3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scoped streaming S3-compatible blob storage"
+publish = false
+
+[dependencies]
+tinystoragedrivers-core = { workspace = true }
+# S3 protocol, multipart uploads and SigV4 presigning without the AWS SDK.
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
+# Object-store payloads and streaming responses.
+bytes = "1"
+futures-util = "0.3"
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+# HTTP method for object_store's signing contract.
+http = "1"
+# Parse S3 URLs without handling credentials in diagnostic strings.
+url = "2"
+
+[dev-dependencies]
+# Exercise bearer URLs against the explicitly configured local MinIO fixture.
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+
+[lints]
+workspace = true
