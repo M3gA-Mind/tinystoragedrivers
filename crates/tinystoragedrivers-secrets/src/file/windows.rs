@@ -31,8 +31,9 @@ impl Namespace {
         let Some(Component::Prefix(prefix)) = components.next() else {
             return Err(denied("missing local volume"));
         };
-        let Prefix::Disk(drive) = prefix.kind() else {
-            return Err(denied("unsupported namespace path"));
+        let drive = match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => return Err(denied("unsupported namespace path")),
         };
         if components.next() != Some(Component::RootDir) {
             return Err(denied("ambiguous namespace path"));
@@ -53,7 +54,10 @@ impl Namespace {
             return Err(denied("unsupported namespace volume"));
         }
         let user = current_user()?;
-        let mut current = PathBuf::from(root);
+        // Preserve verbatim local spelling for every native component pin.
+        // Rebuilding an ordinary prefix would silently restore MAX_PATH limits.
+        let mut current = PathBuf::from(prefix.as_os_str());
+        current.push(std::path::MAIN_SEPARATOR.to_string());
         let mut pins = Vec::new();
         pin_directory(&mut pins, &current, &user)?;
         for component in components {

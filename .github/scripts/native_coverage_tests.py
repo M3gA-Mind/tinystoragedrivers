@@ -85,6 +85,9 @@ class NativeCoverageGate(unittest.TestCase):
             self.run_gate()
 
     def test_uncovered_changed_executable_lines_fail(self):
+        self.entry["segments"][0][2] = 0
+        self.entry["summary"]["lines"]["covered"] = 0
+        self.write_report()
         self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nend_of_record\n")
         with self.assertRaisesRegex(RuntimeError, "changed executable lines: 0/1"):
             self.run_gate()

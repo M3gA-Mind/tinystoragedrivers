@@ -45,18 +45,69 @@ def changed_lines(diff):
     return result
 
 
+def production(name):
+    return name.startswith(SOURCE) and not name.endswith("_tests.rs")
+
+
 def lcov_lines(text):
-    result, current = {}, None
+    result, current, seen = {}, None, set()
     for line in text.splitlines():
         if line.startswith("SF:"):
+            if current is not None:
+                raise RuntimeError("unterminated LCOV file record")
             try:
                 current = normalized(line[3:])
             except ValueError:
                 current = None
+            if current is not None:
+                if current in seen:
+                    raise RuntimeError("duplicate LCOV file record")
+                seen.add(current)
+                result[current] = {}
+        elif line == "end_of_record":
+            current = None
         elif line.startswith("DA:") and current is not None:
             number, count, *_ = line[3:].split(",")
-            entries = result.setdefault(current, {})
-            entries[int(number)] = max(entries.get(int(number), 0), int(count))
+            number, count = int(number), int(count)
+            entries = result[current]
+            if number <= 0 or count < 0 or number in entries:
+                raise RuntimeError("duplicate or malformed LCOV coordinate")
+            entries[number] = count
+    if current is not None:
+        raise RuntimeError("unterminated LCOV file record")
+    return result
+
+
+def json_lines(entry):
+    """Map LLVM's merged non-gap segments to unique executable line counts.
+
+    Each segment describes coverage up to the next segment. An endpoint at
+    column one belongs to the following interval, not this one. LLVM summary
+    lines count overlapping function/generic instantiations separately; they
+    must not be substituted for the independently mapped coordinate set.
+    """
+    segments = entry.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise RuntimeError("missing executable JSON segments")
+    previous = (0, 0)
+    for segment in segments:
+        if not isinstance(segment, list) or len(segment) != 6:
+            raise RuntimeError("malformed JSON coverage segment")
+        line, column, count, has_count, region_entry, gap = segment
+        if (any(type(value) is not int for value in [line, column, count])
+                or min(line, column) <= 0 or count < 0
+                or any(type(value) is not bool for value in [has_count, region_entry, gap])
+                or (line, column) <= previous):
+            raise RuntimeError("malformed JSON coverage segment")
+        previous = (line, column)
+    if segments[-1][3]:
+        raise RuntimeError("unterminated JSON coverage segment")
+    result = {}
+    for start, end in zip(segments, segments[1:]):
+        if start[3] and not start[5]:
+            stop = end[0] - int(end[1] == 1)
+            for line in range(start[0], stop + 1):
+                result[line] = max(result.get(line, 0), start[2])
     return result
 
 
@@ -99,16 +150,23 @@ def main():
     if native_module not in inventory or not inventory:
         raise RuntimeError("native platform module missing from compiled source inventory")
     coverage = json.loads(reports[0].read_text())
-    summaries = {}
+    summaries, coordinates = {}, {}
     for data in coverage["data"]:
         for entry in data["files"]:
             try:
                 name = normalized(entry["filename"])
             except ValueError:
                 continue
-            if name in inventory:
+            if production(name):
+                if name not in inventory:
+                    raise RuntimeError("JSON production source differs from compiled inventory")
+                if name in summaries:
+                    raise RuntimeError("duplicate JSON source entry")
                 summaries[name] = entry["summary"]["lines"]
+                coordinates[name] = json_lines(entry)
     executable = lcov_lines(reports[1].read_text())
+    if {name for name in executable if production(name)} != set(coordinates):
+        raise RuntimeError("compiled production module omitted or JSON/LCOV production source sets differ")
     changes = changed_lines(git("diff", "--unified=0", BASE, actual["head"], "--", SOURCE))
     failed, changed_count, changed_covered = [], 0, 0
     records = []
@@ -124,18 +182,20 @@ def main():
             continue
         count, covered = summary["count"], summary["covered"]
         lines = executable.get(name)
-        if not isinstance(count, int) or count <= 0 or not lines:
+        if type(count) is not int or type(covered) is not int or count <= 0 or covered < 0 or not lines:
             failed.append(name + ": empty or malformed executable coverage")
             continue
-        # LLVM JSON counts generic/closure instantiations separately; LCOV
-        # merges line coordinates. Both are real reports from the same profiles.
-        if len(lines) > count or covered > count or any(c < 0 for c in lines.values()):
+        # Unique merged coordinates and counters must agree exactly across
+        # both reports, independent of the instantiated JSON summary count.
+        if lines != coordinates[name]:
+            failed.append(name + ": JSON/LCOV executable coordinates or counters differ")
+        if len(coordinates[name]) > count or covered > count:
             failed.append(name + ": malformed JSON/LCOV counters")
         if covered * 100 < count * 90:
             failed.append(f"{name}: {covered}/{count} below 90%")
-        selected = changes.get(name, set()) & lines.keys()
+        selected = changes.get(name, set()) & coordinates[name].keys()
         changed_count += len(selected)
-        changed_covered += sum(lines[line] > 0 for line in selected)
+        changed_covered += sum(coordinates[name][line] > 0 for line in selected)
         records.append({"file": name, "lines": count, "covered": covered})
     if changed_count == 0 or changed_covered * 100 < changed_count * 80:
         failed.append(f"changed executable lines: {changed_covered}/{changed_count} below 80%")

@@ -118,10 +118,30 @@ impl EncryptedFileSecrets {
     ///
     /// # Errors
     ///
-    /// As [`load_or_create_key_file`].
+    /// As [`load_or_create_key_file`]. Existing unsafe data, ledger or store-lock
+    /// objects are rejected before master creation. Existing store objects with
+    /// a missing master are a conflict; recover the original key first.
     pub fn with_key_file(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
-        let key = load_or_create_key_file(&dir.join(KEY_FILE_NAME))?;
+        let key_path = dir.join(KEY_FILE_NAME);
+        let key_lock = key_creation_lock(&key_path)?;
+        // Admit all existing store objects before considering key creation.
+        // Existing material plus a lost key is not an empty target.
+        let existing = admit_existing_store(&key_lock.namespace, &dir.join(SECRETS_FILE_NAME))?;
+        let key = match read_key_file(&key_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !existing.is_empty() {
+                    return Err(StorageError::conflict(
+                        "existing secret store has no master key",
+                    ));
+                }
+                create_key_file(&key_path, &key_lock)?
+            }
+            other => parse_key_file(other)?,
+        };
+        key_lock
+            .verify()
+            .map_err(|e| io_error("verify the constructor key lock", e))?;
         Ok(Self::new(dir, key))
     }
 
@@ -441,15 +461,23 @@ fn reserve_temp_file(path: &Path, next_seq: &mut dyn FnMut() -> u64) -> Result<(
 /// key file that is not 32 bytes of hex, or an I/O error mapped as the file
 /// driver maps them (including a filesystem without hard links).
 pub fn load_or_create_key_file(path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-    let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
-    lock_name.push(".lock");
-    // Serialize the short two-link publication interval across processes.
-    // A retained stale alias still fails admission rather than minting a key.
-    let lock = lock_file(&path.with_file_name(lock_name))?;
+    let lock = key_creation_lock(path)?;
     match read_key_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         other => return parse_key_file(other),
     }
+    create_key_file(path, &lock)
+}
+
+fn key_creation_lock(path: &Path) -> Result<secure::Locked> {
+    let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
+    lock_name.push(".lock");
+    // Serialize the short two-link publication interval across processes.
+    // A retained stale alias still fails admission rather than minting a key.
+    lock_file(&path.with_file_name(lock_name))
+}
+
+fn create_key_file(path: &Path, lock: &secure::Locked) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let key = crypto::generate_key()?;
     let tmp_path = stage(path, key_to_hex(&key).as_bytes(), &mut next_temp_seq)?;
     lock.verify()
@@ -458,6 +486,35 @@ pub fn load_or_create_key_file(path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> 
     lock.verify()
         .map_err(|e| io_error("verify the key creation lock", e))?;
     Ok(published)
+}
+
+fn admit_existing_store(namespace: &secure::Namespace, path: &Path) -> Result<Vec<File>> {
+    let data_name =
+        secure::file_name(path).map_err(|e| io_error("admit existing store name", e))?;
+    let mut store_lock = data_name.as_os_str().to_os_string();
+    store_lock.push(".lock");
+    let mut ledger = data_name.as_os_str().to_os_string();
+    ledger.push(".imports");
+    let mut admitted = Vec::new();
+    // If it exists, retain the cooperating store lock while admitting data and
+    // ledger objects. A true empty target does not create this lock before key.
+    for name in [Path::new(&store_lock), data_name, Path::new(&ledger)] {
+        match namespace.open_file(name, name == Path::new(&store_lock)) {
+            Ok(file) => {
+                if name == Path::new(&store_lock) {
+                    fs4::FileExt::lock(&file)
+                        .map_err(|e| io_error("lock existing secret store", e))?;
+                }
+                admitted.push(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("admit existing secret store object", error)),
+        }
+    }
+    namespace
+        .verify()
+        .map_err(|e| io_error("verify existing secret store namespace", e))?;
+    Ok(admitted)
 }
 
 /// Publish the staged key at `tmp_path` as `path` unless `path` exists, in

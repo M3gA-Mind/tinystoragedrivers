@@ -21,9 +21,10 @@ TEST = "file::tests::a_key_reader_waits_for_an_in_progress_no_clobber_publicatio
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
+    parser.add_argument("--evidence-dir", type=Path)
     args = parser.parse_args()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    evidence = ROOT / ("target/native-key-race-" + stamp)
+    evidence = (args.evidence_dir or ROOT / "target") / ("native-key-race-" + stamp)
     evidence.mkdir(parents=True)
     with tempfile.TemporaryDirectory(prefix="tsd-key-race-") as directory:
         key = Path(directory) / ".secret_key"

@@ -14,7 +14,9 @@ objects owned by the current user.
 
 Windows uses published `clack-private-fs` to pass an owner-only protected DACL
 at the original native create call and obtain an owned `std::fs::File`.
-Admission requires an NTFS disk namespace with persistent ACLs, a process
+Admission supports rooted ordinary and verbatim local NTFS disk paths with
+persistent ACLs, preserving verbatim spelling for every component pin. UNC,
+remote/device and drive-relative paths are rejected. It requires a process
 identity without thread impersonation, trusted ancestor ownership and no
 foreign effective mutation grants. Retained directory handles deny delete
 sharing. Leaf handles retain actual FileIDs while allowing legitimate atomic
@@ -37,7 +39,7 @@ are never permission-broadened or treated as committed data.
 `FileImportSource::open` admits and retains an exact private source object of
 at most 1 MiB. Its bytes are available for caller-owned parsing.
 `prepare_file_import` binds an operation, destination name, source identity,
-source/value hashes and retained source bytes in an authenticated encrypted
+an opaque random live-source-instance token, source/value hashes and retained source bytes in an authenticated encrypted
 `<secrets filename>.imports` ledger before destination publication. Exact
 publication retries reconcile that intent. A different operation, source or
 value conflicts; active destination/key/lock/ledger objects cannot be sources.
@@ -47,15 +49,33 @@ states its native acknowledgment boundary. Windows returns
 `WindowsVisibleFileFlushed`; cleanup returns `UnsupportedBoundary` and retains
 the source. Unix returns `UnixDirectorySync`. Cleanup verifies the destination,
 atomically captures the source into an operation-specific quarantine, verifies
-it again and persists the exact captured phase before unlinking. It never
+it again and persists the exact captured phase. After all ledger/publication
+work, it rechecks the exact source identity, safety and bytes before unlinking. It never
 deletes an unverified replacement. A failed capture restoration preserves the
 captured object when the original name is occupied.
 
 After removal, a failed directory barrier or ledger update returns
 `RemovedUnacknowledged`. The encrypted backup remains available. A live receipt
 can retry the barrier and ledger only for the persisted removal phase with no
-replacement source occupying the name. Completed operations return
+replacement source occupying the name, and only when the retained exact
+source handle reports zero remaining links. A moved-but-linked capture cannot
+be acknowledged merely because both expected names are absent. Completed operations return
 `AlreadyCompleted`. These states do not imply rollback or hardware survival.
+
+Cleanup holds a nonblocking exclusive advisory lock on the retained source
+file and serializes receipts sharing that source instance. Cooperating writers
+must acquire the same file lock before changing bytes or source namespace
+links. Callers must coordinate all source-name replacement/rename operations
+through that agreement. A held cooperating writer makes cleanup fail closed;
+retry after it releases the lock. Private namespaces and the final check cannot
+exclude an uncoordinated same-user change between that check and unlink. The
+API does not promise atomic protection against such actors. Detected mismatches
+retain the current quarantine and the authenticated original backup.
+
+`with_key_file` admits existing data, store lock and ledger before generating a
+master. Existing store objects without their original master are a conflict;
+restore that key instead of creating another. The key creation lock serializes
+constructors and existing store locks cover store admission.
 
 The receipt is process-bound. `recover_file_import_source` works in a fresh
 process with the same key and returns authenticated retained bytes. It does
@@ -66,14 +86,18 @@ The caller owns recovery policy over the returned zeroizing bytes.
 
 The native CI matrix executes the birth and final-object fixtures on Linux,
 macOS and Windows. It checks actual native compiled-source inventory against
-LLVM JSON, and changed executable lines against LCOV and the original base.
+LLVM JSON, independently maps its executable segments to unique line
+coordinates/counters, and requires exact agreement with LCOV before computing
+changed-line coverage against the original base. Generic/closure summary counts
+may exceed unique coordinates; partial, duplicate and conflicting reports fail.
 Linux additionally observes real injected I/O failures and a paused two-link
 publisher with a concurrent reader. Fault tests prove API failure handling,
 not physical power-loss durability.
 
-A separate native process under a different standard user reads a public
-control and attempts to read the published key, ciphertext and both locks.
-All four private reads must fail with access denied. Unix uses the existing
+A separate native process under a different standard user reads, writes,
+replaces and deletes a public control, then attempts those same operations on
+the published key, ciphertext and both locks. All sixteen private operations
+must fail with access denied and leave the objects unchanged. Unix uses the existing
 unprivileged `nobody` account; the Windows CI fixture creates a random local
 standard account and removes it in a `finally` block. No operator account or
 operator credential is used by this fixture.

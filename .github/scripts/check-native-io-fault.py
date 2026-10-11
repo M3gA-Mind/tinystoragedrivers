@@ -20,9 +20,10 @@ TEST = "file::migration::tests::native_io_fault_preserves_source_and_reconciles_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
+    parser.add_argument("--evidence-dir", type=Path)
     args = parser.parse_args()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    evidence = ROOT / ("target/native-io-fault-" + stamp)
+    evidence = (args.evidence_dir or ROOT / "target") / ("native-io-fault-" + stamp)
     evidence.mkdir(parents=True, exist_ok=False)
     binary = args.binary
     if binary is None:

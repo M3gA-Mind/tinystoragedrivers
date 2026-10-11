@@ -43,7 +43,12 @@ struct Source {
     identity: secure::Identity,
     namespace_identity: secure::Identity,
     bytes: Zeroizing<Vec<u8>>,
-    _file: File,
+    file: File,
+    // Opaque randomness identifies this live source instance, not an inode
+    // generation. A fresh open can never choose a persisted instance token.
+    live_instance: String,
+    #[cfg(unix)]
+    coordination: std::sync::Mutex<()>,
 }
 
 /// A private regular source file admitted through its opened object.
@@ -100,7 +105,10 @@ impl FileImportSource {
             identity,
             namespace_identity,
             bytes,
-            _file: file,
+            file,
+            live_instance: crypto::hex_encode(crypto::generate_key()?.as_ref()),
+            #[cfg(unix)]
+            coordination: std::sync::Mutex::new(()),
         })))
     }
 
@@ -154,6 +162,8 @@ impl fmt::Debug for VerifiedFileImport {
 struct Intent {
     operation: String,
     name: String,
+    #[serde(default)]
+    live_instance: String,
     source_identity: [u64; 2],
     namespace_identity: [u64; 2],
     source_hash: String,
@@ -175,7 +185,9 @@ impl EncryptedFileSecrets {
     ///
     /// An encrypted auxiliary intent ledger binds operation, source and value
     /// before destination publication. Exact retries reconcile uncertain writes;
-    /// a different operation/value/source conflicts. This never deletes source.
+    /// a different operation/value/source instance conflicts. A new open cannot
+    /// reconstruct an old receipt from matching filesystem IDs and bytes.
+    /// This never deletes source.
     ///
     /// # Errors
     /// Validation, admission, corruption, conflict and I/O failures are errors.
@@ -203,6 +215,12 @@ impl EncryptedFileSecrets {
     /// Unix captures the source under an operation-specific quarantine before
     /// verifying identity again. Unsupported Windows persistence retains source.
     /// Source backup remains encrypted in the ledger after every outcome.
+    ///
+    /// Cleanup requires callers and cooperating writers to acquire the source
+    /// file's exclusive advisory lock before changing its bytes or namespace
+    /// links. Cleanup takes that lock nonblocking, and rechecks identity, safety
+    /// and bytes after ledger publication. An uncoordinated same-user change
+    /// between the final check and unlink is outside this guarantee.
     ///
     /// # Errors
     /// A mismatching source, destination, key, operation or namespace conflicts.
@@ -324,7 +342,12 @@ fn verify_source(source: &Source, name: &Path) -> Result<()> {
         .take(1_048_577)
         .read_to_end(&mut bytes)
         .map_err(|e| io_error("verify the import source bytes", e))?;
-    if id != source.identity || digest(&bytes) != digest(&source.bytes) {
+    let retained = secure::identity(&source.file)
+        .map_err(|e| io_error("verify retained import source identity", e))?;
+    if id != source.identity
+        || retained != source.identity
+        || digest(&bytes) != digest(&source.bytes)
+    {
         return Err(StorageError::conflict("import source changed"));
     }
     source
@@ -351,15 +374,34 @@ fn reject_source_alias(
     let mut lock = destination.as_os_str().to_os_string();
     lock.push(".lock");
     let ledger = ledger_path(inner);
-    if name == destination
-        || name == Path::new(&lock)
-        || name == secure::file_name(&ledger).map_err(|e| io_error("admit the import ledger", e))?
-        || name == Path::new(super::KEY_FILE_NAME)
-        || name == Path::new(".secret_key.lock")
-    {
-        return Err(StorageError::conflict(
-            "import source aliases destination bookkeeping",
-        ));
+    for reserved in [
+        destination,
+        Path::new(&lock),
+        secure::file_name(&ledger).map_err(|e| io_error("admit the import ledger", e))?,
+        Path::new(super::KEY_FILE_NAME),
+        Path::new(".secret_key.lock"),
+    ] {
+        if name == reserved {
+            return Err(StorageError::conflict(
+                "import source aliases destination bookkeeping",
+            ));
+        }
+        // Native aliases (case, Unicode normalization, filesystem spelling)
+        // are properties of opened objects, never guessed by text folding.
+        match namespace.open_file(reserved, false) {
+            Ok(file) => {
+                if secure::identity(&file)
+                    .map_err(|e| io_error("inspect reserved import object", e))?
+                    == source.identity
+                {
+                    return Err(StorageError::conflict(
+                        "import source aliases destination bookkeeping",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("admit reserved import object", error)),
+        }
     }
     Ok(())
 }
@@ -371,13 +413,16 @@ fn prepare(
     name: &str,
     value: &str,
 ) -> Result<VerifiedFileImport> {
-    let lock = inner.lock()?;
+    let namespace = open_parent(&inner.path, true)?;
     let source_name =
         secure::file_name(&source.path).map_err(|e| io_error("admit the import source name", e))?;
+    reject_source_alias(&inner, &namespace, &source, source_name)?;
+    let lock = inner.lock()?;
     reject_source_alias(&inner, &lock.namespace, &source, source_name)?;
     let wanted = Intent {
         operation: operation.to_string(),
         name: name.to_string(),
+        live_instance: source.live_instance.clone(),
         source_identity: ids(source.identity),
         namespace_identity: ids(source.namespace_identity),
         source_hash: digest(&source.bytes),
@@ -497,6 +542,27 @@ fn verify_destination(
 }
 
 #[cfg(unix)]
+struct SourceLock<'a>(&'a File);
+
+#[cfg(unix)]
+impl<'a> SourceLock<'a> {
+    fn acquire(file: &'a File) -> Result<Self> {
+        fs4::FileExt::try_lock(file)
+            .map_err(|e| io_error("coordinate the import source", e.into()))?;
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SourceLock<'_> {
+    fn drop(&mut self) {
+        // An error cannot authorize unlink: this guard releases only after
+        // cleanup's acknowledged/error result has already been determined.
+        let _ = fs4::FileExt::unlock(self.0);
+    }
+}
+
+#[cfg(unix)]
 fn cleanup(
     inner: &Inner,
     source: &Source,
@@ -524,6 +590,14 @@ fn cleanup_with_barrier(
     removal_barrier: &mut dyn FnMut(&secure::Namespace) -> std::io::Result<()>,
 ) -> Result<CleanupAcknowledgment> {
     let lock = inner.lock()?;
+    // Serialize receipts sharing a Source, and cooperate with external writers
+    // using this same opened-file advisory lock. Uncoordinated writers are not
+    // excluded by an advisory lock; the caller owns namespace coordination.
+    let _coordination = source
+        .coordination
+        .lock()
+        .map_err(|_| StorageError::backend("import source coordination lock is poisoned"))?;
+    let _source_lock = SourceLock::acquire(&source.file)?;
     if lock
         .namespace
         .identity()
@@ -562,6 +636,13 @@ fn cleanup_with_barrier(
                 "source name changed during removal reconciliation",
             ));
         }
+        if !secure::is_unlinked(&source.file)
+            .map_err(|e| io_error("inspect retained source unlink state", e))?
+        {
+            return Err(StorageError::conflict(
+                "captured source remains linked outside cleanup names",
+            ));
+        }
         return finish_removal(
             inner,
             &lock.namespace,
@@ -589,6 +670,9 @@ fn cleanup_with_barrier(
     lock.verify()
         .map_err(|e| io_error("verify the committed cleanup lock", e))?;
     verify_destination(inner, &lock.namespace, receipt, Some(destination))?;
+    // All fallible ledger/publication work precedes the final exact-object,
+    // permissions and byte check. Retain mismatches without unlink or restore.
+    verify_source(source, &quarantine)?;
     source
         .namespace
         .remove(&quarantine)

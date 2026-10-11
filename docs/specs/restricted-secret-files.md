@@ -50,3 +50,29 @@ After process restart, the supported port recovers authenticated backup bytes
 with the same key; it does not synthesize a pathname-based deletion receipt or
 claim a durable cleanup boundary it cannot establish. Subprocess tests prove
 backup recovery and refusal to bind a fresh source to the old import intent.
+
+A persisted intent includes an opaque random live-source-instance token. A new
+source open cannot choose that token or obtain an old cleanup receipt, even if
+its filesystem identity and bytes match. Legacy intents remain recoverable as
+backup bytes, but lack live cleanup authority.
+
+Absent original/quarantine names acknowledge cleanup only when the retained
+source handle establishes zero remaining links. The driver rechecks captured
+identity, safety and bytes after the Removing ledger is committed. Cleanup
+holds an exclusive advisory source-file lock; cooperating writers and callers
+changing source namespace links must obey the same lock protocol. This does
+not exclude uncoordinated same-user mutation between the final check and unlink.
+Such atomic exclusion is not a supported guarantee.
+
+Reserved data/key/ledger/store-lock/key-creation-lock exclusions compare native
+opened-object identity, including filesystem aliases. Constructors admit all
+existing store objects before master creation; missing master plus existing
+store objects conflicts rather than minting a replacement key. Rooted local
+Windows Disk and VerbatimDisk paths retain their semantics and native pins.
+
+The native coverage gate derives executable coordinates from LLVM segments
+independently of LCOV and reconciles exact coordinate/counter and source sets.
+Overlapping generic/closure summaries do not determine the changed denominator.
+Duplicate, partial, conflicting or mismatched reports fail closed. Separate-user
+acceptance exercises read/write/replace/delete denial with a successful public
+control and unchanged private objects.
