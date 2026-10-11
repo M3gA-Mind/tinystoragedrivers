@@ -99,6 +99,7 @@ impl StorageBackend for CompositeStorage {
         let mut caps = self
             .records
             .capabilities()
+            .without(Capability::ExistingSchema)
             .without(Capability::ScopePurge)
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)

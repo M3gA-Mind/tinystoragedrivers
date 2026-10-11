@@ -58,7 +58,9 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Fencing)
     .with(Capability::CrossDatabaseFencing)
     .with(Capability::ConditionalStreamAppend)
-    .with(Capability::CollectionEnumeration);
+    .with(Capability::CollectionEnumeration)
+    .with(Capability::ExistingSchema)
+    .with(Capability::CollectionValidation);
 
 fn system_clock() -> u64 {
     SystemTime::now()
@@ -204,6 +206,7 @@ impl Db {
 pub struct FileStorage {
     root: PathBuf,
     db: Arc<Db>,
+    existing: bool,
 }
 
 impl fmt::Debug for FileStorage {
@@ -241,7 +244,11 @@ impl FileStorage {
             .canonicalize()
             .map_err(io_error("resolve the storage directory"))?;
         let db = Arc::new(Db::new(root.clone(), clock));
-        Ok(Self { root, db })
+        Ok(Self {
+            root,
+            db,
+            existing: false,
+        })
     }
 
     fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
@@ -252,6 +259,7 @@ impl FileStorage {
                 Arc::clone(&self.db),
                 scope.clone(),
                 fence.cloned(),
+                self.existing,
             )),
             Arc::new(FileStreams::new(
                 Arc::clone(&self.db),
@@ -273,6 +281,7 @@ impl FileStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl StorageBackend for FileStorage {
     fn driver(&self) -> &'static str {
         "file"
@@ -280,6 +289,22 @@ impl StorageBackend for FileStorage {
 
     fn capabilities(&self) -> Capabilities {
         CAPABILITIES
+    }
+
+    async fn prepare_schema(&self) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                tinystoragedrivers_core::Capability::ExistingSchema,
+                "existing-schema handles cannot prepare internal schema",
+            ));
+        }
+        Ok(())
+    }
+
+    fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
+        let mut storage = self.clone();
+        storage.existing = true;
+        Ok(Arc::new(storage))
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
@@ -325,6 +350,7 @@ impl StorageBackend for FileStorage {
         Ok(Arc::new(Self {
             root: self.root.clone(),
             db: self.named(name)?,
+            existing: self.existing,
         }))
     }
 }
@@ -333,7 +359,13 @@ impl FileStorage {
     fn named(&self, name: &str) -> Result<Arc<Db>> {
         validate_database(name)?;
         let dir = self.root.join("databases").join(file_stem(name));
-        std::fs::create_dir_all(&dir).map_err(io_error("create the database directory"))?;
+        if self.existing {
+            if !dir.is_dir() {
+                return Err(StorageError::not_found("named database does not exist"));
+            }
+        } else {
+            std::fs::create_dir_all(&dir).map_err(io_error("create the database directory"))?;
+        }
         let dir = dir
             .canonicalize()
             .map_err(io_error("resolve the database directory"))?;
@@ -344,3 +376,7 @@ impl FileStorage {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;

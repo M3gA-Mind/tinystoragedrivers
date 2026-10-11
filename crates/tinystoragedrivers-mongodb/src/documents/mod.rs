@@ -226,7 +226,9 @@ impl DocumentStore for MongoDocuments {
         let base = Capabilities::none()
             .with(Capability::FullText)
             .with(Capability::Ttl)
-            .with(Capability::CollectionEnumeration);
+            .with(Capability::CollectionEnumeration)
+            .with(Capability::ExistingSchema)
+            .with(Capability::CollectionValidation);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -253,10 +255,37 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.shared.existing {
+            return self.shared.ensure(spec, &self.scope, self.generation).await;
+        }
         crate::purge::admitted!(
             self,
             self.shared.ensure(spec, &self.scope, self.generation).await
         )
+    }
+
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        crate::purge::admitted!(self, {
+            required.validate()?;
+            let stored = self.shared.persisted_spec(&required.name).await?;
+            if stored.merge(required)? != stored {
+                return Err(StorageError::invalid_input(
+                    "stored declaration lacks required features",
+                ));
+            }
+            let mut models = vec![scope_key_model()];
+            models.extend(crate::backend::specs::index_models(&stored)?);
+            if let Some(model) = stored
+                .search
+                .as_ref()
+                .map(crate::backend::specs::text_model)
+                .transpose()?
+                .flatten()
+            {
+                models.push(model);
+            }
+            self.shared.validate_indexes(&stored.name, &models).await
+        })
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
@@ -447,6 +476,9 @@ impl DocumentStore for MongoDocuments {
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         crate::purge::admitted!(self, {
             validate_collection(collection)?;
+            if self.shared.existing {
+                self.shared.spec(collection).await?;
+            }
             if !self.shared.physical_transactions {
                 let pairs = self.matching_pairs(collection, &Filter::All).await?;
                 self.remove(collection, &pairs, None).await?;

@@ -27,12 +27,41 @@ use crate::scope::Scope;
 use crate::stream::StreamStore;
 
 /// A connected storage backend.
+#[async_trait::async_trait]
 pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// Driver name, for logs: `"memory"`, `"sqlite"`, `"mongodb"`, `"file"`.
     fn driver(&self) -> &'static str;
 
     /// Optional abilities every handle from this backend has.
     fn capabilities(&self) -> Capabilities;
+
+    /// Return native handles that use existing schema without declaring or repairing it.
+    ///
+    /// The restriction survives named databases and native fenced construction.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported when this backend cannot prevent implicit schema initialization.
+    fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
+        Err(StorageError::unsupported(
+            Capability::ExistingSchema,
+            "this backend cannot restrict schema initialization",
+        ))
+    }
+
+    /// Prepare the native internal tables and indexes under trusted bootstrap authority.
+    ///
+    /// This does not declare application document collections. Restricted backends refuse.
+    ///
+    /// # Errors
+    ///
+    /// Unsupported by default, or the native preparation error.
+    async fn prepare_schema(&self) -> Result<()> {
+        Err(StorageError::unsupported(
+            Capability::ExistingSchema,
+            "this backend cannot explicitly prepare internal schema",
+        ))
+    }
 
     /// Port handles bound to `scope`.
     ///

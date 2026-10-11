@@ -117,6 +117,7 @@ pub struct MemoryStorage {
     root: Arc<MemoryDb>,
     databases: Arc<Mutex<BTreeMap<String, Arc<MemoryDb>>>>,
     clock: Clock,
+    existing: bool,
 }
 
 impl MemoryStorage {
@@ -135,6 +136,7 @@ impl MemoryStorage {
             root,
             databases: Arc::default(),
             clock,
+            existing: false,
         }
     }
 
@@ -156,6 +158,7 @@ impl MemoryStorage {
                     scope.clone(),
                     Arc::clone(&self.clock),
                     fence.cloned(),
+                    self.existing,
                 )
                 .with_generation(generation),
             ),
@@ -200,6 +203,7 @@ impl fmt::Debug for MemoryStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl StorageBackend for MemoryStorage {
     fn driver(&self) -> &'static str {
         "memory"
@@ -210,6 +214,22 @@ impl StorageBackend for MemoryStorage {
             .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
+    }
+
+    async fn prepare_schema(&self) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                crate::Capability::ExistingSchema,
+                "existing-schema handles cannot prepare internal schema",
+            ));
+        }
+        Ok(())
+    }
+
+    fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
+        let mut storage = self.clone();
+        storage.existing = true;
+        Ok(Arc::new(storage))
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
@@ -289,6 +309,7 @@ impl StorageBackend for MemoryStorage {
             root: Arc::clone(&self.root),
             databases: Arc::clone(&self.databases),
             clock: Arc::clone(&self.clock),
+            existing: self.existing,
         }))
     }
 }
@@ -299,6 +320,12 @@ impl MemoryStorage {
             .databases
             .lock()
             .map_err(|_| StorageError::backend("memory database registry lock poisoned"))?;
+        if self.existing {
+            return databases
+                .get(name)
+                .cloned()
+                .ok_or_else(|| StorageError::not_found("named database does not exist"));
+        }
         Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
             || {
                 Arc::new(MemoryDb {
@@ -313,3 +340,7 @@ impl MemoryStorage {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;

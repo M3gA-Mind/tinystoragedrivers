@@ -25,7 +25,7 @@ use crate::blobs::MongoBlobs;
 use crate::documents::MongoDocuments;
 use crate::errors;
 use crate::fence::Fencing;
-use crate::naming::{database_prefix, validate_mongo_database};
+use crate::naming::{BLOBS, STREAM_HEADS, STREAMS, database_prefix, validate_mongo_database};
 use crate::scoped::ScopedCollection;
 use crate::streams::MongoStreams;
 
@@ -62,6 +62,7 @@ pub(crate) struct Shared {
     validation_ready: AtomicBool,
     validation_scopes: Mutex<BTreeSet<String>>,
     pub(crate) specs: SpecCache,
+    pub(crate) existing: bool,
 }
 
 impl Shared {
@@ -84,12 +85,21 @@ impl Shared {
             validation_ready: AtomicBool::new(false),
             validation_scopes: Mutex::new(BTreeSet::new()),
             specs: SpecCache::default(),
+            existing: false,
         }
+    }
+
+    fn with_existing(mut self, existing: bool) -> Self {
+        self.existing = existing;
+        self
     }
 
     async fn prepare_validation_registry(&self) -> Result<()> {
         if self.validation_ready.load(Ordering::Acquire) {
             return Ok(());
+        }
+        if self.existing {
+            self.require_collection("_tsd_validated_batch").await?;
         }
         let outcome = self
             .raw("_tsd_validated_batch")
@@ -318,7 +328,8 @@ impl MongoStorage {
             clock,
             transactions,
             self.shared.physical_transactions,
-        );
+        )
+        .with_existing(self.shared.existing);
         Self {
             shared: Arc::new(shared),
             databases: Arc::default(),
@@ -417,6 +428,7 @@ impl fmt::Debug for MongoStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl StorageBackend for MongoStorage {
     fn driver(&self) -> &'static str {
         "mongodb"
@@ -426,7 +438,9 @@ impl StorageBackend for MongoStorage {
         let base = Capabilities::none()
             .with(Capability::FullText)
             .with(Capability::Ttl)
-            .with(Capability::CollectionEnumeration);
+            .with(Capability::CollectionEnumeration)
+            .with(Capability::ExistingSchema)
+            .with(Capability::CollectionValidation);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -442,6 +456,66 @@ impl StorageBackend for MongoStorage {
         } else {
             base
         }
+    }
+
+    fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
+        let shared = Shared::new(
+            self.shared.client.clone(),
+            self.shared.db.clone(),
+            self.shared.prefix.clone(),
+            Arc::clone(&self.shared.clock),
+            self.shared.transactions,
+            self.shared.physical_transactions,
+        )
+        .with_existing(true);
+        Ok(Arc::new(Self {
+            shared: Arc::new(shared),
+            databases: Arc::default(),
+        }))
+    }
+
+    async fn prepare_schema(&self) -> Result<()> {
+        if self.shared.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot prepare internal schema",
+            ));
+        }
+        for name in [
+            "_tsd_validated_batch".to_owned(),
+            crate::purge::RECEIPTS.to_owned(),
+            crate::purge::MANIFEST.to_owned(),
+            STREAMS.to_owned(),
+            STREAM_HEADS.to_owned(),
+            format!("{BLOBS}.files"),
+            format!("{BLOBS}.chunks"),
+        ] {
+            if !self.shared.collection_exists(&name).await? {
+                self.shared
+                    .db
+                    .create_collection(format!("{}{name}", self.shared.prefix))
+                    .await
+                    .map_err(errors::failed("prepare internal collection"))?;
+            }
+        }
+        self.shared
+            .prepare(STREAMS, crate::streams::segment_models())
+            .await?;
+        self.shared
+            .prepare(
+                &format!("{BLOBS}.files"),
+                vec![
+                    crate::blobs::file_index(),
+                    crate::blobs::standard_file_index(),
+                ],
+            )
+            .await?;
+        self.shared
+            .prepare(
+                &format!("{BLOBS}.chunks"),
+                vec![crate::blobs::chunk_index()],
+            )
+            .await
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
@@ -497,14 +571,17 @@ impl StorageBackend for MongoStorage {
             ));
         }
         let guard = match locator {
-            GuardDatabase::Default => Arc::new(Shared::new(
-                self.shared.client.clone(),
-                self.shared.db.clone(),
-                String::new(),
-                Arc::clone(&self.shared.clock),
-                true,
-                self.shared.physical_transactions,
-            )),
+            GuardDatabase::Default => Arc::new(
+                Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.db.clone(),
+                    String::new(),
+                    Arc::clone(&self.shared.clock),
+                    true,
+                    self.shared.physical_transactions,
+                )
+                .with_existing(self.shared.existing),
+            ),
             GuardDatabase::Named(name) => self.named(name)?,
             GuardDatabase::Current => unreachable!(),
         };
@@ -528,14 +605,17 @@ impl StorageBackend for MongoStorage {
         self.for_scope_fenced_in_database(scope, fence, locator)?;
         let shared = match locator {
             GuardDatabase::Current => Arc::clone(&self.shared),
-            GuardDatabase::Default => Arc::new(Shared::new(
-                self.shared.client.clone(),
-                self.shared.db.clone(),
-                String::new(),
-                Arc::clone(&self.shared.clock),
-                true,
-                self.shared.physical_transactions,
-            )),
+            GuardDatabase::Default => Arc::new(
+                Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.db.clone(),
+                    String::new(),
+                    Arc::clone(&self.shared.clock),
+                    true,
+                    self.shared.physical_transactions,
+                )
+                .with_existing(self.shared.existing),
+            ),
             GuardDatabase::Named(name) => self.named(name)?,
         };
         Ok(self.handles_generation(
@@ -575,14 +655,17 @@ impl MongoStorage {
             .map_err(|_| StorageError::backend("mongodb database registry lock poisoned"))?;
         Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
             || {
-                Arc::new(Shared::new(
-                    self.shared.client.clone(),
-                    self.shared.db.clone(),
-                    database_prefix(name),
-                    Arc::clone(&self.shared.clock),
-                    self.shared.transactions,
-                    self.shared.physical_transactions,
-                ))
+                Arc::new(
+                    Shared::new(
+                        self.shared.client.clone(),
+                        self.shared.db.clone(),
+                        database_prefix(name),
+                        Arc::clone(&self.shared.clock),
+                        self.shared.transactions,
+                        self.shared.physical_transactions,
+                    )
+                    .with_existing(self.shared.existing),
+                )
             },
         )))
     }
@@ -591,3 +674,7 @@ impl MongoStorage {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;
