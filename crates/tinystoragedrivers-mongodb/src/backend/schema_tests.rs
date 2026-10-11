@@ -64,13 +64,9 @@ async fn empty_window_refuses_damaged_schema(target: &str, expected: ErrorKind) 
         .unwrap()
         .for_scope(&Scope::local())
         .unwrap();
-    assert!(
-        actor
-            .streams()
-            .read_window("s", 0, 0)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        actor.streams().read_window("s", 0, 0).await.unwrap(),
+        Vec::<tinystoragedrivers_core::StreamEntry>::new()
     );
     match target {
         "index" => storage
@@ -311,13 +307,9 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
     let restricted = fresh.existing_schema().unwrap().database(&target).unwrap();
     let actor = restricted.for_scope(&scope).unwrap();
     ddl.store(0, Ordering::SeqCst);
-    assert!(
-        actor
-            .streams()
-            .read_window("s", 0, 0)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        actor.streams().read_window("s", 0, 0).await.unwrap(),
+        Vec::<tinystoragedrivers_core::StreamEntry>::new()
     );
     actor
         .documents()

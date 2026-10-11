@@ -20,4 +20,6 @@ Restricted Mongo GridFS uploads refuse Unsupported(ExistingSchema): the SDK may 
 
 Trusted GridFS preparation creates the unique `(files_id, n)` chunk index; restricted blob operations validate that uniqueness rather than treating a non-unique index as prepared schema. Standalone scoped document deletion validates the persisted declaration and its indexes before changing records. Malformed Memory collection names remain InvalidInput even when no declaration exists.
 
+Restricted Mongo stream windows validate persisted heads, segments and required indexes even when the requested limit is zero. Returning an empty window does not waive schema admission.
+
 An administrator changing or deleting schema concurrently is outside this contract. The owner bootstrap and restricted data handles must address the same real native database; inspection is not authority to repair missing schema. Generation/purge and validated-batch APIs are independent publication slices.

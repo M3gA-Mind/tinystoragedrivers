@@ -34,8 +34,9 @@ variables. Fresh full coverage passed 547 Rust tests with both Mongo fixtures,
 eight actual native syscall failure injections, the actual two-link key publisher
 and concurrent reader proof, and actual isolated Secret Service. All 75 executable
 production files have at least 90% line coverage (minimum 90.1515%). The linked
-checkout coverage selector is an explicit pure-tooling dependency on PR20
-(`a44e09f`), merged with preserved history while that PR awaits canonical publication.
+checkout coverage selector from PR20 (`a44e09f`) was first integrated as an
+explicit pure-tooling dependency. Its canonical publication (`2fe0b42`) has now
+been merged with preserved history; no unpublished dependency remains.
 It fixes all three native supplements, including the newly merged Secret Service
 helper, and fails closed for an absent, empty or ambiguous current inventory.
 Two Python tests passed, including a probe through the actual I/O helper entry
@@ -64,3 +65,21 @@ native supplement passed again; all 75 executable production files remain above
 90% (minimum 90.1515%). Strict Clippy, build, warnings-denied rustdoc, formatting
 and diff checks passed. This evidence supersedes the earlier test counts for the
 reviewed production source.
+
+## Empty stream admission follow-up
+
+Three actual Mongo regressions reproduced zero-limit stream windows returning
+empty success despite missing heads, missing segments or a missing required
+segment index. Restricted handles now perform the same read-only native schema
+validation before returning an empty window. Classic zero-limit behavior remains
+unchanged. The three cases passed on replica and true standalone servers; valid
+zero-limit reads also run within the native no-DDL command-trace proof.
+
+Fresh regular validation passed 554 Rust tests plus 27 doctests with both Mongo
+servers enabled, and 517 Rust tests plus 25 doctests in the default run. Strict
+Clippy, build and warnings-denied rustdoc passed. The first Clippy run rejected
+two empty-value assertions; those assertions were changed to explicit equality
+without suppressing the lint.
+Full coverage was refreshed after that assertion change: 554 tests and all
+actual native supplements passed, with all 75 production files at least 90%
+(minimum 90.1515%). Formatting and diff checks passed.
