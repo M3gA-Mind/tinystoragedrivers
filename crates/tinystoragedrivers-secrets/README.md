@@ -71,3 +71,8 @@ on every call:
 against every driver. The keyring driver runs it over an in-memory
 credential builder. The real OS store is only touched by
 `live_keyring_conformance`, and only with `TSD_LIVE_KEYRING=1`.
+
+Private file namespaces, atomic restrictive birth, and the bounded verified file
+import API are documented in [the file module](src/file/README.md). Import
+receipts retain live object identity; authenticated backup recovery after a
+restart returns bytes, not permission to delete a newly resolved source path.

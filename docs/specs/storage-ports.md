@@ -159,3 +159,47 @@ should become async.
 - `tinystoragedrivers-core` depends on no database client or transport, and CI
   asserts this.
 - Every source file has at least 90% line coverage.
+
+
+## Validated document batches
+
+A document port advertising `ValidatedBatch` implements
+`atomic_batch_checked(read_checks, write_ops)`. A `ReadCheck` names a collection
+and document id in the bound scope and database. Its `ExpectedDocument` is
+either `Absent` or an exact live `Version`. Expired documents count as absent.
+All checks inspect the pre-write state, followed by the writes in their input
+order, inside one native lock or transaction. Contradictory duplicate checks
+return `Conflict`; equivalent duplicates are allowed. Empty and read-only
+batches still validate the native fence. Dependency bodies and logical versions
+are never rewritten. A failed check or write applies none of the batch.
+
+The default trait implementation returns `Unsupported(ValidatedBatch)`.
+Memory and SQLite support this operation. File storage refuses it until its
+multi-document persistence has a crash-atomic commit contract. Mongo supports
+it on transaction-capable deployments when public transactions are enabled;
+standalone servers do not advertise it.
+
+Mongo uses reserved metadata counters per named database and storage scope.
+Every document mutation, including claims, deletion, expiry sweeping and writes
+through independently opened handles, increments its scope counter inside the
+same physical transaction. This prevents snapshot write skew for both version
+and absence checks, without changing user documents. Ordinary writes in
+unrelated scopes touch different counters. Collection-wide schema changes and
+expiry burial lock registration and all registered scope counters atomically.
+First admission of a scope also locks registration, so it cannot bypass a
+concurrent schema change. Mongo does not create server TTL indexes; expiry is
+filtered on reads and buried by driver mutations.
+
+On replica sets, `without_transactions()` disables public transactional
+capabilities, including validated batches and fencing. Ordinary document
+mutations still use internal physical transactions to participate in validation
+serialization. This narrows the former promise that the handle never used any
+transactions. True standalone deployments keep ordinary single-document writes.
+
+Mongo bounds transient transaction retries to 64 attempts with staggered,
+bounded backoff. Exhaustion returns the typed last error; a changed dependency
+returns nonretryable `Conflict`. An unknown commit result returns a
+nonretryable backend error because the mutation may have committed: callers
+must read their durable outcome before retrying. The API has no deadline
+parameter. Scope serialization trades same-scope mutation throughput for
+cross-document serializability.

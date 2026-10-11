@@ -12,8 +12,8 @@ use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::capabilities::{Capabilities, Capability};
 use crate::document::{
-    CollectionSpec, Cursor, DocumentStore, Page, Precondition, Query, SearchHit, Version,
-    Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
+    CollectionSpec, Cursor, DocumentStore, Page, Precondition, Query, ReadCheck, SearchHit,
+    Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
 };
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort, sort_documents};
@@ -132,6 +132,7 @@ impl DocumentStore for MemoryDocuments {
         Capabilities::none()
             .with(Capability::FullText)
             .with(Capability::Transactions)
+            .with(Capability::ValidatedBatch)
             .with(Capability::Ttl)
             .with(Capability::Fencing)
             .with(Capability::CrossDatabaseFencing)
@@ -280,6 +281,14 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked(Vec::new(), ops).await
+    }
+
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
         for op in &ops {
             let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
             self.check_schema(collection)?;
@@ -289,6 +298,13 @@ impl DocumentStore for MemoryDocuments {
         let mut state = self.db.lock()?;
         let now = self.now();
         self.guard(&state, now)?;
+        for check in &checks {
+            check.verify(
+                state
+                    .get(self.scope.as_str(), &check.collection, &check.id, now)
+                    .map(|found| found.version),
+            )?;
+        }
         // A batch only writes documents; copying the rest would cost time
         // proportional to every stored stream and blob.
         let mut draft = DbState {

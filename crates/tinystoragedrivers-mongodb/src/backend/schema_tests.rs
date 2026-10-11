@@ -19,6 +19,7 @@ async fn existing_schema_refuses_declaration_before_backend_network() {
             String::new(),
             Arc::new(|| 0),
             true,
+            true,
         )),
         databases: Arc::default(),
     };
@@ -77,6 +78,7 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
             db.clone(),
             String::new(),
             Arc::new(|| 0),
+            transactions,
             transactions,
         )),
         databases: Arc::default(),

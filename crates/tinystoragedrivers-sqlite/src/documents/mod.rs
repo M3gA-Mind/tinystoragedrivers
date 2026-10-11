@@ -20,8 +20,8 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
-    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp, WriteResult,
-    async_trait, validate_doc, value,
+    Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
+    WriteResult, async_trait, validate_doc, value,
 };
 
 use crate::connection::Db;
@@ -36,6 +36,7 @@ pub(crate) fn capabilities() -> Capabilities {
     Capabilities::none()
         .with(Capability::FullText)
         .with(Capability::Transactions)
+        .with(Capability::ValidatedBatch)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
         .with(Capability::CrossDatabaseFencing)
@@ -318,6 +319,14 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        self.atomic_batch_checked(Vec::new(), ops).await
+    }
+
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
         if self.existing {
             for op in &ops {
                 let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
@@ -326,6 +335,13 @@ impl DocumentStore for SqliteDocuments {
             }
         }
         self.with(Access::Write, move |conn, ctx| {
+            for check in &checks {
+                check.validate()?;
+                check.verify(
+                    ops::get(conn, ctx, &check.collection, &check.id)?.map(|found| found.version),
+                )?;
+            }
+
             ops.into_iter()
                 .map(|op| match op {
                     WriteOp::Put {

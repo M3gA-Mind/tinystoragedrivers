@@ -429,6 +429,51 @@ pub struct Page<T> {
     pub next: Option<Cursor>,
 }
 
+/// Expected live state of a read-only batch dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "version", rename_all = "snake_case")]
+pub enum ExpectedDocument {
+    /// The dependency must be absent, including documents expired by TTL.
+    Absent,
+    /// The dependency must exist at this exact logical revision.
+    Version(Version),
+}
+
+/// A read-only dependency in the document handle's database and scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadCheck {
+    /// Collection containing the dependency.
+    pub collection: String,
+    /// Dependency document id.
+    pub id: String,
+    /// Required live state at the batch's atomic validation point.
+    pub expected: ExpectedDocument,
+}
+
+impl ReadCheck {
+    /// Validate this address without consulting persistent state.
+    ///
+    /// # Errors
+    /// Invalid collection or document id.
+    pub fn validate(&self) -> Result<()> {
+        validate_collection(&self.collection)?;
+        validate_id(&self.id)
+    }
+
+    /// Check the dependency's live revision, without rewriting it.
+    ///
+    /// # Errors
+    /// Conflict if the live state differs, or an invalid address.
+    pub fn verify(&self, current: Option<Version>) -> Result<()> {
+        self.validate()?;
+        match (self.expected, current) {
+            (ExpectedDocument::Absent, None) => Ok(()),
+            (ExpectedDocument::Version(expected), Some(actual)) if expected == actual => Ok(()),
+            _ => Err(StorageError::conflict("a batch read dependency changed")),
+        }
+    }
+}
+
 /// One write inside an atomic batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -482,3 +527,7 @@ pub struct SearchHit {
     /// result list.
     pub score: f64,
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

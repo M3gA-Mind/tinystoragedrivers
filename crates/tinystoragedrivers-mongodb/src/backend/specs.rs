@@ -205,6 +205,20 @@ impl Shared {
                 });
             }
         }
+        if self.physical_transactions {
+            self.prepare_validation(None).await?;
+            return crate::fence::in_write!(self, None, session => {
+                    self.hold_validation(None, session).await?;
+                for chunk in selectors.chunks(256) {
+                collection
+                    .update_many(doc! {"$and": [not_deleted(), {"$or": chunk}]}, bury())
+                    .session(&mut *session)
+                    .await
+                    .map_err(errors::failed("bury expired documents"))?;
+            }
+                    Ok(())
+                });
+        }
         for chunk in selectors.chunks(256) {
             collection
                 .update_many(doc! {"$and": [not_deleted(), {"$or": chunk}]}, bury())
@@ -303,6 +317,27 @@ impl Shared {
         Ok(spec)
     }
 
+    /// Read the declaration in the serialized document transaction, bypassing
+    /// the ordinary read cache so dependency expiry uses the current schema.
+    pub(crate) async fn spec_in_session(
+        &self,
+        collection: &str,
+        session: &mut mongodb::ClientSession,
+    ) -> Result<CollectionSpec> {
+        let stored = self
+            .raw(META)
+            .find_one(doc! {"_id": collection})
+            .session(session)
+            .await
+            .map_err(errors::failed("read transactional collection declaration"))?;
+        let spec = match stored {
+            Some(entry) => decode_meta(&entry)?.0,
+            None => CollectionSpec::new(collection),
+        };
+        self.specs.store(spec.clone());
+        Ok(spec)
+    }
+
     /// Build `models` on the Mongo collection `name` once per process.
     ///
     /// # Errors
@@ -358,27 +393,17 @@ impl Shared {
                 return Ok(());
             }
             let encoded = serde_json::to_string(&merged)?;
-            let written = match existing {
-                None => match meta
-                    .insert_one(doc! {"_id": &spec.name, "spec": &encoded, "rev": 1_i64})
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(error) if errors::duplicate_index(&error).is_some() => false,
-                    Err(error) => return Err(errors::map(error, "declare a collection")),
-                },
-                Some((_, rev)) => {
-                    meta.update_one(
-                        doc! {"_id": &spec.name, "rev": rev},
-                        doc! {"$set": {"spec": &encoded, "rev": rev + 1}},
-                    )
-                    .await
-                    .map_err(errors::failed("declare a collection"))?
-                    .matched_count
-                        == 1
-                }
-            };
-            if written {
+            let revision = existing.map(|(_, rev)| rev);
+            let written = if self.physical_transactions {
+                self.prepare_validation(None).await?;
+                crate::fence::in_write!(self, None, session => {
+                    self.hold_validation(None, session).await?;
+                    self.write_spec(&spec.name, &encoded, revision, Some(session)).await
+                })
+            } else {
+                self.write_spec(&spec.name, &encoded, revision, None).await
+            }?;
+            if let Some(merged) = written {
                 self.specs.store(merged);
                 return Ok(());
             }
@@ -386,6 +411,63 @@ impl Shared {
         Err(StorageError::unavailable(
             "collection declaration kept changing concurrently",
         ))
+    }
+
+    async fn write_spec(
+        &self,
+        name: &str,
+        encoded: &str,
+        revision: Option<i64>,
+        mut session: Option<&mut mongodb::ClientSession>,
+    ) -> Result<Option<CollectionSpec>> {
+        let meta = self.raw(META);
+        let requested: CollectionSpec = serde_json::from_str(encoded)?;
+        let (applied, revision) = if let Some(session) = session.as_deref_mut() {
+            let stored = meta
+                .find_one(doc! {"_id": name})
+                .session(session)
+                .await
+                .map_err(errors::failed("read transactional declaration"))?;
+            match stored {
+                Some(stored) => {
+                    let (current, rev) = decode_meta(&stored)?;
+                    (current.merge(&requested)?, Some(rev))
+                }
+                None => (requested, None),
+            }
+        } else {
+            (requested, revision)
+        };
+        let encoded = serde_json::to_string(&applied)?;
+        let written = match revision {
+            None => {
+                let action = meta.insert_one(doc! {"_id": name, "spec": &encoded, "rev": 1_i64});
+                let outcome = match session {
+                    Some(session) => action.session(session).await,
+                    None => action.await,
+                };
+                match outcome {
+                    Ok(_) => true,
+                    Err(error) if errors::duplicate_index(&error).is_some() => false,
+                    Err(error) => return Err(errors::map(error, "declare a collection")),
+                }
+            }
+            Some(rev) => {
+                let action = meta.update_one(
+                    doc! {"_id": name, "rev": rev},
+                    doc! {"$set": {"spec": &encoded, "rev": rev + 1}},
+                );
+                let outcome = match session {
+                    Some(session) => action.session(session).await,
+                    None => action.await,
+                };
+                outcome
+                    .map_err(errors::failed("declare a collection"))?
+                    .matched_count
+                    == 1
+            }
+        };
+        Ok(written.then_some(applied))
     }
 
     async fn build_indexes(

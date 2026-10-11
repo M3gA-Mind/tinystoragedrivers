@@ -66,9 +66,24 @@ macro_rules! in_fence {
 }
 pub(crate) use in_fence;
 
+/// Run a document mutation with an optional native lease fence.
+macro_rules! in_write {
+    ($shared:expr, $fence:expr, $session:ident => $body:expr) => {{
+        let mut txn = $crate::fence::FencedTxn::start_optional($shared, $fence).await?;
+        loop {
+            let $session = txn.begin().await?;
+            let outcome = async { $body }.await;
+            if let Some(done) = txn.finish(outcome).await? {
+                break Ok::<_, tinystoragedrivers_core::StorageError>(done);
+            }
+        }
+    }};
+}
+pub(crate) use in_write;
+
 /// One fenced write's session and attempt count.
 pub(crate) struct FencedTxn<'a> {
-    fence: &'a Fencing,
+    fence: Option<&'a Fencing>,
     session: ClientSession,
     attempts: usize,
     last: StorageError,
@@ -87,6 +102,16 @@ fn kept_aborting() -> StorageError {
     StorageError::unavailable("fenced transaction kept aborting; retry")
 }
 
+/// Bounded staggered retries keep contending metadata writers from exhausting
+/// their attempts while the winning transaction is still making progress.
+async fn retry_pause(attempt: usize) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let stagger = NEXT.fetch_add(1, Ordering::Relaxed) % 17;
+    let base = 1_u64 << attempt.min(5);
+    tokio::time::sleep(std::time::Duration::from_millis(base + stagger)).await;
+}
+
 impl<'a> FencedTxn<'a> {
     /// Open the session the attempts share.
     ///
@@ -94,6 +119,13 @@ impl<'a> FencedTxn<'a> {
     ///
     /// When no session can be started.
     pub(crate) async fn start(shared: &'a Shared, fence: &'a Fencing) -> Result<Self> {
+        Self::start_optional(shared, Some(fence)).await
+    }
+
+    pub(crate) async fn start_optional(
+        shared: &Shared,
+        fence: Option<&'a Fencing>,
+    ) -> Result<Self> {
         let session = shared
             .client
             .start_session()
@@ -117,7 +149,10 @@ impl<'a> FencedTxn<'a> {
     /// is spent, or a server error.
     pub(crate) async fn begin(&mut self) -> Result<&mut ClientSession> {
         // Outside the transaction: the spec cache may read the server.
-        let spec = self.fence.shared.spec(self.fence.collection()).await?;
+        let spec = match self.fence {
+            Some(fence) => Some(fence.shared.spec(fence.collection()).await?),
+            None => None,
+        };
         loop {
             if self.attempts == FENCE_ATTEMPTS {
                 return Err(std::mem::replace(&mut self.last, kept_aborting()));
@@ -127,7 +162,11 @@ impl<'a> FencedTxn<'a> {
                 .start_transaction()
                 .await
                 .map_err(errors::failed("start a transaction"))?;
-            match self.guard(&spec).await {
+            let checked = match &spec {
+                Some(spec) => self.guard(spec).await,
+                None => Ok(()),
+            };
+            match checked {
                 Ok(()) => return Ok(&mut self.session),
                 Err(error) => {
                     let _ = self.session.abort_transaction().await;
@@ -135,6 +174,7 @@ impl<'a> FencedTxn<'a> {
                         return Err(error);
                     }
                     self.last = error;
+                    retry_pause(self.attempts).await;
                 }
             }
         }
@@ -142,8 +182,10 @@ impl<'a> FencedTxn<'a> {
 
     /// Check the guard document and hold it for this transaction.
     async fn guard(&mut self, spec: &CollectionSpec) -> Result<()> {
-        let fence = self.fence;
-        let handle = self.fence.shared.scoped(fence.collection(), fence.scope());
+        let fence = self
+            .fence
+            .ok_or_else(|| StorageError::backend("native guard is not bound"))?;
+        let handle = fence.shared.scoped(fence.collection(), fence.scope());
         let found = handle
             .find_one(
                 doc! {"_id": document_id(fence.scope(), fence.id())},
@@ -151,7 +193,7 @@ impl<'a> FencedTxn<'a> {
             )
             .await
             .map_err(errors::failed("read a fence document"))?;
-        let now = self.fence.shared.now();
+        let now = fence.shared.now();
         let Some(live) = found
             .as_ref()
             .map(Stored::decode)
@@ -198,11 +240,16 @@ impl<'a> FencedTxn<'a> {
                     return Err(error);
                 }
                 self.last = error;
+                retry_pause(self.attempts).await;
                 return Ok(None);
             }
         };
         let committed = MongoDocuments::commit(&mut self.session).await;
-        settle(&mut self.last, value, committed)
+        let outcome = settle(&mut self.last, value, committed)?;
+        if outcome.is_none() {
+            retry_pause(self.attempts).await;
+        }
+        Ok(outcome)
     }
 }
 

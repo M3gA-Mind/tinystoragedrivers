@@ -43,10 +43,12 @@ pub enum Capability {
     ConditionalStreamAppend,
     /// Native fenced writes whose guard lives in another database.
     CrossDatabaseFencing,
+    /// Document batches validate read-only dependencies atomically with writes.
+    ValidatedBatch,
 }
 
 impl Capability {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -58,6 +60,7 @@ impl Capability {
         Self::CollectionEnumeration,
         Self::ConditionalStreamAppend,
         Self::CrossDatabaseFencing,
+        Self::ValidatedBatch,
     ];
 
     const fn bit(self) -> u32 {
@@ -73,6 +76,7 @@ impl Capability {
             Self::CollectionEnumeration => 1 << 6,
             Self::ConditionalStreamAppend => 1 << 7,
             Self::CrossDatabaseFencing => 1 << 8,
+            Self::ValidatedBatch => 1 << 9,
         }
     }
 }
@@ -91,6 +95,7 @@ impl fmt::Display for Capability {
             Self::CollectionEnumeration => "collection_enumeration",
             Self::ConditionalStreamAppend => "conditional_stream_append",
             Self::CrossDatabaseFencing => "cross_database_fencing",
+            Self::ValidatedBatch => "validated_batch",
         })
     }
 }
@@ -135,7 +140,8 @@ impl Capabilities {
                 | Capability::StreamingBlobs.bit()
                 | Capability::CollectionEnumeration.bit()
                 | Capability::ConditionalStreamAppend.bit()
-                | Capability::CrossDatabaseFencing.bit(),
+                | Capability::CrossDatabaseFencing.bit()
+                | Capability::ValidatedBatch.bit(),
         )
     }
 

@@ -35,6 +35,7 @@ fn all_holds_every_capability() {
             Capability::CollectionEnumeration,
             Capability::ConditionalStreamAppend,
             Capability::CrossDatabaseFencing,
+            Capability::ValidatedBatch,
         ]
     );
 }
