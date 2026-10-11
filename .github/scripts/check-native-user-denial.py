@@ -33,7 +33,7 @@ SCRIPT_STAGES = {"Start", "Identity", "Paths", "Segments", "Serialize", "Complet
 ERROR_CATEGORIES = {"ParserError", "InvalidArgument", "ObjectNotFound", "PermissionDenied",
                     "InvalidOperation", "ResourceUnavailable", "NotSpecified", "Other"}
 
-# Paths enter only through the child environment and Get-Acl's literal argument.
+# Paths enter only through the child environment and Get-Item's literal argument.
 # SID values remain inside the child; even error output is never copied.
 ACL_DIAGNOSTIC_SCRIPT = r"""$ErrorActionPreference='Stop'
 $stage='Start'
@@ -108,7 +108,12 @@ for($ordinal=0;$ordinal -lt 3;$ordinal++) {
    $readStage='Item'
    $item=Get-Item -Force -LiteralPath $paths[$ordinal]
    $readStage='Acl'
-   $acl=Get-Acl -LiteralPath $paths[$ordinal]
+   if($item -isnot [IO.FileInfo] -and $item -isnot [IO.DirectoryInfo]) {
+    $readCategory='InvalidArgument';throw 'filesystem object required'
+   }
+   # Owner and discretionary ACL only, matching the native reader's sections.
+   $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+   $acl=$item.GetAccessControl($sections)
    $readStage='Descriptor'
    $raw=[Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(),0)
    $readStage='Owner'

@@ -392,8 +392,21 @@ class NativeWindowsPathDecoder(unittest.TestCase):
                 segments = record["segments"]
                 self.assertEqual([segment["status"] for segment in segments],
                                  ["Observed", "Missing", "Observed"])
+                self.assertEqual([segment["ordinal"] for segment in segments], [0, 1, 2])
+                self.assertEqual([segment["role"] for segment in segments],
+                                 ["Volume", "Outer", "Private"])
                 self.assertFalse(segments[0]["directory"])
                 self.assertTrue(segments[2]["directory"])
+                # Both filesystem overloads must yield owner and discretionary ACL
+                # metadata through the actual launcher, without the Get-Acl cmdlet.
+                for segment in [segments[0], segments[2]]:
+                    self.assertFalse(segment["reparse"])
+                    self.assertIn(segment["owner_class"],
+                                  {"Current", "System", "Admins", "TrustedInstaller"})
+                    self.assertTrue(segment["owner_trusted"])
+                    self.assertEqual(segment["dacl"], "Present")
+                    self.assertTrue(segment["aces"])
+                self.assertEqual(segments[0]["owner_class"], segments[2]["owner_class"])
             except AssertionError:
                 print_finite_failure(record)
                 raise
