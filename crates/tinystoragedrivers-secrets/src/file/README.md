@@ -108,3 +108,31 @@ must fail with access denied and leave the objects unchanged. Unix uses the exis
 unprivileged `nobody` account; the Windows CI fixture creates a random local
 standard account and removes it in a `finally` block. No operator account or
 operator credential is used by this fixture.
+
+## Read-only legacy HEX key source
+
+`ProtectedHexKeyFile::new` binds one absolute, host-selected path without I/O.
+The object implements `HexKeyFileSource::read_encoded`, returning
+`Option<Zeroizing<Vec<u8>>>`. Only a missing leaf under successfully admitted,
+rechecked existing ancestors returns `None`; missing parents remain errors.
+This source never creates a parent, master, lock or import ledger, repairs
+permissions, writes or deletes. It is separate from `load_or_create_key_file`.
+
+The original encoding, including surrounding Unicode whitespace and hex case,
+is retained after validation as exactly 64 ASCII hex digits representing
+32 bytes. The maximum encoding is 4096 UTF-8 bytes, including whitespace.
+Metadata checks and streamed limit-plus-one reads bound growing files.
+Invalid UTF-8 or size is `InvalidInput`, malformed keys are `Crypto`, native
+admission failures are `Backend`, and transient I/O is `Unavailable`.
+Diagnostics redact both path and material, including backend source chains.
+
+Reads reuse native namespace and regular-file admission without weakening
+owner, permission/DACL, single-link or no-symlink/reparse requirements.
+Windows owner-only inherited DACLs remain admissible; a protected-DACL bit
+is not a read requirement. After reading, the source rechecks opened-file
+protection, namespace pins, named identity and exact bytes. These checks do
+not promise immunity to uncoordinated same-user changes after the final
+check. Cancellation can leave blocking reads finishing, with no mutation.
+Reading grants no durable publication, migration or deletion acknowledgment.
+Native Windows source tests require their own Windows execution; Linux
+results do not establish that platform's admission.

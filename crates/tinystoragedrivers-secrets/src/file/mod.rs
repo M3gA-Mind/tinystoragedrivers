@@ -46,6 +46,8 @@ use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
 use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
 use crate::task::{io_error, run_blocking};
 
+mod hex_key_source;
+pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
 mod migration;
 pub use migration::{
     CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,

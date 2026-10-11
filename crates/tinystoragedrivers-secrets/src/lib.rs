@@ -71,8 +71,9 @@ pub mod testkit;
 
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
 pub use file::{
-    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, KEY_FILE_NAME,
-    PublicationBoundary, SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file,
+    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, HexKeyFileSource, KEY_FILE_NAME,
+    MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile, PublicationBoundary, SECRETS_FILE_NAME,
+    VerifiedFileImport, load_or_create_key_file,
 };
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
