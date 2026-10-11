@@ -31,7 +31,7 @@ async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_b
     let Ok(url) = std::env::var("TSD_MONGO_STANDALONE_URL") else {
         return;
     };
-    let backend = tinystoragedrivers_mongodb::MongoStorage::connect(&url, "tsd_standalone")
+    let backend = tinystoragedrivers_mongodb::MongoStorage::connect(&url, &support::database(&url))
         .await
         .unwrap();
     for capability in [
