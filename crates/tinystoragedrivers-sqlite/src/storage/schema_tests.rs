@@ -336,3 +336,70 @@ async fn existing_schema_checked_dependencies_require_declarations() {
         ErrorKind::NotFound
     );
 }
+
+#[tokio::test]
+async fn existing_schema_validates_inputs_before_missing_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path())
+        .unwrap()
+        .existing_schema()
+        .unwrap();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    let docs = scoped.documents();
+    let invalid_filter = tinystoragedrivers_core::Filter::eq("", 1);
+    let invalid_query = tinystoragedrivers_core::Query {
+        filter: invalid_filter.clone(),
+        ..tinystoragedrivers_core::Query::default()
+    };
+    let invalid_cursor = tinystoragedrivers_core::Query {
+        cursor: Some(tinystoragedrivers_core::Cursor("invalid".into())),
+        ..tinystoragedrivers_core::Query::default()
+    };
+    let errors = [
+        docs.get("missing", "").await.unwrap_err(),
+        docs.put("missing", "n", json!(null), Precondition::None)
+            .await
+            .unwrap_err(),
+        docs.delete("missing", "", Precondition::None)
+            .await
+            .unwrap_err(),
+        docs.query("missing", &invalid_query).await.unwrap_err(),
+        docs.query("missing", &invalid_cursor).await.unwrap_err(),
+        docs.count("missing", &invalid_filter).await.unwrap_err(),
+        docs.delete_where("missing", &invalid_filter)
+            .await
+            .unwrap_err(),
+        docs.claim("missing", &invalid_filter, &[], &json!({}))
+            .await
+            .unwrap_err(),
+        docs.claim(
+            "missing",
+            &tinystoragedrivers_core::Filter::All,
+            &[],
+            &json!(null),
+        )
+        .await
+        .unwrap_err(),
+        docs.atomic_batch(vec![tinystoragedrivers_core::WriteOp::Put {
+            collection: "missing".into(),
+            id: "n".into(),
+            doc: json!(null),
+            precondition: Precondition::None,
+        }])
+        .await
+        .unwrap_err(),
+        docs.atomic_batch_checked(
+            vec![tinystoragedrivers_core::ReadCheck {
+                collection: "missing".into(),
+                id: String::new(),
+                expected: tinystoragedrivers_core::ExpectedDocument::Absent,
+            }],
+            vec![],
+        )
+        .await
+        .unwrap_err(),
+    ];
+    for error in errors {
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+}

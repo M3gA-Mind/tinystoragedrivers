@@ -612,3 +612,151 @@ async fn live_existing_schema_blob_read_refuses_missing_files_index() {
 async fn live_existing_schema_blob_read_refuses_incompatible_files_index() {
     blob_read_refuses_damaged_files_index(true).await;
 }
+
+#[tokio::test]
+async fn live_trusted_preparation_creates_purge_collections() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let present = [
+        storage
+            .shared
+            .collection_exists("_tsd_purge_receipts")
+            .await
+            .unwrap(),
+        storage
+            .shared
+            .collection_exists("_tsd_purge_blobs")
+            .await
+            .unwrap(),
+    ];
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(present, [true, true]);
+}
+
+#[tokio::test]
+async fn live_existing_schema_purge_does_not_create_missing_internal_collections() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    for missing in ["_tsd_purge_receipts", "_tsd_purge_blobs"] {
+        let (storage, prefix) = configured_fixture(&url).await;
+        storage.prepare_schema().await.unwrap();
+        for name in ["_tsd_purge_receipts", "_tsd_purge_blobs"] {
+            if !storage.shared.collection_exists(name).await.unwrap() {
+                storage
+                    .shared
+                    .db
+                    .create_collection(format!("{}{name}", storage.shared.prefix))
+                    .await
+                    .unwrap();
+            }
+        }
+        storage.shared.raw(missing).drop().await.unwrap();
+        let actor = storage
+            .existing_schema()
+            .unwrap()
+            .for_scope(&Scope::local())
+            .unwrap();
+        let outcome = actor
+            .purge(&tinystoragedrivers_core::PurgeRequest {
+                operation_id: "reset".into(),
+                mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+            })
+            .await;
+        let recreated = storage.shared.collection_exists(missing).await.unwrap();
+        cleanup_fixture(&storage, &prefix).await;
+        assert_eq!(outcome.unwrap_err().kind(), ErrorKind::NotFound);
+        assert!(!recreated);
+    }
+}
+
+#[tokio::test]
+async fn live_existing_schema_generation_default_guard_requires_declaration() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (fixture, prefix) = configured_fixture(&url).await;
+    let storage = default_fixture(&fixture);
+    storage.prepare_schema().await.unwrap();
+    let lease_collection = format!("{prefix}_leases");
+    let cluster = Scope::new(format!("cluster_{prefix}")).unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let leases = storage.for_scope(&cluster).unwrap().documents().clone();
+    leases
+        .ensure_collection(&CollectionSpec::new(&lease_collection).ttl("until"))
+        .await
+        .unwrap();
+    leases
+        .put(
+            &lease_collection,
+            "alice",
+            json!({"epoch": 1, "until": 0}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let target = format!("{prefix}_sessions");
+    let named = storage.database(&target).unwrap();
+    named.prepare_schema().await.unwrap();
+    named
+        .for_scope(&scope)
+        .unwrap()
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    let fence = Fence::new(cluster, &lease_collection, "alice", Filter::eq("epoch", 1));
+    let restricted = storage
+        .existing_schema()
+        .unwrap()
+        .database(&target)
+        .unwrap();
+    let actor = restricted
+        .for_scope_fenced_in_database_generation(
+            &scope,
+            tinystoragedrivers_core::ScopeGeneration::default(),
+            &fence,
+            &GuardDatabase::Default,
+        )
+        .unwrap();
+    storage
+        .shared
+        .raw(crate::naming::META)
+        .delete_one(doc! {"_id": &lease_collection})
+        .await
+        .unwrap();
+    let outcome = actor
+        .documents()
+        .put("notes", "n", json!({}), Precondition::None)
+        .await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.unwrap_err().kind(), ErrorKind::NotFound);
+}
+
+#[tokio::test]
+async fn live_existing_schema_purge_uses_prepared_internal_collections() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    let outcome = actor
+        .purge(&tinystoragedrivers_core::PurgeRequest {
+            operation_id: "reset".into(),
+            mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+        })
+        .await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(
+        outcome.unwrap().status,
+        tinystoragedrivers_core::PurgeStatus::Complete
+    );
+}
