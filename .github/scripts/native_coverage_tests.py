@@ -165,6 +165,24 @@ class NativeCoverageGate(unittest.TestCase):
         receipt = json.loads((self.root / "target/secrets-native-coverage-receipt.json").read_text())
         self.assertEqual(receipt["changed_lines"], 1)
 
+    def test_complementary_generic_instantiations_preserve_both_coverage_measures(self):
+        fixture = Path(__file__).with_name("fixtures") / "scope-complementary-instantiations.json"
+        data = json.loads(fixture.read_text())
+        entry = data["files"][0]
+        entry["filename"] = self.entry["filename"]
+        for function in data["functions"]:
+            function["filenames"] = [self.entry["filename"] if name == "scope/mod.rs" else name
+                                     for name in function["filenames"]]
+        self.assertEqual(entry["summary"]["lines"]["count"], 44)
+        self.assertEqual(entry["summary"]["lines"]["covered"], 42)
+        self.assertEqual(len(gate.json_lines(entry)), 43)
+        self.assertTrue(all(gate.json_lines(entry).values()))
+        self.report.write_text(json.dumps({"data": [data]}))
+        self.lcov.write_text(fixture.with_suffix(".lcov").read_text()
+                            .replace("SF:scope/mod.rs", "SF:" + self.entry["filename"]))
+        self.diff = "+++ b/" + self.module + "\n@@ -0,0 +49 @@\n+executable\n"
+        self.run_gate()
+
     def test_summary_cannot_claim_coverage_for_an_uncovered_coordinate(self):
         self.entry["segments"][0][2] = 0
         other_name = gate.SOURCE + "file/secure.rs"

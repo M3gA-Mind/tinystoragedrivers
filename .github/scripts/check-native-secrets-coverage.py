@@ -190,13 +190,13 @@ def main():
         if lines != coordinates[name]:
             failed.append(name + ": JSON/LCOV executable coordinates or counters differ")
         unique_covered = sum(value > 0 for value in coordinates[name].values())
-        unique_uncovered = len(coordinates[name]) - unique_covered
-        # Each merged covered/uncovered coordinate must be contributed by at
-        # least one function/instantiation counted in the summary. Additional
-        # overlapping instantiations are valid; impossible lower totals are not.
-        if (covered > count or covered < unique_covered
-                or count - covered < unique_uncovered):
-            failed.append(name + ": malformed JSON/LCOV counters")
+        # LLVM summaries count function/instantiation line occurrences, while
+        # merged coordinates may combine complementary generic executions.
+        # Require each independent measure to satisfy the same file floor.
+        if covered > count:
+            failed.append(name + ": malformed JSON summary counters")
+        if unique_covered * 100 < len(coordinates[name]) * 90:
+            failed.append(f"{name}: unique executable lines {unique_covered}/{len(coordinates[name])} below 90%")
         if covered * 100 < count * 90:
             failed.append(f"{name}: {covered}/{count} below 90%")
         selected = changes.get(name, set()) & coordinates[name].keys()
