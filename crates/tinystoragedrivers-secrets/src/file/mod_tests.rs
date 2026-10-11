@@ -1,12 +1,15 @@
 //! The encrypted file driver: conformance, OpenHuman file compatibility,
 //! key files, and every failure path.
 
+use super::*;
+
 use std::collections::HashMap;
+use std::fs;
+use std::fs::OpenOptions;
 use std::sync::atomic::AtomicU64;
 
 use tinystoragedrivers_core::ErrorKind;
 
-use super::*;
 use crate::crypto::hex_decode;
 use crate::crypto::tests::{OPENHUMAN_SECRETS_ENC_HEX, fixture_key};
 use crate::testkit::secrets_conformance;
@@ -18,10 +21,18 @@ impl TempDir {
     fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("tsd-secrets-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("tsd-secrets-{label}-{}-{seq}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        }
+        #[cfg(windows)]
+        clack_private_fs::create_dir(&dir).unwrap();
         Self(dir)
     }
 }
@@ -32,6 +43,24 @@ impl Drop for TempDir {
     }
 }
 
+// Compatibility fixtures themselves must meet admission; the bytes and format
+// assertions are unchanged. Unsafe-permission fixtures use direct native APIs.
+fn fixture_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(windows)]
+    let mut file = clack_private_fs::create_new_file(path.as_ref())?;
+    file.write_all(contents.as_ref())
+}
+
 /// Make `dir` read-only and report whether that is enforced. It is not for
 /// root, where the write failures under test cannot be produced.
 #[cfg(unix)]
@@ -39,7 +68,7 @@ fn make_readonly(dir: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
     let probe = dir.join("probe");
-    if fs::write(&probe, b"").is_ok() {
+    if fixture_write(&probe, b"").is_ok() {
         fs::remove_file(probe).unwrap();
         make_writable(dir);
         return false;
@@ -65,7 +94,7 @@ async fn passes_the_secrets_conformance_suite() {
 #[tokio::test]
 async fn opens_a_secrets_enc_file_openhuman_wrote() {
     let dir = TempDir::new("openhuman");
-    fs::write(
+    fixture_write(
         dir.0.join("secrets.enc"),
         hex_decode(OPENHUMAN_SECRETS_ENC_HEX).unwrap(),
     )
@@ -120,7 +149,7 @@ async fn a_missing_or_empty_file_is_an_empty_store() {
     let store = EncryptedFileSecrets::new(dir.0.join("nested"), crypto::generate_key().unwrap());
     assert_eq!(store.list("").await.unwrap(), Vec::<String>::new());
     fs::create_dir_all(dir.0.join("nested")).unwrap();
-    fs::write(store.path(), b"").unwrap();
+    fixture_write(store.path(), b"").unwrap();
     assert!(store.get("a").await.unwrap().is_none());
 }
 
@@ -161,7 +190,7 @@ async fn decrypted_garbage_is_a_serialization_error_without_plaintext() {
     let dir = TempDir::new("garbage");
     let key = crypto::generate_key().unwrap();
     let path = dir.0.join("secrets.enc");
-    fs::write(&path, crypto::encrypt(&key, b"[\"sk-leak\"]").unwrap()).unwrap();
+    fixture_write(&path, crypto::encrypt(&key, b"[\"sk-leak\"]").unwrap()).unwrap();
     let store = EncryptedFileSecrets::at_path(&path, key);
     let error = store.list("").await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Serialization);
@@ -182,7 +211,7 @@ async fn an_unreadable_path_is_a_backend_error() {
 async fn a_parent_that_is_a_file_fails_the_lock() {
     let dir = TempDir::new("parent-file");
     let blocker = dir.0.join("blocker");
-    fs::write(&blocker, b"").unwrap();
+    fixture_write(&blocker, b"").unwrap();
     let store = EncryptedFileSecrets::new(&blocker, crypto::generate_key().unwrap());
     assert_eq!(
         store.set("a", b"1").await.unwrap_err().kind(),
@@ -236,7 +265,7 @@ fn staging_skips_leftover_temp_files() {
     let path = dir.0.join("secrets.enc");
     // Leftovers from a crashed writer with this pid at sequence 0 and 1.
     for seq in 0..2 {
-        fs::write(
+        fixture_write(
             dir.0
                 .join(format!("secrets.enc.{}.{seq}.tmp", std::process::id())),
             b"stale",
@@ -263,7 +292,7 @@ fn write_atomic_replaces_an_existing_file() {
 fn a_key_published_concurrently_wins_and_the_temp_file_goes() {
     let dir = TempDir::new("key-race");
     let path = dir.0.join(".secret_key");
-    fs::write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
+    fixture_write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
     let loser = crypto::generate_key().unwrap();
     let tmp = stage(&path, key_to_hex(&loser).as_bytes(), &mut next_temp_seq).unwrap();
     let adopted = publish_key(&tmp, &path, loser).unwrap();
@@ -288,13 +317,44 @@ fn a_key_that_cannot_be_published_is_a_backend_error() {
 
 #[test]
 fn a_bare_file_name_has_no_parent_to_create() {
-    create_parent(Path::new("secrets.enc")).unwrap();
+    if std::env::var_os("TSD_PRIVATE_CWD_CHILD").is_some() {
+        create_parent(Path::new("secrets.enc")).unwrap();
+        assert_eq!(fs::read_dir(".").unwrap().count(), 0);
+        let store = EncryptedFileSecrets::with_key_file(".").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                store.set("relative", b"value").await.unwrap();
+                assert_eq!(
+                    store.get("relative").await.unwrap().unwrap().as_slice(),
+                    b"value"
+                );
+            });
+        return;
+    }
+    let directory = TempDir::new("private-cwd");
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "file::tests::a_bare_file_name_has_no_parent_to_create",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("TSD_PRIVATE_CWD_CHILD", "1")
+        .current_dir(&directory.0)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "private CWD child failed: {}",
+        String::from_utf8_lossy(&child.stdout)
+    );
 }
 
 #[tokio::test]
-async fn with_key_file_creates_then_reuses_the_key() {
+async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
     let dir = TempDir::new("keyfile");
-    let first = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let first = EncryptedFileSecrets::with_key_file(dir.0.clone()).unwrap();
     first.set("a", b"1").await.unwrap();
 
     let key_hex = fs::read_to_string(dir.0.join(".secret_key")).unwrap();
@@ -310,15 +370,31 @@ async fn with_key_file_creates_then_reuses_the_key() {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    let second = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+    let second = EncryptedFileSecrets::with_key_file(dir.0.clone()).unwrap();
     assert_eq!(second.get("a").await.unwrap().unwrap().as_slice(), b"1");
+    let master_retained = fs::read_to_string(dir.0.join(KEY_FILE_NAME)).unwrap() == key_hex;
+    assert!(master_retained, "reopening must retain the master bytes");
+    let ciphertext = fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap();
+    drop(first);
+    drop(second);
+    fs::remove_file(dir.0.join(KEY_FILE_NAME)).unwrap();
+    let Err(error) = EncryptedFileSecrets::with_key_file(dir.0.clone()) else {
+        panic!("lost master must deny reopening existing ciphertext");
+    };
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    let ciphertext_retained = fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap() == ciphertext;
+    assert!(
+        ciphertext_retained,
+        "failed reopening must retain ciphertext"
+    );
+    assert!(!dir.0.join(KEY_FILE_NAME).exists());
 }
 
 #[test]
 fn an_existing_openhuman_key_file_with_a_newline_loads() {
     let dir = TempDir::new("oh-key");
     let path = dir.0.join(".secret_key");
-    fs::write(
+    fixture_write(
         &path,
         format!("{}\n", crate::crypto::tests::FIXTURE_KEY_HEX),
     )
@@ -330,7 +406,7 @@ fn an_existing_openhuman_key_file_with_a_newline_loads() {
 fn a_corrupt_key_file_is_a_crypto_error() {
     let dir = TempDir::new("bad-key");
     let path = dir.0.join(".secret_key");
-    fs::write(&path, "not hex").unwrap();
+    fixture_write(&path, "not hex").unwrap();
     assert_eq!(
         load_or_create_key_file(&path).unwrap_err().kind(),
         ErrorKind::Crypto
@@ -365,4 +441,473 @@ fn debug_shows_the_path_but_not_the_key() {
     let debug = format!("{store:?}");
     assert!(debug.contains("/x/secrets.enc"));
     assert!(!debug.contains("0001020304"));
+}
+
+#[cfg(unix)]
+#[path = "unix_birth_tests.rs"]
+mod unix_birth;
+
+#[cfg(windows)]
+#[path = "windows_birth_tests.rs"]
+mod windows_birth;
+
+#[test]
+fn guarded_names_reject_root_parent_and_multiple_components() {
+    for name in ["", ".", "..", "one/two", "/"] {
+        assert!(secure::leaf(Path::new(name)).is_err());
+    }
+    assert!(secure::file_name(Path::new("/")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_replaced_lock_object_is_rejected_while_the_original_handle_is_held() {
+    let dir = TempDir::new("lock-replacement");
+    let path = dir.0.join("fixture.lock");
+    let lock = lock_file(&path).unwrap();
+    fs::rename(&path, dir.0.join("old.lock")).unwrap();
+    fixture_write(&path, b"").unwrap();
+    assert!(lock.verify().is_err());
+    assert!(dir.0.join("old.lock").exists());
+}
+
+#[tokio::test]
+async fn an_empty_private_ciphertext_file_is_an_empty_store() {
+    let dir = TempDir::new("empty-private-store");
+    fixture_write(dir.0.join(SECRETS_FILE_NAME), b"").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    assert!(store.get("missing").await.unwrap().is_none());
+    store.set("fixture", b"value").await.unwrap();
+    assert_eq!(
+        store.get("fixture").await.unwrap().unwrap().as_slice(),
+        b"value"
+    );
+}
+
+#[test]
+fn staged_key_readback_must_match_the_requested_generated_key() {
+    let dir = TempDir::new("key-readback-mismatch");
+    let path = dir.0.join(KEY_FILE_NAME);
+    let staged = stage(
+        &path,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let result = publish_key(&staged, &path, Zeroizing::new([42; KEY_LEN]));
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::Conflict);
+    assert!(!staged.exists());
+    assert_eq!(*load_or_create_key_file(&path).unwrap(), *fixture_key());
+}
+
+#[test]
+fn a_staged_key_cannot_publish_into_a_different_admitted_directory() {
+    let left = TempDir::new("key-left");
+    let right = TempDir::new("key-right");
+    let path = left.0.join(KEY_FILE_NAME);
+    let stage = stage(
+        &path,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let result = publish_key(&stage, &right.0.join(KEY_FILE_NAME), fixture_key());
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::Conflict);
+    assert!(!right.0.join(KEY_FILE_NAME).exists());
+    assert!(stage.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_namespace_substitution_before_staging_writes_no_payload() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("stage-substitution");
+    let private = root.0.join("private");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&private)
+        .unwrap();
+    let target = private.join(SECRETS_FILE_NAME);
+    let mut substitute = || {
+        fs::rename(&private, root.0.join("original")).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&private)
+            .unwrap();
+        0
+    };
+    assert!(stage(&target, b"disposable payload", &mut substitute).is_err());
+    for entry in fs::read_dir(&private).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+    assert!(
+        fs::read_dir(root.0.join("original"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_key_reader_waits_for_an_in_progress_no_clobber_publication() {
+    let Some(path) = std::env::var_os("TSD_KEY_RACE_FIXTURE") else {
+        let dir = TempDir::new("key-race-normal");
+        assert!(load_or_create_key_file(&dir.0.join(KEY_FILE_NAME)).is_ok());
+        return;
+    };
+    let key = load_or_create_key_file(&PathBuf::from(path)).unwrap();
+    assert_eq!(key.len(), KEY_LEN);
+    println!("KEY_CREATION_SUCCEEDED");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_key_publication_faults_preserve_an_uncertain_winner() {
+    let dir = TempDir::new("native-key-fault");
+    let path = dir.0.join(KEY_FILE_NAME);
+    let first = load_or_create_key_file(&path);
+    match std::env::var("TSD_EXPECT_NATIVE_KEY_FAULT").ok().as_deref() {
+        Some(kind) => {
+            let error = first.unwrap_err();
+            let native = std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(native.raw_os_error(), Some(5));
+            println!("OBSERVED_NATIVE_IO_ERROR=5");
+            if kind == "unlink" {
+                assert!(path.exists());
+                let before = fs::read(&path).unwrap();
+                let files = fs::read_dir(&dir.0).unwrap().count();
+                assert!(load_or_create_key_file(&path).is_err());
+                assert_eq!(fs::read(&path).unwrap(), before);
+                assert_eq!(fs::read_dir(&dir.0).unwrap().count(), files);
+            } else if kind == "link" {
+                assert!(!path.exists());
+                assert!(load_or_create_key_file(&path).is_ok());
+            } else {
+                let before = fs::read(&path).unwrap();
+                assert!(load_or_create_key_file(&path).is_ok());
+                assert_eq!(fs::read(&path).unwrap(), before);
+            }
+        }
+        None => {
+            assert!(first.is_ok());
+        }
+    }
+}
+
+#[test]
+fn an_absent_secret_file_name_is_rejected_before_any_filesystem_access() {
+    assert!(write_atomic(Path::new(""), b"disposable fixture").is_err());
+    assert!(stage(Path::new(""), b"disposable fixture", &mut next_temp_seq).is_err());
+}
+
+#[tokio::test]
+async fn published_objects_are_ready_for_a_separate_user_access_probe() {
+    let Some(path) = std::env::var_os("TSD_USER_DENIAL_FIXTURE") else {
+        let dir = TempDir::new("ordinary-user-normal");
+        let store = EncryptedFileSecrets::with_key_file(&dir.0).unwrap();
+        store
+            .set("fixture:value", b"disposable-fixture")
+            .await
+            .unwrap();
+        return;
+    };
+    let store = EncryptedFileSecrets::with_key_file(PathBuf::from(path)).unwrap();
+    store
+        .set("fixture:value", b"disposable-fixture")
+        .await
+        .unwrap();
+    eprintln!("PRIVATE_PUBLIC_OBJECTS_CREATED");
+}
+
+#[test]
+fn a_missing_master_with_existing_store_objects_never_mints_a_new_key() {
+    let mut outcomes = Vec::new();
+    for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
+        let directory = TempDir::new("missing-master");
+        let path = directory.0.join(name);
+        fixture_write(&path, b"existing material").unwrap();
+        let before = fs::read(&path).unwrap();
+        let denied = EncryptedFileSecrets::with_key_file(directory.0.clone())
+            .is_err_and(|error| error.kind() == ErrorKind::Conflict);
+        let unchanged = fs::read(path).unwrap() == before;
+        let no_key = !directory.0.join(KEY_FILE_NAME).exists();
+        println!(
+            "MISSING_MASTER_VARIANT name={name} denied={denied} unchanged={unchanged} no_key={no_key}"
+        );
+        outcomes.push((name, denied, unchanged, no_key));
+    }
+    for (name, denied, unchanged, no_key) in outcomes {
+        assert!(
+            denied && unchanged && no_key,
+            "existing {name} did not fail closed before key creation"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_existing_data_lock_and_ledger_fail_before_master_creation() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let mut outcomes = Vec::new();
+    for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
+        for kind in ["broad", "symlink", "hardlink"] {
+            let directory = TempDir::new("unsafe-before-master");
+            let path = directory.0.join(name);
+            let other = directory.0.join("preserved-object");
+            match kind {
+                "broad" => {
+                    fixture_write(&path, b"existing material").unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+                "symlink" => {
+                    fixture_write(&other, b"existing material").unwrap();
+                    symlink(&other, &path).unwrap();
+                }
+                "hardlink" => {
+                    fixture_write(&other, b"existing material").unwrap();
+                    fs::hard_link(&other, &path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let denied = EncryptedFileSecrets::with_key_file(&directory.0).is_err();
+            let no_key = !directory.0.join(KEY_FILE_NAME).exists();
+            let unchanged = fs::read(&path).unwrap() == b"existing material"
+                && fs::symlink_metadata(&path).unwrap().permissions().mode()
+                    == metadata.permissions().mode();
+            println!(
+                "UNSAFE_MASTER_VARIANT name={name} kind={kind} denied={denied} unchanged={unchanged} no_key={no_key}"
+            );
+            outcomes.push((name, kind, denied, unchanged, no_key));
+        }
+    }
+    for (name, kind, denied, unchanged, no_key) in outcomes {
+        assert!(
+            denied && unchanged && no_key,
+            "unsafe {name} ({kind}) did not fail closed before key creation"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unpublishable_key_name_removes_only_its_staged_object() {
+    let directory = TempDir::new("key-name-too-long");
+    let normal = directory.0.join(KEY_FILE_NAME);
+    let staged = stage(
+        &normal,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let target = directory.0.join("k".repeat(300));
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not publish the key file",
+        "{error:?}"
+    );
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(
+        native.raw_os_error(),
+        Some(rustix::io::Errno::NAMETOOLONG.raw_os_error()),
+        "{error:?}"
+    );
+    assert!(!staged.exists());
+    assert!(!normal.exists());
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+mod publication_pause {
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce()>;
+    thread_local! {
+        static PUBLICATION: RefCell<Option<Callback>> = const { RefCell::new(None) };
+        static KEY: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard(bool);
+    impl Guard {
+        pub(super) fn install(key: bool, callback: impl FnOnce() + 'static) -> Self {
+            let slot = if key { &KEY } else { &PUBLICATION };
+            slot.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self(key)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let slot = if self.0 { &KEY } else { &PUBLICATION };
+            slot.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(key: bool) {
+        let slot = if key { &KEY } else { &PUBLICATION };
+        let callback = slot.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn after_staged_publication_identity() {
+    publication_pause::run(false);
+}
+
+#[cfg(unix)]
+pub(super) fn after_staged_key_identity() {
+    publication_pause::run(true);
+}
+
+#[cfg(unix)]
+fn substitute_private_directory(private: PathBuf, retained: PathBuf) -> impl FnOnce() {
+    move || {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::rename(&private, retained).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(private).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_substitution_after_staging_preserves_the_previous_and_staged_publications() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("publication-substitution");
+    let private = root.0.join("private");
+    let retained = root.0.join("retained");
+    fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+    let target = private.join(SECRETS_FILE_NAME);
+    write_atomic(&target, b"previous ciphertext").unwrap();
+    let _pause = publication_pause::Guard::install(
+        false,
+        substitute_private_directory(private.clone(), retained.clone()),
+    );
+    let error = write_atomic(&target, b"staged ciphertext").unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not publish the secrets file",
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read(retained.join(SECRETS_FILE_NAME)).unwrap(),
+        b"previous ciphertext"
+    );
+    let staged: Vec<_> = fs::read_dir(&retained)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(fs::read(&staged[0]).unwrap(), b"staged ciphertext");
+    assert_eq!(fs::read_dir(private).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_key() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("key-publication-substitution");
+    let private = root.0.join("private");
+    let retained = root.0.join("retained");
+    fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+    let target = private.join(KEY_FILE_NAME);
+    let bytes = key_to_hex(&fixture_key());
+    let staged = stage(&target, bytes.as_bytes(), &mut next_temp_seq).unwrap();
+    let staged_name = staged.file_name().unwrap().to_owned();
+    let _pause = publication_pause::Guard::install(
+        true,
+        substitute_private_directory(private.clone(), retained.clone()),
+    );
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not remove the staged key",
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read(retained.join(staged_name)).unwrap(),
+        bytes.as_bytes()
+    );
+    assert!(!retained.join(KEY_FILE_NAME).exists());
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(private).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publication() {
+    let root = TempDir::new("staged-ciphertext-replacement");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("preserved-staged-ciphertext");
+    let directory = root.0.clone();
+    let original = preserved.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let staged = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .unwrap();
+        fs::rename(&staged, original).unwrap();
+        fixture_write(staged, b"substitute ciphertext").unwrap();
+    });
+    let error = write_atomic(&target, b"verified staged ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published secrets identity changed");
+    assert_eq!(fs::read(preserved).unwrap(), b"verified staged ciphertext");
+    assert_eq!(fs::read(target).unwrap(), b"substitute ciphertext");
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_material() {
+    let root = TempDir::new("staged-ciphertext-mutation");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let directory = root.0.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let staged = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .unwrap();
+        fixture_write(staged, b"changed ciphertext").unwrap();
+    });
+    let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published secrets readback differs");
+    assert_eq!(fs::read(target).unwrap(), b"changed ciphertext");
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publication() {
+    let root = TempDir::new("staged-key-replacement");
+    let target = root.0.join(KEY_FILE_NAME);
+    let expected = key_to_hex(&fixture_key());
+    let substitute = key_to_hex(&[42; KEY_LEN]);
+    let staged = stage(&target, expected.as_bytes(), &mut next_temp_seq).unwrap();
+    let preserved = root.0.join("preserved-staged-key");
+    let original = preserved.clone();
+    let source = staged.clone();
+    let changed = substitute.clone();
+    let _pause = publication_pause::Guard::install(true, move || {
+        fs::rename(&source, original).unwrap();
+        fixture_write(source, changed.as_bytes()).unwrap();
+    });
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published key object changed");
+    assert_eq!(fs::read(preserved).unwrap(), expected.as_bytes());
+    assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
+    assert!(!staged.exists());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
 }
