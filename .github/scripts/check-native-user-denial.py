@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = "file::tests::published_objects_are_ready_for_a_separate_user_access_probe"
 MUTATION_MASK = 0x500D0152
 IDENTITY_CLASSES = {"Current", "System", "Admins", "TrustedInstaller", "Everyone", "AuthUsers", "BuiltinUsers", "Owner", "Other"}
+EXCEPTION_CLASSES = {"CommandNotFound", "ItemNotFound", "DriveNotFound", "ProviderNotFound",
+                     "ActionPreferenceStop", "UnauthorizedAccess", "ParameterBinding", "Other"}
 READ_STAGES = {"Existence", "Item", "Acl", "Descriptor", "Owner", "DaclLimit",
                "AceType", "AceFlags", "AceIdentity", "AceMask", "AceClassification",
                "DaclShape", "ItemMetadata", "OwnerClassification", "Record"}
@@ -54,6 +56,30 @@ function Classify($sid,$owner) {
  if($sid -eq $trustedInstaller){return 'TrustedInstaller'}
  if($owner -and $sid -eq $owner){return 'Owner'}
  return 'Other'
+}
+# Compare known type names internally; unknown names never leave the child.
+function ExceptionClass($exception) {
+ try {
+  switch($exception.GetType().FullName) {
+   'System.Management.Automation.CommandNotFoundException' {return 'CommandNotFound'}
+   'System.Management.Automation.ItemNotFoundException' {return 'ItemNotFound'}
+   'System.Management.Automation.DriveNotFoundException' {return 'DriveNotFound'}
+   'System.Management.Automation.ProviderNotFoundException' {return 'ProviderNotFound'}
+   'System.Management.Automation.ActionPreferenceStopException' {return 'ActionPreferenceStop'}
+   'System.UnauthorizedAccessException' {return 'UnauthorizedAccess'}
+   'System.Management.Automation.ParameterBindingException' {return 'ParameterBinding'}
+  }
+ } catch {}
+ return 'Other'
+}
+function InnerExceptionClasses($exception) {
+ $classes=@()
+ for($depth=0;$depth -lt 2;$depth++) {
+  try { $exception=$exception.InnerException } catch { break }
+  if($null -eq $exception){break}
+  $classes+=ExceptionClass $exception
+ }
+ return ,$classes
 }
 $stage='Paths'
 # Direct assignment keeps Windows PowerShell's root array, without collecting
@@ -121,7 +147,9 @@ for($ordinal=0;$ordinal -lt 3;$ordinal++) {
   $category=[string]$_.CategoryInfo.Category
   if($readCategory){$category=$readCategory}
   if($category -notin @('ParserError','InvalidArgument','ObjectNotFound','PermissionDenied','InvalidOperation','ResourceUnavailable','NotSpecified')){$category='Other'}
-  $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed';read_stage=$readStage;error_category=$category}
+  $exception=$_.Exception
+  $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed';read_stage=$readStage;error_category=$category;
+   exception_class=(ExceptionClass $exception);inner_exception_classes=(InnerExceptionClasses $exception)}
  }
  $segments+=$record
 }
@@ -155,9 +183,14 @@ def parse_acl_diagnostics(text):
                 or segment.get("status") not in {"Observed", "Missing", "ReadFailed"}):
             raise ValueError("invalid finite diagnostic")
         if segment["status"] == "ReadFailed":
-            if (set(segment) != base | {"read_stage", "error_category"}
-                    or segment["read_stage"] not in READ_STAGES
-                    or segment["error_category"] not in ERROR_CATEGORIES):
+            if (set(segment) != base | {"read_stage", "error_category", "exception_class", "inner_exception_classes"}
+                    or type(segment["read_stage"]) is not str or segment["read_stage"] not in READ_STAGES
+                    or type(segment["error_category"]) is not str or segment["error_category"] not in ERROR_CATEGORIES
+                    or type(segment["exception_class"]) is not str or segment["exception_class"] not in EXCEPTION_CLASSES
+                    or type(segment["inner_exception_classes"]) is not list
+                    or len(segment["inner_exception_classes"]) > 2
+                    or any(type(name) is not str or name not in EXCEPTION_CLASSES
+                           for name in segment["inner_exception_classes"])):
                 raise ValueError("invalid finite diagnostic")
             continue
         if segment["status"] == "Missing":

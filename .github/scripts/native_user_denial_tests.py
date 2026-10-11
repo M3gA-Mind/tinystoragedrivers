@@ -87,6 +87,10 @@ class FiniteAclDiagnostics(unittest.TestCase):
         record = {"source_phase": "OtherSetupFailure", "diagnostic_version": 1,
                   "executable_resolution": "Resolved", "diagnostic_status": "Observed",
                   **observed()}
+        record["segments"][0] = {"ordinal": 0, "role": "Volume", "status": "ReadFailed",
+                                  "read_stage": "Acl", "error_category": "ObjectNotFound",
+                                  "exception_class": "CommandNotFound",
+                                  "inner_exception_classes": ["Other"]}
         with patch("builtins.print") as output:
             print_finite_failure(record)
             self.assertEqual(json.loads(output.call_args.args[0]), record)
@@ -95,6 +99,38 @@ class FiniteAclDiagnostics(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     print_finite_failure({**record, field: "PRIVATE_SECRET_SENTINEL"})
                 output.assert_not_called()
+
+    def test_unreadable_segment_requires_bounded_exception_classification(self):
+        data = observed()
+        data["segments"][0] = {"ordinal": 0, "role": "Volume", "status": "ReadFailed",
+                               "read_stage": "Acl", "error_category": "ObjectNotFound"}
+        with self.assertRaises(ValueError):
+            probe.parse_acl_diagnostics(json.dumps(data))
+
+    def test_exception_classes_are_exact_finite_and_wrapping_is_bounded(self):
+        classes = ["CommandNotFound", "ItemNotFound", "DriveNotFound", "ProviderNotFound",
+                   "ActionPreferenceStop", "UnauthorizedAccess", "ParameterBinding", "Other"]
+        for name in classes:
+            data = observed()
+            segment = {"ordinal": 0, "role": "Volume", "status": "ReadFailed",
+                       "read_stage": "Acl", "error_category": "ObjectNotFound",
+                       "exception_class": name, "inner_exception_classes": ["Other", name]}
+            data["segments"][0] = segment
+            self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
+            for key, value in [("exception_class", True), ("exception_class", 1),
+                               ("exception_class", "System.PRIVATE_PATH_SENTINEL"),
+                               ("exception_class", ["Other"]),
+                               ("exception_class", {"sid": "S-1-PRIVATE_SID"}),
+                               ("inner_exception_classes", ["Other"] * 3),
+                               ("inner_exception_classes", [False]),
+                               ("inner_exception_classes", "Other"),
+                               ("inner_exception_classes", ["S-1-PRIVATE_SID"]),
+                               ("message", "PRIVATE_SECRET_SENTINEL"),
+                               ("sddl", "PRIVATE_SDDL_SENTINEL"),
+                               ("path", "PRIVATE_PATH_SENTINEL")]:
+                with self.subTest(name=name, key=key), self.assertRaises(ValueError):
+                    probe.parse_acl_diagnostics(json.dumps({"segments": [
+                        {**segment, key: value}, *data["segments"][1:]]}))
 
     def test_unreadable_segment_requires_operation_and_category(self):
         data = observed()
@@ -109,7 +145,8 @@ class FiniteAclDiagnostics(unittest.TestCase):
         for stage in stages:
             data = observed()
             segment = {"ordinal": 0, "role": "Volume", "status": "ReadFailed",
-                       "read_stage": stage, "error_category": "PermissionDenied"}
+                       "read_stage": stage, "error_category": "PermissionDenied",
+                       "exception_class": "Other", "inner_exception_classes": []}
             data["segments"][0] = segment
             self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
             for key, value in [("read_stage", True), ("read_stage", 1),
@@ -125,7 +162,8 @@ class FiniteAclDiagnostics(unittest.TestCase):
         data = {"segments": [{"ordinal": n, "role": role, "status": "Missing" if n == 2 else "ReadFailed"}
                              for n, role in enumerate(["Volume", "Outer", "Private"])]}
         for segment in data["segments"][:2]:
-            segment.update(read_stage="Acl", error_category="PermissionDenied")
+            segment.update(read_stage="Acl", error_category="PermissionDenied",
+                           exception_class="Other", inner_exception_classes=[])
         self.assertEqual(probe.parse_acl_diagnostics(json.dumps(data)), data)
 
     def test_raw_fields_unknown_classes_and_inconsistent_effective_flags_are_rejected(self):
