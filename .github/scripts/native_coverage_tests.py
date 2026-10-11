@@ -20,7 +20,7 @@ class NativeCoverageGate(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.module = gate.SOURCE + ("file/windows.rs" if platform.system() == "Windows" else "file/unix.rs")
         source = self.root / self.module
         source.parent.mkdir(parents=True)
@@ -61,6 +61,10 @@ class NativeCoverageGate(unittest.TestCase):
     def run_gate(self):
         with patch.object(sys, "argv", ["gate"]):
             gate.main()
+
+    def test_fixture_root_is_canonical_like_the_production_root(self):
+        self.assertEqual(self.root, self.root.resolve())
+        self.run_gate()
 
     def test_a_fresh_native_inventory_and_matching_execution_pass(self):
         self.run_gate()

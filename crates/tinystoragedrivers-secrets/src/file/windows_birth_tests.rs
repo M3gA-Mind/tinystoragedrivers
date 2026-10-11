@@ -241,11 +241,11 @@ fn a_native_no_delete_handle_retains_the_previous_publication() {
     let native = std::error::Error::source(&error)
         .and_then(|source| source.downcast_ref::<std::io::Error>())
         .unwrap();
-    assert_eq!(native.raw_os_error(), Some(5));
-    assert!(
-        error
-            .to_string()
-            .starts_with("could not publish the secrets file")
+    assert_eq!(native.raw_os_error(), Some(5), "{error:?}");
+    assert_eq!(
+        error.message(),
+        "could not publish the secrets file",
+        "{error:?}"
     );
     eprintln!("OBSERVED_NATIVE_REPLACEMENT_DENIAL=5");
     assert_eq!(fs::read(&path).unwrap(), b"fixture-old");

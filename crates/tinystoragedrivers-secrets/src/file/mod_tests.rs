@@ -675,3 +675,152 @@ fn unsafe_existing_data_lock_and_ledger_fail_before_master_creation() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unpublishable_key_name_removes_only_its_staged_object() {
+    let directory = TempDir::new("key-name-too-long");
+    let normal = directory.0.join(KEY_FILE_NAME);
+    let staged = stage(
+        &normal,
+        key_to_hex(&fixture_key()).as_bytes(),
+        &mut next_temp_seq,
+    )
+    .unwrap();
+    let target = directory.0.join("k".repeat(300));
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not publish the key file",
+        "{error:?}"
+    );
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(
+        native.raw_os_error(),
+        Some(rustix::io::Errno::NAMETOOLONG.raw_os_error()),
+        "{error:?}"
+    );
+    assert!(!staged.exists());
+    assert!(!normal.exists());
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+mod publication_pause {
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce()>;
+    thread_local! {
+        static PUBLICATION: RefCell<Option<Callback>> = const { RefCell::new(None) };
+        static KEY: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard(bool);
+    impl Guard {
+        pub(super) fn install(key: bool, callback: impl FnOnce() + 'static) -> Self {
+            let slot = if key { &KEY } else { &PUBLICATION };
+            slot.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self(key)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let slot = if self.0 { &KEY } else { &PUBLICATION };
+            slot.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(key: bool) {
+        let slot = if key { &KEY } else { &PUBLICATION };
+        let callback = slot.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn after_staged_publication_identity() {
+    publication_pause::run(false);
+}
+
+#[cfg(unix)]
+pub(super) fn after_staged_key_identity() {
+    publication_pause::run(true);
+}
+
+#[cfg(unix)]
+fn substitute_private_directory(private: PathBuf, retained: PathBuf) -> impl FnOnce() {
+    move || {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::rename(&private, retained).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(private).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_substitution_after_staging_preserves_the_previous_and_staged_publications() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("publication-substitution");
+    let private = root.0.join("private");
+    let retained = root.0.join("retained");
+    fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+    let target = private.join(SECRETS_FILE_NAME);
+    write_atomic(&target, b"previous ciphertext").unwrap();
+    let _pause = publication_pause::Guard::install(
+        false,
+        substitute_private_directory(private.clone(), retained.clone()),
+    );
+    let error = write_atomic(&target, b"staged ciphertext").unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not publish the secrets file",
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read(retained.join(SECRETS_FILE_NAME)).unwrap(),
+        b"previous ciphertext"
+    );
+    let staged: Vec<_> = fs::read_dir(&retained)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(fs::read(&staged[0]).unwrap(), b"staged ciphertext");
+    assert_eq!(fs::read_dir(private).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_key() {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = TempDir::new("key-publication-substitution");
+    let private = root.0.join("private");
+    let retained = root.0.join("retained");
+    fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+    let target = private.join(KEY_FILE_NAME);
+    let bytes = key_to_hex(&fixture_key());
+    let staged = stage(&target, bytes.as_bytes(), &mut next_temp_seq).unwrap();
+    let staged_name = staged.file_name().unwrap().to_owned();
+    let _pause = publication_pause::Guard::install(
+        true,
+        substitute_private_directory(private.clone(), retained.clone()),
+    );
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(
+        error.message(),
+        "could not remove the staged key",
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read(retained.join(staged_name)).unwrap(),
+        bytes.as_bytes()
+    );
+    assert!(!retained.join(KEY_FILE_NAME).exists());
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(private).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
+}
