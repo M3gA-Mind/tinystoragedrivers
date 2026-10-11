@@ -55,7 +55,9 @@ pub struct KeyringSecrets {
 
 impl KeyringSecrets {
     /// The store whose credentials carry `service`, on the platform's default
-    /// credential store.
+    /// credential store selected by the compiled `keyring` feature union.
+    /// Enabling `keyring-secret-service` can change that default on Linux;
+    /// use `linux_kernel` or `secret_service` for an explicit provider.
     #[must_use]
     pub fn new(service: impl AsRef<str>) -> Self {
         Self {
@@ -63,6 +65,28 @@ impl KeyringSecrets {
             builder: None,
             creation_lock: None,
         }
+    }
+
+    /// Select the Linux kernel keyring explicitly, independently of the
+    /// compiled default provider. Construction is lazy and does not prove
+    /// access to the kernel keyring.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn linux_kernel(service: impl AsRef<str>) -> Self {
+        Self::with_credential_builder(service, keyring::keyutils::default_credential_builder())
+    }
+
+    /// Select Linux Secret Service explicitly using encrypted D-Bus sessions.
+    /// Requires `keyring-secret-service`. Construction is lazy; operations
+    /// require an available service and an unlocked collection, and never
+    /// fall back to the kernel keyring or another provider.
+    #[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+    #[must_use]
+    pub fn secret_service(service: impl AsRef<str>) -> Self {
+        Self::with_credential_builder(
+            service,
+            keyring::secret_service::default_credential_builder(),
+        )
     }
 
     /// The store whose credentials carry `service`, built by `builder`
