@@ -11,7 +11,7 @@ coalesced invalidation hints, never document bodies, decisions, or authority.
 The caller always reads and validates current storage state before acting.
 
 A subscription is bound to the handle's native database, scope, collection,
-filter, and captured fence. Filters describe the affected query; conservative
+filter, captured scope generation, and captured fence. Filters describe the affected query; conservative
 extra invalidations are permitted. Missing an insert, replacement, edit,
 delete, filter exit, or logical TTL expiry is forbidden. Backend reads and
 notifications may observe different instants; this is not snapshot history.
@@ -26,7 +26,7 @@ unbounded queue retained after drop. Cancellation of next must be safe.
 
 An optional opaque cursor is redacted in Debug. Cursors carry no user document
 payload, grant no authority, and are accepted only for their issuing backend and
-exact database/scope/collection/filter/fence binding. Native cursors are also
+exact database/scope/generation/collection/filter/fence binding. Native cursors are also
 bound to the connected backend context and are refused on a newly connected
 backend; they are not durable restart checkpoints. Invalid, oversized, or
 misbound cursors fail with InvalidInput. Native resume-history loss instead
@@ -54,12 +54,13 @@ collection layout, document copying, or ambient backend is involved.
 
 ## Generation admission
 
-The canonical base has no native scope generation contract. This change does
-not invent one. A future generation-admitted wrapper must refuse Watch until
-it can validate its captured generation on opening and delivery. Generation
-invalidation must terminally reset the old subscription, never expose a new
-generation through it. Generation receipts and metadata belong to the separate
-native ScopePurge contract.
+Native Mongo subscriptions retain the handle's captured ScopePurge generation.
+Opening and every delivery check scope admission, including periodic hints and
+pending events retained across cancellation. Pending resets and retired
+generations return Fenced before delivering a notice; an old subscription
+cannot observe the replacement generation. Resume cursors are bound to that
+generation and cannot be reused by a replacement handle. Generation receipts
+and metadata belong to the native ScopePurge contract.
 
 ## Verification
 
@@ -73,7 +74,8 @@ set fixture and retain the optional environment gate used by other drivers.
 ## Local implementation evidence
 
 The implementation branch preserves its feature checkpoint and merge of
-canonical 89cc548. It does not change a host checkout or consume ScopePurge.
+canonical 89cc548 and the subsequent ScopePurge merge. Native Mongo watches
+validate that merged generation contract without changing a host checkout.
 
 Behavioral failures were observed before each relevant fix:
 

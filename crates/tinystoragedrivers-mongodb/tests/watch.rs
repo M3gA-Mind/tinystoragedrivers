@@ -486,3 +486,100 @@ async fn live_standalone_watch_is_typed_unsupported() {
         ErrorKind::Unsupported(Capability::Watch)
     );
 }
+
+#[tokio::test]
+async fn live_watch_retired_generation_refuses_open_and_delivery() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+    let Some(backend) = support::connect().await else {
+        return support::skip("live_watch_retired_generation");
+    };
+    let db = backend
+        .database(&format!("generation_watch_{}", std::process::id()))
+        .unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let original = db.for_scope(&scope).unwrap();
+    let options = WatchOptions {
+        interval: Duration::from_millis(10),
+        ..WatchOptions::default()
+    };
+    let mut old_watch = original
+        .documents()
+        .watch("tasks", &Filter::All, &options)
+        .await
+        .unwrap();
+    original
+        .documents()
+        .put("tasks", "before", json!({"x": 0}), Precondition::None)
+        .await
+        .unwrap();
+    let cursor = loop {
+        if let Some(WatchNotice::Invalidated {
+            cursor: Some(cursor),
+        }) = old_watch.next().await.unwrap()
+        {
+            break cursor;
+        }
+    };
+    let first = original
+        .purge(&PurgeRequest {
+            operation_id: "first".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        old_watch.next().await.unwrap_err().kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        original
+            .documents()
+            .watch("tasks", &Filter::All, &options)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    let replacement = db.for_scope_generation(&scope, first.generation).unwrap();
+    assert_eq!(
+        replacement
+            .documents()
+            .watch(
+                "tasks",
+                &Filter::All,
+                &WatchOptions {
+                    after: Some(cursor),
+                    ..options.clone()
+                },
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    let mut fresh_watch = replacement
+        .documents()
+        .watch("tasks", &Filter::All, &options)
+        .await
+        .unwrap();
+    replacement
+        .documents()
+        .put("tasks", "one", json!({"x": 1}), Precondition::None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        fresh_watch.next().await.unwrap(),
+        Some(WatchNotice::Invalidated { .. })
+    ));
+    replacement
+        .purge(&PurgeRequest {
+            operation_id: "second".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh_watch.next().await.unwrap_err().kind(),
+        ErrorKind::Fenced
+    );
+}

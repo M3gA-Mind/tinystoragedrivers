@@ -42,6 +42,7 @@ fn binding(docs: &MongoDocuments, collection: &str, filter: &Filter) -> Result<[
         docs.shared.db.name(),
         &docs.shared.prefix,
         docs.scope.as_str(),
+        docs.generation,
         collection,
         filter,
         guard,
@@ -87,6 +88,7 @@ fn pipeline(scope: &str) -> Vec<Document> {
 }
 
 async fn admitted(docs: &MongoDocuments) -> Result<()> {
+    crate::purge::check(&docs.shared, &docs.scope, docs.generation, None).await?;
     if docs.fence.is_some() {
         docs.atomic_batch_checked(vec![], vec![]).await?;
     }
@@ -131,7 +133,8 @@ impl MongoDocuments {
             Arc::clone(&self.shared),
             self.scope.clone(),
             self.fence.clone(),
-        );
+        )
+        .with_generation(self.generation);
         let (stream, pending) = match opened {
             Ok(stream) => (Some(stream.with_type::<Document>()), None),
             Err(error) if resume_lost(&error) => (
