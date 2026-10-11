@@ -54,17 +54,18 @@ async fn live(test: &str) -> Option<MongoStorage> {
         eprintln!("{test}: TSD_MONGO_URL is not set; skipping");
         return None;
     };
-    let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
-    let path = rest.split_once('/').map_or("", |(_, path)| path);
-    let name = path
-        .split(['?', '/'])
-        .next()
-        .filter(|name| !name.is_empty());
-    Some(
-        MongoStorage::connect(&url, name.unwrap_or("tsd_test"))
-            .await
-            .unwrap(),
-    )
+    // Each paused transaction must see only its intentional concurrent mutator,
+    // not schema changes from another parallel regression in the same database.
+    let database = unique("native_validation");
+    Some(MongoStorage::connect(&url, &database).await.unwrap())
+}
+
+/// A different physical client to the same isolated fixture database.
+async fn independent(backend: &MongoStorage) -> MongoStorage {
+    let url = std::env::var("TSD_MONGO_URL").unwrap();
+    MongoStorage::connect(&url, backend.shared.db.name())
+        .await
+        .unwrap()
 }
 
 fn unique(label: &str) -> String {
@@ -275,7 +276,7 @@ async fn live_named_target_holds_default_guard_across_independent_clients() {
     let guard = guards.documents().get(&leases, "l").await.unwrap().unwrap();
     assert_eq!(guard.doc, json!({"epoch": 1}));
     assert_eq!(guard.version.0, 1);
-    let independent = live("independent cross target client").await.unwrap();
+    let independent = independent(&backend).await;
     independent
         .for_scope(&cluster)
         .unwrap()
@@ -352,7 +353,7 @@ async fn live_cross_database_guard_snapshot_cannot_survive_a_takeover() {
         .await
         .unwrap()
         .unwrap();
-    let independent = live("independent snapshot takeover client").await.unwrap();
+    let independent = independent(&backend).await;
     independent
         .for_scope(&cluster)
         .unwrap()
@@ -477,10 +478,7 @@ async fn live_forced_off_writer_conflicts_with_a_checked_dependency_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(Stored::decode(&stored).unwrap().version, version);
-    let forced_off = live("independent forced-off writer")
-        .await
-        .unwrap()
-        .without_transactions();
+    let forced_off = independent(&backend).await.without_transactions();
     assert!(
         !forced_off
             .capabilities()
