@@ -17,7 +17,7 @@ pub enum PublicationBoundary {
     /// File content and the containing directory were successfully synced.
     /// This acknowledges those native APIs, not physical hardware survival.
     UnixDirectorySync,
-    /// The file was flushed, moved with native write-through and read back.
+    /// The visible published identity was verified, file flushed and read back.
     /// No ordinary-user durable namespace barrier is established.
     WindowsVisibleFileFlushed,
 }

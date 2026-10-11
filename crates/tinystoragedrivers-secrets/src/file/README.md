@@ -28,7 +28,14 @@ Reads and mutations hold `<secrets filename>.lock`. Key creation holds
 interval. New staging, key, data and lock files are private before bytes.
 Publication flushes staged content, publishes, then verifies the actual
 published identity and content. Unix also syncs the admitted directory.
-Windows uses same-volume native write-through replacement and file flush.
+Windows uses same-volume native replacement through `std::fs::rename`, whose
+access-denied fallback preserves open destination handles with POSIX replacement
+semantics. Full paths resolve within the pinned namespace; this does not provide
+descriptor-relative source selection against uncoordinated same-user changes.
+Namespace verification surrounds replacement. Published FileID verification,
+explicit file flush and exact byte readback precede acknowledgment. Unsupported
+extended replacement fails closed, potentially reporting the original access
+denial. Replacement does not request native write-through.
 These acknowledgments describe native APIs; they do not prove physical
 power-loss survival. A failure after publication may leave visible state.
 Failed staging cleanup is attempted and can itself fail; private leftovers

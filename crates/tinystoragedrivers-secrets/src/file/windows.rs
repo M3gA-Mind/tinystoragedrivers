@@ -1,6 +1,6 @@
 //! Protected NTFS objects, retained namespace pins and safe native publication.
 //!
-//! A file flush and write-through move acknowledge their native API completion.
+//! Publication verifies the visible object and flushes its content explicitly.
 //! They do not establish an ordinary-user durable directory publication barrier.
 
 use std::fs::{File, OpenOptions};
@@ -125,7 +125,13 @@ impl Namespace {
         self.verify()?;
         valid_leaf(source)?;
         valid_leaf(target)?;
-        atomicwrites::replace_atomic(&self.path.join(source), &self.path.join(target))
+        // Rust 1.88 and 1.99 fall back on access-denied to FileRenameInfoEx with
+        // REPLACE_IF_EXISTS | POSIX_SEMANTICS, preserving open target handles.
+        // Like the previous native move, this selects full paths within the
+        // pinned namespace; it is not descriptor-relative source authority.
+        // The caller verifies the published FileID, flushes and reads it back.
+        std::fs::rename(self.path.join(source), self.path.join(target))?;
+        self.verify()
     }
 
     pub(super) fn link(&self, source: &Path, target: &Path) -> io::Result<()> {

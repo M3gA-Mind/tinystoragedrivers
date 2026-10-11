@@ -180,6 +180,58 @@ fn a_broad_parent_is_rejected_without_minting_a_key() {
     assert!(!dir.path().join(SECRETS_FILE_NAME).exists());
 }
 
+#[tokio::test]
+async fn public_update_preserves_the_admitted_old_handle_and_publishes_a_private_new_object() {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::windows::fs::MetadataExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let private = root.path().join("private");
+    clack_private_fs::create_dir(&private).unwrap();
+    let user = current_user();
+    let store = EncryptedFileSecrets::with_key_file(&private).unwrap();
+    store.set("fixture:value", b"fixture-old").await.unwrap();
+    let namespace = super::super::windows::Namespace::open(&private, false).unwrap();
+    let mut held = namespace
+        .open_file(Path::new(SECRETS_FILE_NAME), false)
+        .unwrap();
+    let old_identity = super::super::secure::identity(&held).unwrap();
+    assert_eq!(held.metadata().unwrap().file_attributes() & 1, 0);
+    assert!(restricted_handle(&held, &user, "retained-old-data"));
+    let mut old_bytes = Vec::new();
+    held.read_to_end(&mut old_bytes).unwrap();
+
+    // Keep the admitted delete-sharing handle live across the public mutation.
+    store.set("fixture:value", b"fixture-new").await.unwrap();
+    assert_eq!(
+        store
+            .get("fixture:value")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"fixture-new"
+    );
+    assert_eq!(super::super::secure::identity(&held).unwrap(), old_identity);
+    held.seek(SeekFrom::Start(0)).unwrap();
+    let mut retained_bytes = Vec::new();
+    held.read_to_end(&mut retained_bytes).unwrap();
+    assert_eq!(retained_bytes, old_bytes);
+    let mut published = namespace
+        .open_file(Path::new(SECRETS_FILE_NAME), false)
+        .unwrap();
+    assert_ne!(
+        super::super::secure::identity(&published).unwrap(),
+        old_identity
+    );
+    assert_eq!(published.metadata().unwrap().file_attributes() & 1, 0);
+    assert!(restricted_handle(&published, &user, "replacement-data"));
+    let mut published_bytes = Vec::new();
+    published.read_to_end(&mut published_bytes).unwrap();
+    assert_ne!(published_bytes, old_bytes);
+    namespace.verify().unwrap();
+}
+
 #[test]
 fn an_existing_broad_key_is_rejected_without_repair_or_replacement() {
     let root = tempfile::tempdir().unwrap();
