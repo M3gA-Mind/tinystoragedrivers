@@ -40,7 +40,9 @@
 //! This crate holds no repository for any particular record type; sessions,
 //! approvals and workflow runs belong to the crates that own them.
 
+mod blobs;
 mod config;
+pub use blobs::{BlobConfig, open_blobs, open_composite};
 
 pub use config::{StorageConfig, open};
 pub use tinystoragedrivers_core::*;
@@ -57,3 +59,7 @@ pub use tinystoragedrivers_secrets as secrets;
 /// clock, transactions turned off, expiry sweeps).
 #[cfg(feature = "mongodb")]
 pub use tinystoragedrivers_mongodb::MongoStorage;
+
+/// The S3-compatible scoped blob driver (feature s3).
+#[cfg(feature = "s3")]
+pub use tinystoragedrivers_s3 as s3;

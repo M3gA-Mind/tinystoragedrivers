@@ -108,6 +108,54 @@ async fn live_expiry_follows_the_injected_clock_and_sweeps() {
 }
 
 #[tokio::test]
+async fn live_collection_listing_is_prefix_filtered_and_scope_isolated() {
+    let Some(backend) = connect().await else {
+        return skip("live_collection_listing_is_prefix_filtered_and_scope_isolated");
+    };
+    let scope_a = Scope::new(name("collections_a")).unwrap();
+    let scope_b = Scope::new(name("collections_b")).unwrap();
+    let empty_scope = Scope::new(name("collections_empty")).unwrap();
+    let prefix = name("enumeration");
+    let only_a = format!("{prefix}_a");
+    let only_b = format!("{prefix}_b");
+    let a = backend.for_scope(&scope_a).unwrap();
+    let b = backend.for_scope(&scope_b).unwrap();
+    let empty = backend.for_scope(&empty_scope).unwrap();
+
+    a.documents()
+        .put(&only_a, "a", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    b.documents()
+        .put(&only_b, "b", json!({}), Precondition::None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        a.documents().collections(&prefix).await.unwrap(),
+        vec![only_a.clone()]
+    );
+    assert_eq!(
+        b.documents().collections(&prefix).await.unwrap(),
+        vec![only_b]
+    );
+    assert_eq!(
+        empty.documents().collections(&prefix).await.unwrap(),
+        Vec::<String>::new()
+    );
+
+    a.documents()
+        .delete(&only_a, "a", Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        a.documents().collections(&prefix).await.unwrap(),
+        vec![only_a],
+        "tombstones remain enumerable for complete cleanup"
+    );
+}
+
+#[tokio::test]
 async fn live_concurrent_claims_and_appends_never_collide() {
     let Some(backend) = connect().await else {
         return skip("live_concurrent_claims_and_appends_never_collide");

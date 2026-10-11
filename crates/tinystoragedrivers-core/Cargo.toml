@@ -16,9 +16,8 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Only the blocking bridge needs a runtime of its own; hosts whose consumer
-# traits are all async never compile it.
-tokio = { workspace = true, optional = true }
+# AsyncRead is the streaming blob port; io-util adds no runtime or transport.
+tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
@@ -27,7 +26,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] 
 default = []
 # `Blocking`: run a port's future from synchronous code on a dedicated runtime
 # thread. For consumer traits that are still synchronous.
-blocking = ["dep:tokio"]
+blocking = []
 # `conformance`: the behavioral suite every driver must pass. Drivers enable it
 # from their dev-dependencies.
 testkit = []

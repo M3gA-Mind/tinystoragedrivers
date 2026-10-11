@@ -52,15 +52,32 @@ mod baseline {
     };
 
     #[derive(Debug)]
-    pub(super) struct Narrow(pub(super) crate::MemoryStorage);
+    pub(super) struct Narrow(pub(super) crate::MemoryStorage, pub(super) bool);
 
     #[derive(Debug)]
-    struct NarrowDocs(Arc<dyn DocumentStore>);
+    struct NarrowDocs(Arc<dyn DocumentStore>, bool);
 
     #[async_trait::async_trait]
     impl DocumentStore for NarrowDocs {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::none()
+            if self.1 {
+                Capabilities::none().with(Capability::CollectionEnumeration)
+            } else {
+                Capabilities::none()
+            }
+        }
+        async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+            if !self.1 {
+                return Err(StorageError::unsupported(
+                    Capability::CollectionEnumeration,
+                    "no listing",
+                ));
+            }
+            if prefix.starts_with("conf_iso_only_") {
+                // Fault injection: pretend every scope can see the queried collection.
+                return Ok(vec![prefix.to_owned()]);
+            }
+            self.0.collections(prefix).await
         }
         async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
             if spec.ttl_field.is_some() {
@@ -112,7 +129,7 @@ mod baseline {
             Ok(ScopedStorage::new(
                 scope.clone(),
                 self.driver(),
-                Arc::new(NarrowDocs(Arc::clone(inner.documents()))),
+                Arc::new(NarrowDocs(Arc::clone(inner.documents()), self.1)),
                 Arc::clone(inner.streams()),
                 Arc::clone(inner.blobs()),
             ))
@@ -125,5 +142,17 @@ mod baseline {
 
 #[tokio::test]
 async fn a_driver_without_optional_capabilities_passes() {
-    run(&baseline::Narrow(MemoryStorage::new()), false).await;
+    run(&baseline::Narrow(MemoryStorage::new(), false), false).await;
+}
+
+#[tokio::test]
+async fn conformance_rejects_cross_scope_collection_enumeration() {
+    let outcome = tokio::spawn(async {
+        run(&baseline::Narrow(MemoryStorage::new(), true), false).await;
+    })
+    .await;
+    assert!(
+        outcome.is_err(),
+        "collection enumeration must reject a tenant leak"
+    );
 }

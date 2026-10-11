@@ -21,6 +21,13 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+# Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
+bytes = "1"
+# HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.
+# TLS and JSON stay caller-selected to keep optional transports out of core.
+reqwest = { version = "0.12", default-features = false }
+# Scoped S3-compatible streaming blobs, optional in the facade.
+tinystoragedrivers-s3 = { path = "crates/tinystoragedrivers-s3" }
 # The storage ports, the in-memory driver and the conformance suite. Every
 # driver crate and the facade depend on it, so a value written through one
 # driver has exactly one set of types to describe it.

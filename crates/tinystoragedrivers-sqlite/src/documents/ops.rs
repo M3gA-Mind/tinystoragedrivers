@@ -519,6 +519,27 @@ pub(crate) fn drop_collection(conn: &Connection, ctx: Ctx<'_>, collection: &str)
     unindex_text(conn, ctx, collection, None)
 }
 
+/// List collections with records (including tombstones) in one scope.
+pub(crate) fn collections(conn: &Connection, ctx: Ctx<'_>, prefix: &str) -> Result<Vec<String>> {
+    let sql = format!(
+        "SELECT coll FROM {docs} WHERE scope = ?1
+         UNION SELECT coll FROM {tombstones} WHERE scope = ?2
+         ORDER BY coll",
+        docs = ident(&ctx.tables.docs),
+        tombstones = ident(&ctx.tables.tombstones),
+    );
+    let mut statement = conn.prepare(&sql).map_err(during("list collections"))?;
+    let names: Vec<String> = statement
+        .query_map(rusqlite::params![ctx.scope, ctx.scope], |row| row.get(0))
+        .map_err(during("list collections"))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(during("list collections"))?;
+    Ok(names
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .collect())
+}
+
 /// Full-text matches, best first.
 pub(crate) fn search(
     conn: &Connection,

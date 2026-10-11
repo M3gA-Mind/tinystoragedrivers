@@ -7,6 +7,9 @@
 //! `MongoDB`, a separate map in memory. Owners use it to keep their data apart
 //! (`approvals`, `sessions`, `flows`) without inventing collection prefixes.
 
+mod composite;
+pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
+
 use std::fmt;
 use std::sync::Arc;
 

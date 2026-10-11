@@ -135,6 +135,8 @@ impl StorageBackend for MemoryStorage {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::all()
+            .without(crate::Capability::PresignedUrls)
+            .without(crate::Capability::StreamingBlobs)
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {

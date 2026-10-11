@@ -59,3 +59,17 @@ ships on its own and is tagged before the next step depends on it.
      `storage-keyring` features, forwarded through the host chain.
    - Move the domain stores one PR at a time. Small SQLite stores import
      their legacy tables into document tables in the same file.
+
+## Scoped collection enumeration
+
+The `CollectionEnumeration` capability and `DocumentStore::collections(prefix)`
+implement the accepted contract in `storage-ports.md`. Memory, file, SQLite and
+MongoDB enumerate stored records, including tombstones, within the current scope
+and named database, then apply a literal prefix filter and sort the names.
+Drivers without this optional capability return `Unsupported`.
+
+Conformance checks empty scopes, sorted prefix matches, deleted-record discovery,
+and cross-scope isolation. Its own regression drivers verify that absent listing
+support is accepted and leaking collection enumeration is rejected. The MongoDB
+integration test runs on the replica-set CI fixture. Consumers can use this API
+to discover all collections during scoped cleanup without assuming a fixed list.

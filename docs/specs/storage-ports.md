@@ -75,6 +75,14 @@ Versioned JSON **objects** in named collections.
   `ErrorKind::Unsupported(capability)`.
   - `Ttl`: documents whose `ttl_field` (epoch ms) has passed read as absent.
   - `Transactions`: `atomic_batch`, all or nothing.
+  - `CollectionEnumeration`: `collections(prefix)` lists collection names with
+    stored records in this handle's scope. It filters by a literal string prefix
+    and sorts names lexicographically. Tombstones count as stored records so
+    complete scoped cleanup can discover deleted versions; declared collections
+    with no records are omitted. Without the capability, the method returns
+    `Unsupported(CollectionEnumeration)`. Enumeration never exposes another
+    scope or named database.
+
   - `FullText`: `search` over the declared `SearchSpec` fields. Conformance
     checks single-token membership only, never ranking.
   - `Fencing`: `StorageBackend::for_scope_fenced`, see

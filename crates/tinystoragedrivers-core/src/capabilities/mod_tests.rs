@@ -27,7 +27,10 @@ fn all_holds_every_capability() {
             Capability::FullText,
             Capability::Transactions,
             Capability::Ttl,
-            Capability::Fencing
+            Capability::Fencing,
+            Capability::PresignedUrls,
+            Capability::StreamingBlobs,
+            Capability::CollectionEnumeration,
         ]
     );
 }

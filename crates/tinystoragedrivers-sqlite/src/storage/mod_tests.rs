@@ -23,7 +23,12 @@ async fn directory_mode_gives_each_database_its_own_file() {
     storage.database("flows").unwrap();
     assert!(dir.path().join("flows.db").exists());
     assert_eq!(storage.driver(), "sqlite");
-    assert_eq!(storage.capabilities(), Capabilities::all());
+    assert_eq!(
+        storage.capabilities(),
+        Capabilities::all()
+            .without(tinystoragedrivers_core::Capability::PresignedUrls)
+            .without(tinystoragedrivers_core::Capability::StreamingBlobs)
+    );
     assert!(format!("{storage:?}").contains("storage.db"));
 }
 

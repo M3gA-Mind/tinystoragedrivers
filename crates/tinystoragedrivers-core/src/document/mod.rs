@@ -155,6 +155,24 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
     ///
     /// Invalid name, or a backend error.
     async fn drop_collection(&self, collection: &str) -> Result<()>;
+
+    /// Names of collections with stored records in this handle's scope,
+    /// sorted by name and restricted to those starting with `prefix`.
+    ///
+    /// Records include tombstones: callers that remove all scoped data need
+    /// to discover collections even when their remaining records are deleted
+    /// versions. Empty collections with no records are omitted.
+    ///
+    /// # Errors
+    ///
+    /// A backend error.
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        let _ = prefix;
+        Err(StorageError::unsupported(
+            Capability::CollectionEnumeration,
+            "this document store cannot enumerate scoped collections",
+        ))
+    }
 }
 
 /// Typed convenience over any [`DocumentStore`]: serde in and out.
