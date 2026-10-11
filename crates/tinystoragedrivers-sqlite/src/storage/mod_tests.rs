@@ -222,3 +222,70 @@ async fn reopened_named_target_observes_default_guard_takeover() {
             .is_none()
     );
 }
+
+#[test]
+fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes() {
+    const CHILD: &str = "TSD_RELATIVE_LAYOUT_GUARD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::tests::relative_layout_guards_keep_the_opened_root_after_working_directory_changes", "--nocapture"])
+            .env(CHILD, "1")
+            .current_dir(dir.path())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let root = std::env::current_dir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for path in ["", "relative_directory", "relative_file.db"] {
+            std::env::set_current_dir(&root).unwrap();
+            let backend = SqliteStorage::open(path).unwrap();
+            let target = backend.database("target").unwrap();
+            let guards = backend.database("guards").unwrap();
+            let scope = Scope::local();
+            let fence = Fence::epoch(scope.clone(), "leases", "holder", "epoch", 7);
+            for source in [
+                backend.for_scope(&scope).unwrap(),
+                guards.for_scope(&scope).unwrap(),
+            ] {
+                source
+                    .documents()
+                    .put("leases", "holder", json!({"epoch": 7}), Precondition::None)
+                    .await
+                    .unwrap();
+            }
+            let moved = root.join(format!("moved-{path}"));
+            std::fs::create_dir(&moved).unwrap();
+            std::env::set_current_dir(&moved).unwrap();
+            for locator in [
+                GuardDatabase::Default,
+                GuardDatabase::Named("guards".into()),
+            ] {
+                let bound = target
+                    .for_scope_fenced_in_database(&scope, &fence, &locator)
+                    .unwrap();
+                bound
+                    .documents()
+                    .put("records", "one", json!({"value": 1}), Precondition::None)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                !moved
+                    .join(if path.is_empty() { ROOT_FILE } else { path })
+                    .exists(),
+                "binding must not recreate the relative layout under a new cwd"
+            );
+        }
+    });
+}

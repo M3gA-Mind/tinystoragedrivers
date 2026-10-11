@@ -63,7 +63,8 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
 | `Ttl` | yes | Expired documents stay on disk and read as absent, like the memory driver. |
 | `FullText` | yes | Same tokenizer and scoring as the memory driver. |
 | `Transactions` | no | A batch over several files cannot be crash-atomic with renames, so `atomic_batch` returns `Unsupported`. |
-| `Fencing` | yes | The guard document is checked under the same in-process lock as the write. Like every guarantee here, it holds within one process only. |
+| `Fencing` | yes | The current-database guard and target mutation share their native directory lock, within one process only. |
+| `CrossDatabaseFencing` | yes | Explicit Default/Named guard and target directories are locked together, within one process only. |
 
 ## Concurrency
 
@@ -72,6 +73,16 @@ in the process that opened the same (canonicalized) directory, which makes
 `claim` and compare-and-swap atomic within the process. File IO runs on tokio's
 blocking pool when a runtime is present, and inline otherwise. Several
 processes writing the same directory are **not** coordinated.
+
+`for_scope_fenced` checks a guard in the current database.
+`for_scope_fenced_in_database` accepts `GuardDatabase::Default` or
+`GuardDatabase::Named` to select a guard in another database owned by the same
+backend. The driver holds both canonical directory locks in sorted path order
+through guard validation and the document, stream or blob mutation. Matching
+canonical paths share one lock; ordinary operations on unrelated roots retain
+independent locks. This fencing guarantee is process-local and does not extend
+to other processes writing either directory.
+
 
 ## Limits
 
