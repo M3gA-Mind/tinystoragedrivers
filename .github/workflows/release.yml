@@ -53,6 +53,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux Secret Service build and native probe dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
+
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
 

@@ -10,7 +10,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
-| Secrets | none (feature `secrets`, `keyring`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
+| Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
 Cargo features on the `tinystoragedrivers` facade. A desktop build never links

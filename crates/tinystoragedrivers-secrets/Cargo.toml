@@ -81,6 +81,8 @@ kms-gcp = ["dep:reqwest", "dep:base64", "dep:bytes"]
 # `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
 # Credential Manager, the Linux kernel keyring).
 keyring = ["dep:keyring"]
+# Explicit Linux Secret Service with encrypted transport; never enabled by default.
+keyring-secret-service = ["keyring", "keyring/sync-secret-service", "keyring/crypto-rust"]
 # `testkit::secrets_conformance`: the behavioral suite every `SecretStore` runs.
 testkit = []
 
