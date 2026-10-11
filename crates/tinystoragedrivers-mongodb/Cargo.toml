@@ -17,7 +17,7 @@ async-trait = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 # Bind opaque resume tokens without exposing query or guard values.
-sha2 = "0.10"
+sha2 = { workspace = true }
 # The official MongoDB client. The feature set matches the `mongodb = "3.6"`
 # OpenHuman already links through tinyflows-adaptive (the crate's defaults
 # spelled out), so a cloud build carries one copy: BSON 2 (`compat-3-0-0`),
