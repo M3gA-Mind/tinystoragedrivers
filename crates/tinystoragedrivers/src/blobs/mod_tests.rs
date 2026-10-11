@@ -30,3 +30,44 @@ fn s3_credentials_are_rejected_without_echoing_the_url() {
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(!error.to_string().contains("secret"));
 }
+
+#[cfg(feature = "s3")]
+#[tokio::test]
+async fn s3_composite_open_preserves_document_ports_and_blob_capabilities() {
+    let config = BlobConfig::parse(
+        "s3://test-bucket/root?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A1",
+    )
+    .unwrap();
+    let backend = open_composite(&StorageConfig::Memory, &config)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .capabilities()
+            .contains(crate::Capability::StreamingBlobs)
+    );
+    assert!(
+        backend
+            .capabilities()
+            .contains(crate::Capability::PresignedUrls)
+    );
+    let scoped = backend.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .put(
+            "documents",
+            "one",
+            serde_json::json!({}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        scoped
+            .documents()
+            .get("documents", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

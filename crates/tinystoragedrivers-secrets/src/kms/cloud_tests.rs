@@ -183,3 +183,64 @@ fn mutable_aws_aliases_cannot_be_persisted_as_envelope_identities() {
     assert!(validate_aws_key_id("arn:aws:kms:us-east-1:123456789012:alias/cloud-secrets").is_err());
     assert!(validate_aws_key_id("arn:aws:kms:us-east-1:123456789012:key/immutable-id").is_ok());
 }
+
+#[cfg(feature = "kms-gcp")]
+#[tokio::test]
+async fn google_unwrap_validates_plaintext_length_and_resource_identity() {
+    let scope = Scope::new("tenant").unwrap();
+    let id = "projects/project/locations/global/keyRings/ring/cryptoKeys/key";
+    let mut kms = GcpKms::new(Arc::new(Tokens)).unwrap();
+    for (plaintext, succeeds) in [(vec![7; 32], true), (vec![7; 31], false)] {
+        let (endpoint, request) =
+            server("200 OK", json!({"plaintext": STANDARD.encode(&plaintext)})).await;
+        kms.endpoint = Some(endpoint);
+        let result = kms.unwrap(id, &scope, b"wrapped").await;
+        if succeeds {
+            assert_eq!(*result.unwrap(), [7; 32]);
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind(),
+                tinystoragedrivers_core::ErrorKind::Crypto
+            );
+        }
+        let raw = request.await.unwrap();
+        assert!(raw.starts_with(&format!("POST /v1/{id}:decrypt HTTP/1.1")));
+    }
+    assert_eq!(
+        kms.wrap("projects/../injected", &scope, &[7; 32])
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_core::ErrorKind::InvalidInput
+    );
+    assert_eq!(format!("{kms:?}"), "GcpKms(..)");
+}
+
+#[cfg(feature = "kms-aws")]
+#[tokio::test]
+async fn aws_unwrap_sends_decrypt_with_authenticated_scope() {
+    let (endpoint, request) =
+        server("200 OK", json!({"Plaintext": STANDARD.encode([6; 32])})).await;
+    let mut kms = AwsKms::new("us-east-1", Arc::new(Credentials)).unwrap();
+    kms.endpoint = Some(endpoint);
+    let scope = Scope::new("tenant").unwrap();
+    assert_eq!(
+        *kms.unwrap("key-id", &scope, b"wrapped").await.unwrap(),
+        [6; 32]
+    );
+    let raw = request.await.unwrap();
+    assert!(raw.contains("x-amz-target: TrentService.Decrypt"));
+    let payload: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(payload["EncryptionContext"]["scope"], "tenant");
+    assert_eq!(payload["CiphertextBlob"], STANDARD.encode(b"wrapped"));
+    assert_eq!(format!("{kms:?}"), "AwsKms(..)");
+    assert!(AwsKms::new("invalid/region", Arc::new(Credentials)).is_err());
+}
+
+#[test]
+fn sensitive_payload_encoding_preserves_nested_shape() {
+    let expected = json!({"items": ["private-material", 7, null, true]});
+    let payload = SensitiveJson(expected.clone());
+    let encoded = payload.encode().unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), expected);
+}

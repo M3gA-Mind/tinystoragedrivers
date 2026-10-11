@@ -65,3 +65,31 @@ async fn default_streaming_checks_length_before_publishing() {
     stream.reader.read_to_end(&mut bytes).await.unwrap();
     assert_eq!(bytes, [9]);
 }
+
+#[tokio::test]
+async fn default_streaming_publishes_exact_bytes_and_reads_missing_as_absent() {
+    use crate::{MemoryStorage, Scope, StorageBackend};
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let blobs = storage.blobs();
+    let meta = blobs
+        .put_stream(
+            "new",
+            Box::pin(std::io::Cursor::new(vec![1, 2])),
+            2,
+            Some("text/plain"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(meta.len, 2);
+    assert!(blobs.get_stream("missing").await.unwrap().is_none());
+    let stream = blobs.get_stream("new").await.unwrap().unwrap();
+    assert!(format!("{stream:?}").contains("BlobStream"));
+    assert_eq!(
+        blobs
+            .presign_get("new", Duration::from_secs(60))
+            .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::PresignedUrls)
+    );
+}

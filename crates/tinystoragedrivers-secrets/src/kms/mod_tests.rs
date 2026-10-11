@@ -287,3 +287,64 @@ async fn a_blocked_tenant_rotation_does_not_stall_another_tenant_key_load() {
         "another tenant must not wait for the blocked rotation"
     );
 }
+
+#[tokio::test]
+async fn malformed_envelopes_fail_before_kms_access() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let kms = Arc::new(FakeKms::default());
+    let provider =
+        KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::ZERO).unwrap();
+    let scope = Scope::new("tenant").unwrap();
+    let scoped = storage.for_scope(&scope).unwrap();
+    for doc in [
+        json!({"format": 2, "scope": "tenant", "key_id": "key", "wrapped": []}),
+        json!({"format": 1, "scope": "other", "key_id": "key", "wrapped": []}),
+        json!({"format": 1, "scope": "tenant", "key_id": "", "wrapped": []}),
+        json!({"format": 1, "scope": "tenant", "key_id": "key"}),
+        json!({"format": 1, "scope": "tenant", "key_id": "key", "wrapped": "bad"}),
+    ] {
+        scoped
+            .documents()
+            .put(ENVELOPE_COLLECTION, ENVELOPE_ID, doc, Precondition::None)
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.data_key_async(&scope).await.unwrap_err().kind(),
+            ErrorKind::Crypto
+        );
+    }
+    assert_eq!(kms.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(format!("{provider:?}"), "KmsKeyProvider(..)");
+    assert!(KmsKeyProvider::new(storage, kms, "", Duration::ZERO).is_err());
+    assert_eq!(
+        provider.rotate(&scope, "").await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        provider
+            .rotate(&Scope::new("absent").unwrap(), "new-key")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+}
+
+#[tokio::test]
+async fn one_provider_serializes_same_scope_loads_without_duplicate_kms_calls() {
+    let kms = Arc::new(FakeKms::default());
+    let provider = KmsKeyProvider::new(
+        Arc::new(MemoryStorage::new()),
+        kms.clone(),
+        "key",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let scope = Scope::new("tenant").unwrap();
+    let (one, two) = tokio::join!(
+        provider.data_key_async(&scope),
+        provider.data_key_async(&scope)
+    );
+    assert_eq!(*one.unwrap(), *two.unwrap());
+    assert_eq!(kms.calls.load(Ordering::SeqCst), 1);
+}

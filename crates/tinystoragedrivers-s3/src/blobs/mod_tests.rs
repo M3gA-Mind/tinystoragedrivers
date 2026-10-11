@@ -316,3 +316,30 @@ async fn listing_skips_oversized_keys_written_by_other_clients() {
         ["valid"]
     );
 }
+
+#[test]
+fn scoped_s3_clients_and_named_databases_are_constructed_without_network() {
+    let config = S3Config::parse(
+        "s3://test-bucket/root?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A1",
+    )
+    .unwrap();
+    let scope = Scope::new("tenant").unwrap();
+    let blobs = config.blobs(&scope, "default").unwrap();
+    assert!(blobs.capabilities().contains(Capability::PresignedUrls));
+    let backend = S3Storage::open(&config).unwrap();
+    assert!(backend.capabilities().contains(Capability::StreamingBlobs));
+    let named = backend.database("named").unwrap();
+    assert!(
+        named
+            .for_scope(&scope)
+            .unwrap()
+            .capabilities()
+            .contains(Capability::PresignedUrls)
+    );
+    assert!(backend.database("bad name").is_err());
+    assert!(
+        S3Storage::with_store(Arc::new(object_store::memory::InMemory::new()), None, "../")
+            .is_err()
+    );
+    assert!(format!("{blobs:?} {backend:?}").contains("S3"));
+}
