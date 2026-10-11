@@ -510,23 +510,26 @@ def create_windows_probe_file(outer, child, evidence):
 
 
 CHILD_STAGES = {"NonAdmin", "PublicRead", "PublicWrite", "PublicReplace", "PublicDelete",
-                "PrivateRead", "PrivateWrite", "PrivateReplace", "PrivateDelete", "Complete"}
+                "PrivateRead", "PrivateWrite", "PrivateReplace", "PrivateDelete", "Complete",
+                "PublicReplacementSourceWrite", "PrivateReplacementSourceWrite"}
 CHILD_EXCEPTION_CLASSES = {"ObjectDisposed", "UnauthorizedAccess", "IOException", "FileNotFound",
-                           "MethodInvocation", "GetValueInvocation", "Runtime", "Other"}
+                           "MethodInvocation", "GetValueInvocation", "Runtime", "Other",
+                           "ArgumentNull", "ArgumentOutOfRange", "Argument", "NotSupported", "Security"}
 
 
-def instrument_windows_child(child):
-    """Add finite stage diagnostics while retaining original operations/exits."""
-    prefix = r"""$ErrorActionPreference='Stop'
-$stage='NonAdmin';$ordinal=$null;$expectedExit=1;$category='NotSpecified';$classes=@()
-function ChildExceptionChain($exception) {
+CHILD_EXCEPTION_SCRIPT = r"""function ChildExceptionChain($exception) {
  $result=@()
  for($depth=0;$depth -lt 3 -and $null -ne $exception;$depth++) {
   $class=switch($exception.GetType().FullName) {
+   'System.ArgumentNullException' {'ArgumentNull'}
+   'System.ArgumentOutOfRangeException' {'ArgumentOutOfRange'}
+   'System.ArgumentException' {'Argument'}
+   'System.NotSupportedException' {'NotSupported'}
+   'System.Security.SecurityException' {'Security'}
    'System.ObjectDisposedException' {'ObjectDisposed'}
    'System.UnauthorizedAccessException' {'UnauthorizedAccess'}
-   'System.IO.IOException' {'IOException'}
    'System.IO.FileNotFoundException' {'FileNotFound'}
+   'System.IO.IOException' {'IOException'}
    'System.Management.Automation.MethodInvocationException' {'MethodInvocation'}
    'System.Management.Automation.GetValueInvocationException' {'GetValueInvocation'}
    'System.Management.Automation.RuntimeException' {'Runtime'}
@@ -535,18 +538,29 @@ function ChildExceptionChain($exception) {
   $result+=$class;$exception=$exception.InnerException
  }
  return ,$result
-}
+}"""
+
+
+def instrument_windows_child(child):
+    """Add finite stage diagnostics while retaining original operations/exits."""
+    prefix = r"""$ErrorActionPreference='Stop'
+$stage='NonAdmin';$ordinal=$null;$expectedExit=1;$category='NotSpecified';$classes=@()
+""" + CHILD_EXCEPTION_SCRIPT + r"""
 try {
 """
     child = child.replace("$ErrorActionPreference='Stop'\n", prefix, 1)
     child = child.replace("if([IO.File]::ReadAllText($control)", "$stage='PublicRead'\nif([IO.File]::ReadAllText($control)")
     child = child.replace("[IO.File]::WriteAllText($control,", "$stage='PublicWrite'\n[IO.File]::WriteAllText($control,")
-    child = child.replace("$source=$control+'.replacement'", "$stage='PublicReplace'\n$source=$control+'.replacement'")
+    child = child.replace("$source=$control+'.replacement'", "$stage='PublicReplacementSourceWrite'\n$source=$control+'.replacement'")
+    child = child.replace("[IO.File]::Replace($source,$control,$null)",
+                          "$stage='PublicReplace'\n[IO.File]::Replace($source,$control,$null)")
     child = child.replace("[IO.File]::Delete($control)", "$stage='PublicDelete'\n[IO.File]::Delete($control)")
     child = child.replace("foreach($f in @(", "$ordinal=-1\nforeach($f in @(")
     child = child.replace(" try { $h=[IO.File]::OpenRead", " $ordinal++;$stage='PrivateRead'\n try { $h=[IO.File]::OpenRead")
     child = child.replace(" try { $h=[IO.File]::Open($f", " $stage='PrivateWrite'\n try { $h=[IO.File]::Open($f")
-    child = child.replace(" [IO.File]::WriteAllText($source,", " $stage='PrivateReplace'\n [IO.File]::WriteAllText($source,")
+    child = child.replace(" [IO.File]::WriteAllText($source,", " $stage='PrivateReplacementSourceWrite'\n [IO.File]::WriteAllText($source,")
+    child = child.replace(" try { [IO.File]::Replace($source,$f,$null)",
+                          " $stage='PrivateReplace'\n try { [IO.File]::Replace($source,$f,$null)")
     child = child.replace(" try { [IO.File]::Delete($f)", " $stage='PrivateDelete'\n try { [IO.File]::Delete($f)")
     child = re.sub(r"exit (1[1-8])", r"$expectedExit=\1;exit \1", child)
     child = child.replace("Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'",
@@ -573,8 +587,8 @@ def parse_child_diagnostic(text):
     record = json.loads(text)
     fields = {"status", "stage", "object_ordinal", "expected_exit", "error_category", "exception_classes"}
     if (type(record) is not dict or set(record) != fields or record["status"] != "Failed"
-            or record["stage"] not in CHILD_STAGES - {"Complete"}
-            or record["error_category"] not in ERROR_CATEGORIES
+            or type(record["stage"]) is not str or record["stage"] not in CHILD_STAGES - {"Complete"}
+            or type(record["error_category"]) is not str or record["error_category"] not in ERROR_CATEGORIES
             or not bounded_integer(record["expected_exit"], 1, 18)
             or record["expected_exit"] not in {1, 11, 12, 13, 14, 15, 16, 17, 18}
             or type(record["exception_classes"]) is not list or len(record["exception_classes"]) > 3
@@ -588,6 +602,52 @@ def parse_child_diagnostic(text):
     if record["expected_exit"] != 1 and record["stage"] != expected_stage[record["expected_exit"]]:
         raise ValueError("invalid finite child diagnostic")
     return record
+
+
+def parse_replace_comparison(text):
+    """Validate account-free comparison metadata, discarding native payloads."""
+    if len(text) > 8192:
+        raise ValueError("invalid finite replace comparison")
+    record = json.loads(text)
+    flags = {"target_original", "target_replaced", "source_retained", "source_original", "backup_absent"}
+    fields = flags | {"candidate", "outcome", "exception_classes"}
+    if (type(record) is not dict or set(record) != fields
+            or type(record["candidate"]) is not str or record["candidate"] not in {"OrdinaryNull", "TrueNull"}
+            or type(record["outcome"]) is not str or record["outcome"] not in {"Passed", "Failed"}
+            or any(type(record[key]) is not bool for key in flags)
+            or type(record["exception_classes"]) is not list or len(record["exception_classes"]) > 3
+            or any(type(item) is not str or item not in CHILD_EXCEPTION_CLASSES
+                   for item in record["exception_classes"])
+            or (record["outcome"] == "Passed" and record["exception_classes"])):
+        raise ValueError("invalid finite replace comparison")
+    return record
+
+
+def windows_replace_comparison_script(candidate):
+    """Compare backup binding only on the same disposable, account-owned files."""
+    if candidate not in ("OrdinaryNull", "TrueNull"):
+        raise ValueError("invalid replace candidate")
+    backup = "$null" if candidate == "OrdinaryNull" else "[System.Management.Automation.Language.NullString]::Value"
+    return r"""$ErrorActionPreference='Stop'
+""" + CHILD_EXCEPTION_SCRIPT + r"""
+$root=$env:TSD_REPLACE_COMPARISON_ROOT
+$source=[IO.Path]::Combine($root,'source')
+$target=[IO.Path]::Combine($root,'target')
+$backup=[IO.Path]::Combine($root,'backup')
+$outcome='Passed';$classes=@()
+try { [IO.File]::Replace($source,$target,BACKUP_ARGUMENT) }
+catch { $outcome='Failed';$classes=ChildExceptionChain $_.Exception }
+function HasBytes($path,$expected) {
+ if(-not [IO.File]::Exists($path)){return $false}
+ $actual=[IO.File]::ReadAllBytes($path)
+ return [bool]([BitConverter]::ToString($actual) -ceq $expected)
+}
+ConvertTo-Json -Depth 4 -Compress -InputObject @{
+ candidate='CANDIDATE';outcome=$outcome;exception_classes=$classes;
+ target_original=(HasBytes $target '2C-37-42');target_replaced=(HasBytes $target '0B-16-21');
+ source_retained=[IO.File]::Exists($source);source_original=(HasBytes $source '0B-16-21');
+ backup_absent=(-not [IO.File]::Exists($backup))}
+""".replace("BACKUP_ARGUMENT", backup).replace("CANDIDATE", candidate)
 
 
 def classify_child_output(stdout, stderr, child_exit):

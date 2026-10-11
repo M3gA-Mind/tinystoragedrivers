@@ -622,6 +622,63 @@ class FiniteChildAndCleanupDiagnostics(unittest.TestCase):
         self.assertTrue(startup["ps_security_exception"])
         self.assertNotIn("PRIVATE_SENTINEL", json.dumps(startup))
 
+    def test_source_write_stages_and_argument_subtypes_are_finite(self):
+        for stage, ordinal in [("PublicReplacementSourceWrite", None),
+                               ("PrivateReplacementSourceWrite", 3), ("PublicReplace", None)]:
+            for name in ["ArgumentNull", "ArgumentOutOfRange", "Argument", "NotSupported", "Security"]:
+                record = {"status": "Failed", "stage": stage, "object_ordinal": ordinal,
+                          "expected_exit": 1, "error_category": "InvalidArgument",
+                          "exception_classes": ["MethodInvocation", name]}
+                self.assertEqual(probe.parse_child_diagnostic(json.dumps(record)), record)
+
+    def test_replace_comparison_schema_rejects_payloads_and_unbounded_values(self):
+        record = {"candidate": "OrdinaryNull", "outcome": "Failed",
+                  "exception_classes": ["MethodInvocation", "Argument"],
+                  "target_original": True, "target_replaced": False,
+                  "source_retained": True, "source_original": True, "backup_absent": True}
+        self.assertEqual(probe.parse_replace_comparison(json.dumps(record)), record)
+        for field, value in [("candidate", []), ("outcome", True), ("target_original", 1),
+                             ("exception_classes", ["Other"] * 4),
+                             ("exception_classes", ["PRIVATE_SENTINEL"]),
+                             ("path", "PRIVATE_SENTINEL")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                probe.parse_replace_comparison(json.dumps({**record, field: value}))
+        for stage in [[], {}, True]:
+            invalid = {"status": "Failed", "stage": stage, "object_ordinal": None,
+                       "expected_exit": 1, "error_category": "NotSpecified", "exception_classes": []}
+            with self.assertRaises(ValueError):
+                probe.parse_child_diagnostic(json.dumps(invalid))
+
+    def test_source_write_is_outside_typed_private_target_denial(self):
+        child = """$ErrorActionPreference='Stop'
+$source=$control+'.replacement'
+[IO.File]::WriteAllText($source, 'public-fixture-control')
+[IO.File]::Replace($source,$control,$null)
+foreach($f in @(FILES)) {
+ try { $h=[IO.File]::OpenRead($f); exit 13 }
+ catch [UnauthorizedAccessException] { }
+ [IO.File]::WriteAllText($source, 'public-fixture-control')
+ try { [IO.File]::Replace($source,$f,$null); exit 16 }
+ catch [UnauthorizedAccessException] { }
+}
+"""
+        actual = probe.instrument_windows_child(child)
+        self.assertLess(actual.index("$stage='PublicReplacementSourceWrite'"),
+                        actual.index("$stage='PublicReplace'"))
+        write = actual.index("$stage='PrivateReplacementSourceWrite'")
+        replace = actual.index("$stage='PrivateReplace'")
+        self.assertLess(write, actual.index(" [IO.File]::WriteAllText($source,", write))
+        self.assertLess(write, replace)
+        self.assertIn("try { [IO.File]::Replace($source,$f,$null); $expectedExit=16;exit 16 }", actual)
+        self.assertEqual(actual.count("catch [UnauthorizedAccessException] { }"), 2)
+        for candidate in ["OrdinaryNull", "TrueNull"]:
+            script = probe.windows_replace_comparison_script(candidate)
+            self.assertNotIn("New-LocalUser", script)
+            self.assertNotIn("Set-Acl", script)
+            self.assertNotIn("WriteAllBytes", script)
+        with self.assertRaises(ValueError):
+            probe.windows_replace_comparison_script("PRIVATE_SENTINEL")
+
     def test_cleanup_can_succeed_independently_of_child_failure_and_rejects_false_claims(self):
         record = {"status": "Failed", "phase": "Child", "oversized_outcome": "ParameterIncorrect",
                   "oversized_length": 3875, "short_length": 118, "short_within_bound": True,
@@ -660,6 +717,53 @@ class NativeWindowsChildDiagnostics(unittest.TestCase):
                                 "native child diagnostic stage mismatch")
                 self.assertTrue(result.returncode == code, "native child diagnostic changed exit code")
                 self.assertTrue('PRIVATE_SENTINEL' not in json.dumps(record), "native child diagnostic disclosed payload")
+
+    def test_owned_same_files_compare_backup_null_without_accounts(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, target, backup = [root / part for part in ["source", "target", "backup"]]
+            observations = {}
+            for candidate in ["OrdinaryNull", "TrueNull"]:
+                for path in [source, target, backup]:
+                    path.unlink(missing_ok=True)
+                source.write_bytes(bytes([11, 22, 33]))
+                target.write_bytes(bytes([44, 55, 66]))
+                identity = (source.stat().st_dev, source.stat().st_ino)
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", probe.windows_replace_comparison_script(candidate)],
+                    env={**os.environ, "TSD_REPLACE_COMPARISON_ROOT": str(root)},
+                    capture_output=True, text=True, timeout=30)
+                try:
+                    record = probe.parse_replace_comparison(result.stdout)
+                    valid = result.returncode == 0 and not result.stderr.strip()
+                except (ValueError, TypeError, KeyError):
+                    record, valid = {"diagnostic_status": "ParserRejected"}, False
+                # Raw streams live only in this local result and are discarded.
+                result = None
+                self.assertTrue(valid, "native replace comparison diagnostic rejected")
+                retained = source.exists()
+                same_identity = retained and identity == (source.stat().st_dev, source.stat().st_ino)
+                finite = {**record, "source_identity_preserved": bool(same_identity)}
+                (self.evidence / ("replace-" + candidate + ".json")).write_text(
+                    json.dumps(finite, sort_keys=True) + "\n")
+                self.assertTrue(record["backup_absent"] and not backup.exists(), "unexpected backup created")
+                self.assertEqual(record["source_retained"], retained, "source presence observation mismatch")
+                if record["outcome"] == "Passed":
+                    self.assertTrue(record["target_replaced"] and not record["target_original"],
+                                    "successful replacement byte observation mismatch")
+                    self.assertTrue(target.read_bytes() == bytes([11, 22, 33]), "successful replacement bytes changed")
+                    self.assertFalse(retained or record["source_original"], "successful replacement retained source")
+                else:
+                    self.assertTrue(record["target_original"] and not record["target_replaced"],
+                                    "failed replacement byte observation mismatch")
+                    self.assertTrue(target.read_bytes() == bytes([44, 55, 66]), "failed replacement changed target")
+                    self.assertTrue(retained and same_identity and record["source_original"],
+                                    "failed replacement changed source identity")
+                    self.assertTrue(source.read_bytes() == bytes([11, 22, 33]), "failed replacement changed source")
+                observations[candidate] = finite
+            self.assertEqual(observations["TrueNull"]["outcome"], "Passed", "genuine-null owned replacement failed")
+            # Ordinary-null outcome is recorded, never guessed from another OS.
+            self.assertIn(observations["OrdinaryNull"]["outcome"], {"Passed", "Failed"})
 
     def test_cleanup_flags_survive_primary_failure_and_removal_failure_without_accounts(self):
         for removal_fails in [False, True]:
