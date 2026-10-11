@@ -41,12 +41,16 @@ pub enum Capability {
     CrossDatabaseFencing,
     /// Document batches validate read-only dependencies atomically with writes.
     ValidatedBatch,
+    /// Scoped reset with persistent generation admission.
+    ScopePurge,
+    /// Every storage port is purged atomically.
+    AtomicScopePurge,
     /// Native scoped document invalidation subscriptions.
     Watch,
 }
 
 impl Capability {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::FullText,
         Self::Transactions,
         Self::Ttl,
@@ -57,6 +61,8 @@ impl Capability {
         Self::ConditionalStreamAppend,
         Self::CrossDatabaseFencing,
         Self::ValidatedBatch,
+        Self::ScopePurge,
+        Self::AtomicScopePurge,
         Self::Watch,
     ];
 
@@ -72,7 +78,9 @@ impl Capability {
             Self::ConditionalStreamAppend => 1 << 7,
             Self::CrossDatabaseFencing => 1 << 8,
             Self::ValidatedBatch => 1 << 9,
-            Self::Watch => 1 << 10,
+            Self::ScopePurge => 1 << 10,
+            Self::AtomicScopePurge => 1 << 11,
+            Self::Watch => 1 << 12,
         }
     }
 }
@@ -90,6 +98,8 @@ impl fmt::Display for Capability {
             Self::ConditionalStreamAppend => "conditional_stream_append",
             Self::CrossDatabaseFencing => "cross_database_fencing",
             Self::ValidatedBatch => "validated_batch",
+            Self::ScopePurge => "scope_purge",
+            Self::AtomicScopePurge => "atomic_scope_purge",
             Self::Watch => "watch",
         })
     }
@@ -135,6 +145,8 @@ impl Capabilities {
                 | Capability::ConditionalStreamAppend.bit()
                 | Capability::CrossDatabaseFencing.bit()
                 | Capability::ValidatedBatch.bit()
+                | Capability::ScopePurge.bit()
+                | Capability::AtomicScopePurge.bit()
                 | Capability::Watch.bit(),
         )
     }

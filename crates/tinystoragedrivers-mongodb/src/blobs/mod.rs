@@ -73,6 +73,7 @@ pub(crate) fn chunk_span(range: &Range<usize>, chunk_size: usize) -> (usize, usi
 pub(crate) struct MongoBlobs {
     shared: Arc<Shared>,
     scope: Scope,
+    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Writes are refused: GridFS cannot join a fenced transaction.
     fenced: bool,
 }
@@ -82,8 +83,16 @@ impl MongoBlobs {
         Self {
             shared,
             scope,
+            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fenced,
         }
+    }
+    pub(crate) fn with_generation(
+        mut self,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Refuse a write on a fenced handle rather than run it unfenced.
@@ -224,110 +233,122 @@ impl MongoBlobs {
 #[async_trait]
 impl BlobStore for MongoBlobs {
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
-        self.writable("a blob put")?;
-        let bucket = self.bucket().await?;
-        let mut upload = bucket
-            .open_upload_stream(key)
-            .metadata(file_metadata(&self.scope, content_type))
-            .await
-            .map_err(errors::failed("store a blob"))?;
-        upload
-            .write_all(&bytes)
-            .await
-            .map_err(errors::failed_io("store a blob"))?;
-        upload
-            .close()
-            .await
-            .map_err(errors::failed_io("store a blob"))?;
-        let id = upload.id().clone();
-        let older: Vec<Bson> = self
-            .files(&bucket, doc! {"filename": key, "_id": {"$lt": id.clone()}})
-            .await?
-            .into_iter()
-            .map(|file| file.id)
-            .collect();
-        self.remove(&bucket, older).await?;
-        Ok(BlobMeta {
-            key: key.to_owned(),
-            len: bytes.len() as u64,
-            content_type: content_type.map(str::to_owned),
+        crate::purge::admitted!(self, {
+            validate_blob_key(key)?;
+            self.writable("a blob put")?;
+            let bucket = self.bucket().await?;
+            let mut upload = bucket
+                .open_upload_stream(key)
+                .metadata(file_metadata(&self.scope, content_type))
+                .await
+                .map_err(errors::failed("store a blob"))?;
+            upload
+                .write_all(&bytes)
+                .await
+                .map_err(errors::failed_io("store a blob"))?;
+            upload
+                .close()
+                .await
+                .map_err(errors::failed_io("store a blob"))?;
+            let id = upload.id().clone();
+            let older: Vec<Bson> = self
+                .files(&bucket, doc! {"filename": key, "_id": {"$lt": id.clone()}})
+                .await?
+                .into_iter()
+                .map(|file| file.id)
+                .collect();
+            self.remove(&bucket, older).await?;
+            Ok(BlobMeta {
+                key: key.to_owned(),
+                len: bytes.len() as u64,
+                content_type: content_type.map(str::to_owned),
+            })
         })
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        validate_blob_key(key)?;
-        let bucket = self.bucket().await?;
-        for _ in 0..READ_ATTEMPTS {
-            let Some(file) = self.newest(&bucket, key).await? else {
-                return Ok(None);
-            };
-            if let Some(bytes) = Self::download(&bucket, &file).await? {
-                return Ok(Some(Blob {
-                    meta: blob_meta(&file),
-                    bytes,
-                }));
+        crate::purge::admitted!(self, {
+            validate_blob_key(key)?;
+            let bucket = self.bucket().await?;
+            for _ in 0..READ_ATTEMPTS {
+                let Some(file) = self.newest(&bucket, key).await? else {
+                    return Ok(None);
+                };
+                if let Some(bytes) = Self::download(&bucket, &file).await? {
+                    return Ok(Some(Blob {
+                        meta: blob_meta(&file),
+                        bytes,
+                    }));
+                }
             }
-        }
-        Err(replaced_too_often())
+            Err(replaced_too_often())
+        })
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
-        validate_blob_key(key)?;
-        let bucket = self.bucket().await?;
-        for _ in 0..READ_ATTEMPTS {
-            let Some(file) = self.newest(&bucket, key).await? else {
-                return Ok(None);
-            };
-            let len = usize::try_from(file.length).map_err(|_| {
-                StorageError::backend("blob is larger than this platform can address")
-            })?;
-            let range = clamp_range(&range, len)?;
-            if range.is_empty() {
-                return Ok(Some(Vec::new()));
+        crate::purge::admitted!(self, {
+            validate_blob_key(key)?;
+            let bucket = self.bucket().await?;
+            for _ in 0..READ_ATTEMPTS {
+                let Some(file) = self.newest(&bucket, key).await? else {
+                    return Ok(None);
+                };
+                let len = usize::try_from(file.length).map_err(|_| {
+                    StorageError::backend("blob is larger than this platform can address")
+                })?;
+                let range = clamp_range(&range, len)?;
+                if range.is_empty() {
+                    return Ok(Some(Vec::new()));
+                }
+                if let Some(bytes) = self.read_chunks(&file, &range).await? {
+                    return Ok(Some(bytes));
+                }
             }
-            if let Some(bytes) = self.read_chunks(&file, &range).await? {
-                return Ok(Some(bytes));
-            }
-        }
-        Err(replaced_too_often())
+            Err(replaced_too_often())
+        })
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        validate_blob_key(key)?;
-        let bucket = self.bucket().await?;
-        Ok(self.newest(&bucket, key).await?.as_ref().map(blob_meta))
+        crate::purge::admitted!(self, {
+            validate_blob_key(key)?;
+            let bucket = self.bucket().await?;
+            Ok(self.newest(&bucket, key).await?.as_ref().map(blob_meta))
+        })
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        validate_blob_key(key)?;
-        self.writable("a blob delete")?;
-        let bucket = self.bucket().await?;
-        let ids: Vec<Bson> = self
-            .files(&bucket, doc! {"filename": key})
-            .await?
-            .into_iter()
-            .map(|file| file.id)
-            .collect();
-        let existed = !ids.is_empty();
-        self.remove(&bucket, ids).await?;
-        Ok(existed)
+        crate::purge::admitted!(self, {
+            validate_blob_key(key)?;
+            self.writable("a blob delete")?;
+            let bucket = self.bucket().await?;
+            let ids: Vec<Bson> = self
+                .files(&bucket, doc! {"filename": key})
+                .await?
+                .into_iter()
+                .map(|file| file.id)
+                .collect();
+            let existed = !ids.is_empty();
+            self.remove(&bucket, ids).await?;
+            Ok(existed)
+        })
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
-        let bucket = self.bucket().await?;
-        let files = self
-            .files(&bucket, doc! {"filename": prefix_regex(prefix)})
-            .await?;
-        let mut out: Vec<BlobMeta> = Vec::new();
-        for file in &files {
-            let meta = blob_meta(file);
-            let fresh = out.last().is_none_or(|last| last.key != meta.key);
-            if fresh && meta.key.starts_with(prefix) {
-                out.push(meta);
+        crate::purge::admitted!(self, {
+            let bucket = self.bucket().await?;
+            let files = self
+                .files(&bucket, doc! {"filename": prefix_regex(prefix)})
+                .await?;
+            let mut out: Vec<BlobMeta> = Vec::new();
+            for file in &files {
+                let meta = blob_meta(file);
+                let fresh = out.last().is_none_or(|last| last.key != meta.key);
+                if fresh && meta.key.starts_with(prefix) {
+                    out.push(meta);
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 }
 

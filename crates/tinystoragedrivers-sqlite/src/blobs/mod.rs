@@ -20,6 +20,7 @@ pub struct SqliteBlobs {
     db: Arc<Db>,
     tables: Arc<Tables>,
     scope: Scope,
+    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
 }
@@ -44,8 +45,17 @@ impl SqliteBlobs {
             db,
             tables,
             scope,
+            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fencing,
         }
+    }
+
+    pub(crate) fn with_generation(
+        mut self,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Run a write. An unfenced write is one statement and runs as it is; a
@@ -57,13 +67,38 @@ impl SqliteBlobs {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
         let tables = Arc::clone(&self.tables);
+        let scope = self.scope.clone();
+        let generation = self.generation;
         let fencing = self.fencing.clone();
         self.db
             .run(move |conn| {
-                let Some(fencing) = fencing else {
-                    return f(conn);
-                };
-                fence::write(conn, Some(&fencing), &tables, f)
+                fence::write(conn, fencing.as_deref(), &tables, |tx| {
+                    crate::purge::check(tx, &tables, scope.as_str(), generation)?;
+                    f(tx)
+                })
+            })
+            .await
+    }
+
+    /// Read generation and data in one native snapshot.
+    async fn read<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    {
+        let tables = Arc::clone(&self.tables);
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        self.db
+            .run(move |conn| {
+                let tx = conn
+                    .transaction()
+                    .map_err(during("start blob read transaction"))?;
+                crate::purge::check(&tx, &tables, scope.as_str(), generation)?;
+                let value = f(&tx)?;
+                tx.commit()
+                    .map_err(during("finish blob read transaction"))?;
+                Ok(value)
             })
             .await
     }
@@ -114,24 +149,23 @@ impl BlobStore for SqliteBlobs {
             self.table()
         );
         let (scope, key) = (self.scope.clone(), key.to_owned());
-        self.db
-            .run(move |conn| {
-                let row: Option<(Option<String>, Vec<u8>)> = conn
-                    .query_row(&sql, params![scope.as_str(), key], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })
-                    .optional()
-                    .map_err(during("get blob"))?;
-                Ok(row.map(|(content_type, bytes)| Blob {
-                    meta: BlobMeta {
-                        key,
-                        len: bytes.len() as u64,
-                        content_type,
-                    },
-                    bytes,
-                }))
-            })
-            .await
+        self.read(move |conn| {
+            let row: Option<(Option<String>, Vec<u8>)> = conn
+                .query_row(&sql, params![scope.as_str(), key], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()
+                .map_err(during("get blob"))?;
+            Ok(row.map(|(content_type, bytes)| Blob {
+                meta: BlobMeta {
+                    key,
+                    len: bytes.len() as u64,
+                    content_type,
+                },
+                bytes,
+            }))
+        })
+        .await
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
@@ -146,15 +180,14 @@ impl BlobStore for SqliteBlobs {
         let start = i64::try_from(range.start.saturating_add(1)).unwrap_or(i64::MAX);
         let count = i64::try_from(range.end - range.start).unwrap_or(i64::MAX);
         let (scope, key) = (self.scope.clone(), key.to_owned());
-        self.db
-            .run(move |conn| {
-                conn.query_row(&sql, params![scope.as_str(), key, start, count], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .optional()
-                .map_err(during("read blob range"))
+        self.read(move |conn| {
+            conn.query_row(&sql, params![scope.as_str(), key, start, count], |row| {
+                row.get::<_, Vec<u8>>(0)
             })
-            .await
+            .optional()
+            .map_err(during("read blob range"))
+        })
+        .await
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
@@ -164,17 +197,16 @@ impl BlobStore for SqliteBlobs {
             self.table()
         );
         let (scope, key) = (self.scope.clone(), key.to_owned());
-        self.db
-            .run(move |conn| {
-                let row: Option<(Option<String>, i64)> = conn
-                    .query_row(&sql, params![scope.as_str(), key], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })
-                    .optional()
-                    .map_err(during("head blob"))?;
-                Ok(row.map(|(content_type, len)| meta(key, len, content_type)))
-            })
-            .await
+        self.read(move |conn| {
+            let row: Option<(Option<String>, i64)> = conn
+                .query_row(&sql, params![scope.as_str(), key], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()
+                .map_err(during("head blob"))?;
+            Ok(row.map(|(content_type, len)| meta(key, len, content_type)))
+        })
+        .await
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
@@ -195,22 +227,21 @@ impl BlobStore for SqliteBlobs {
             self.table()
         );
         let (scope, prefix) = (self.scope.clone(), prefix.to_owned());
-        self.db
-            .run(move |conn| {
-                let mut statement = conn.prepare(&sql).map_err(during("list blobs"))?;
-                let rows: Vec<(String, i64, Option<String>)> = statement
-                    .query_map(params![scope.as_str()], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .map_err(during("list blobs"))?
-                    .collect::<rusqlite::Result<_>>()
-                    .map_err(during("list blobs"))?;
-                Ok(rows
-                    .into_iter()
-                    .filter(|(key, _, _)| key.starts_with(&prefix))
-                    .map(|(key, len, content_type)| meta(key, len, content_type))
-                    .collect())
-            })
-            .await
+        self.read(move |conn| {
+            let mut statement = conn.prepare(&sql).map_err(during("list blobs"))?;
+            let rows: Vec<(String, i64, Option<String>)> = statement
+                .query_map(params![scope.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(during("list blobs"))?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(during("list blobs"))?;
+            Ok(rows
+                .into_iter()
+                .filter(|(key, _, _)| key.starts_with(&prefix))
+                .map(|(key, len, content_type)| meta(key, len, content_type))
+                .collect())
+        })
+        .await
     }
 }

@@ -368,3 +368,143 @@ async fn live_cross_database_capability_is_projected_on_document_handles() {
         );
     }
 }
+
+#[tokio::test]
+async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads() {
+    use tinystoragedrivers_core::{
+        ErrorKind, PurgeMode, PurgeRequest, PurgeStatus, ScopeGeneration,
+    };
+    let Some(backend) = live("quiescent_scope_purge").await else {
+        return;
+    };
+    assert!(backend.capabilities().contains(Capability::ScopePurge));
+    assert!(
+        !backend
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
+    let owner = Scope::new(unique("purge_owner")).unwrap();
+    let other = Scope::new(unique("purge_keep")).unwrap();
+    let target = backend.for_scope(&owner).unwrap();
+    let keep = backend.for_scope(&other).unwrap();
+    seed_purge_ports(&target).await;
+    seed_purge_ports(&keep).await;
+    let request = PurgeRequest {
+        operation_id: unique("reset"),
+        mode: PurgeMode::Quiescent,
+    };
+    let atomic = PurgeRequest {
+        mode: PurgeMode::Atomic,
+        ..request.clone()
+    };
+    assert_eq!(
+        target.purge(&atomic).await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::AtomicScopePurge)
+    );
+    assert!(
+        target
+            .documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let receipt = target.purge(&request).await.unwrap();
+    assert_eq!(receipt.status, PurgeStatus::Complete);
+    assert_eq!(receipt.generation, ScopeGeneration(1));
+    assert_eq!(
+        target.purge_status(&request.operation_id).await.unwrap(),
+        Some(receipt.clone())
+    );
+    let fresh = backend
+        .for_scope_generation(&owner, receipt.generation)
+        .unwrap();
+    assert!(
+        fresh
+            .documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(fresh.streams().len("purge_events").await.unwrap(), 0);
+    assert!(fresh.blobs().get("purge_blob").await.unwrap().is_none());
+    fresh
+        .documents()
+        .put(
+            "purge_records",
+            "one",
+            json!({"replacement":true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    fresh
+        .streams()
+        .append("purge_events", json!(2))
+        .await
+        .unwrap();
+    fresh
+        .blobs()
+        .put("purge_blob", vec![8], None)
+        .await
+        .unwrap();
+    assert_purge_retired(&target).await;
+    assert_eq!(target.purge(&request).await.unwrap(), receipt);
+    assert!(
+        keep.documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(keep.streams().len("purge_events").await.unwrap(), 1);
+    assert_eq!(
+        keep.blobs()
+            .get("purge_blob")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len(),
+        600_000
+    );
+}
+
+async fn assert_purge_retired(target: &ScopedStorage) {
+    use tinystoragedrivers_core::ErrorKind;
+    for error in [
+        target
+            .documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap_err(),
+        target.streams().len("purge_events").await.unwrap_err(),
+        target.blobs().get("purge_blob").await.unwrap_err(),
+        target
+            .streams()
+            .append("purge_events", json!(3))
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), ErrorKind::Fenced);
+    }
+}
+
+async fn seed_purge_ports(bound: &ScopedStorage) {
+    bound
+        .documents()
+        .put("purge_records", "one", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    bound
+        .streams()
+        .append("purge_events", json!(1))
+        .await
+        .unwrap();
+    bound
+        .blobs()
+        .put("purge_blob", vec![7; 600_000], None)
+        .await
+        .unwrap();
+}
