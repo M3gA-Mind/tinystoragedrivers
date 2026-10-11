@@ -25,4 +25,8 @@ Keep every original implementation commit and canonical merge individually.
 Memory history RED then GREEN, SQLite history RED then GREEN, and MongoDB
 replica history RED then GREEN are established. SQLite persisted history,
 upgrade backfill and corruption checks and MongoDB independent reconnect with
-backfill now pass. Complete workspace/coverage gates remain pending.
+backfill now pass. On canonical base 89cc548, full workspace instrumentation
+and every native supplement passed the 90 percent gate across 81 production
+files. Strict workspace Clippy, build, rustdoc, formatting and default-feature
+tests also passed, followed by all 27 all-feature doctests. Upstream publication
+and hosted CI remain pending; host integration is outside this native review.
