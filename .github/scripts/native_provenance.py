@@ -23,7 +23,7 @@ def capture_provenance(root, evidence, binary=None):
 
 
 def profile_directory(root):
-    """Read the current checkout inventory, rejecting absent/ambiguous profiles."""
+    """Use this checkout's coverage inventory; refuse empty or ambiguous paths."""
     root = Path(root).resolve()
     inventory = root / "target/llvm-cov-target" / (root.name + "-profraw-list")
     directories = {Path(name).parent for name in inventory.read_text().splitlines() if name}
