@@ -54,6 +54,8 @@ async fn live(test: &str) -> Option<MongoStorage> {
         eprintln!("{test}: TSD_MONGO_URL is not set; skipping");
         return None;
     };
+    // Requires the disposable-server cross-database test role documented in
+    // the MongoDB README; the URL database alone is insufficient.
     // Each paused transaction must see only its intentional concurrent mutator,
     // not schema changes from another parallel regression in the same database.
     let database = unique("native_validation");

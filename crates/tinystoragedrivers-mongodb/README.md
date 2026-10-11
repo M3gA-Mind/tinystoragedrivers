@@ -123,3 +123,20 @@ without transactions, a differential test against the memory driver over
 documents chosen to trip MongoDB's semantics, and focused behavior tests.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
+
+### Mongo live-test database permissions
+
+Run the complete live suite on a disposable MongoDB server. The transaction race
+fixtures create isolated databases named `fence_native_validation_<pid>_<counter>`
+to prevent parallel schema changes from invalidating unrelated transactions.
+The test account must be allowed to create collections and indexes, and read,
+write and delete documents in these databases as well as the database named in
+`TSD_MONGO_URL`. An account restricted to the URL database cannot run the full
+suite. On an authenticated disposable server, `readWriteAnyDatabase` is a
+suitable test role; do not use a production account or server. The example
+unauthenticated replica set above already allows these operations.
+
+The URL path still names the database used by the integration conformance
+fixtures. Its authentication database (`authSource`) remains governed by the
+MongoDB connection URL; fixture isolation does not change that setting. This
+is a test prerequisite, not a runtime driver permission requirement.
