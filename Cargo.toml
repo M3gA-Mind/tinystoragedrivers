@@ -21,6 +21,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+# SHA-256 binds Mongo watch cursors and protects native secret key identities.
+sha2 = "0.10"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
 bytes = "1"
 # HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.

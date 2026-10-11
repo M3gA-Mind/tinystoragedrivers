@@ -32,6 +32,25 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
     /// Optional abilities this driver provides.
     fn capabilities(&self) -> Capabilities;
 
+    /// Subscribe before reading authoritative state. Hints contain no document
+    /// payload or authority; conservative extra invalidations are permitted.
+    ///
+    /// # Errors
+    /// Unsupported without Watch, invalid input or misbound cursor, native
+    /// backend failures, or Fenced for a stale captured guard.
+    async fn watch(
+        &self,
+        collection: &str,
+        filter: &Filter,
+        options: &crate::WatchOptions,
+    ) -> Result<Box<dyn crate::DocumentWatch>> {
+        let _ = (collection, filter, options);
+        Err(StorageError::unsupported(
+            Capability::Watch,
+            "this driver has no native document watch",
+        ))
+    }
+
     /// Declare a collection's indexes, expiry and search fields. Idempotent:
     /// declaring the same spec again is a no-op, and declaring a changed spec
     /// adds what is new.

@@ -45,10 +45,12 @@ pub enum Capability {
     ScopePurge,
     /// Every storage port is purged atomically.
     AtomicScopePurge,
+    /// Native scoped document invalidation subscriptions.
+    Watch,
 }
 
 impl Capability {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::FullText,
         Self::Transactions,
         Self::Ttl,
@@ -61,6 +63,7 @@ impl Capability {
         Self::ValidatedBatch,
         Self::ScopePurge,
         Self::AtomicScopePurge,
+        Self::Watch,
     ];
 
     const fn bit(self) -> u32 {
@@ -77,6 +80,7 @@ impl Capability {
             Self::ValidatedBatch => 1 << 9,
             Self::ScopePurge => 1 << 10,
             Self::AtomicScopePurge => 1 << 11,
+            Self::Watch => 1 << 12,
         }
     }
 }
@@ -96,6 +100,7 @@ impl fmt::Display for Capability {
             Self::ValidatedBatch => "validated_batch",
             Self::ScopePurge => "scope_purge",
             Self::AtomicScopePurge => "atomic_scope_purge",
+            Self::Watch => "watch",
         })
     }
 }
@@ -141,7 +146,8 @@ impl Capabilities {
                 | Capability::CrossDatabaseFencing.bit()
                 | Capability::ValidatedBatch.bit()
                 | Capability::ScopePurge.bit()
-                | Capability::AtomicScopePurge.bit(),
+                | Capability::AtomicScopePurge.bit()
+                | Capability::Watch.bit(),
         )
     }
 
