@@ -253,6 +253,14 @@ impl DocumentStore for Baseline {
 #[tokio::test]
 async fn optional_operations_default_to_unsupported() {
     let baseline = Baseline;
+    assert_eq!(
+        baseline
+            .validate_collection_spec(&CollectionSpec::new("notes"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::CollectionValidation)
+    );
     let error = baseline.atomic_batch(Vec::new()).await.unwrap_err();
     assert_eq!(
         error.kind(),

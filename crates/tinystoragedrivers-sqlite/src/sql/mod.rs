@@ -6,8 +6,8 @@
 //! a value is inlined, because SQLite only uses a partial index when the query
 //! repeats its `WHERE` term literally.
 
-use rusqlite::Connection;
-use tinystoragedrivers_core::Result;
+use rusqlite::{Connection, OptionalExtension};
+use tinystoragedrivers_core::{Result, StorageError};
 
 use crate::error::during;
 
@@ -80,8 +80,8 @@ impl Tables {
     }
 
     /// Create every table if missing.
-    pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
-        let sql = format!(
+    fn declaration_sql(&self) -> String {
+        format!(
             "CREATE TABLE IF NOT EXISTS {admissions} (
                  scope TEXT PRIMARY KEY,
                  generation INTEGER NOT NULL,
@@ -93,8 +93,6 @@ impl Tables {
                  generation INTEGER NOT NULL,
                  PRIMARY KEY (scope, operation)
              ) WITHOUT ROWID;
-             INSERT OR IGNORE INTO {purge_receipts} (scope, operation, generation)
-                 SELECT scope, operation, generation FROM {admissions};
              CREATE TABLE IF NOT EXISTS {docs} (
                  scope TEXT NOT NULL,
                  coll TEXT NOT NULL,
@@ -148,8 +146,60 @@ impl Tables {
             stream_meta = ident(&self.stream_meta),
             blobs = ident(&self.blobs),
             tombstones = ident(&self.tombstones),
-        );
-        conn.execute_batch(&sql).map_err(during("create tables"))
+        )
+    }
+
+    pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(&self.declaration_sql())
+            .map_err(during("create tables"))?;
+        conn.execute_batch(&format!(
+            "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
+            ident(&self.purge_receipts), ident(&self.admissions),
+        )).map_err(during("migrate purge receipts"))
+    }
+    /// Inspect the exact driver layout without creating or migrating tables.
+    pub(crate) fn validate(&self, conn: &Connection) -> Result<()> {
+        let names = [
+            &self.admissions,
+            &self.purge_receipts,
+            &self.docs,
+            &self.specs,
+            &self.fts,
+            &self.streams,
+            &self.stream_meta,
+            &self.blobs,
+            &self.tombstones,
+        ];
+        let declaration = self.declaration_sql();
+        for (name, expected) in names.into_iter().zip(
+            declaration
+                .split(';')
+                .filter(|sql| sql.trim_start().starts_with("CREATE")),
+        ) {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(during("inspect existing schema"))?;
+            let stored =
+                stored.ok_or_else(|| StorageError::not_found("driver table does not exist"))?;
+            let normalize = |sql: &str| {
+                sql.to_ascii_uppercase()
+                    .replace("IF NOT EXISTS", "")
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect::<String>()
+            };
+            if normalize(&stored) != normalize(expected) {
+                return Err(StorageError::invalid_input(
+                    "existing driver table has incompatible schema",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
