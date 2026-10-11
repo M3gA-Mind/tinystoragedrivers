@@ -207,7 +207,7 @@ impl SqliteStorage {
     }
 }
 
-#[async_trait::async_trait]
+#[tinystoragedrivers_core::async_trait]
 impl StorageBackend for SqliteStorage {
     fn driver(&self) -> &'static str {
         "sqlite"

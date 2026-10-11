@@ -445,6 +445,7 @@ fn compatible_index(actual: &IndexModel, expected: &IndexModel) -> bool {
         || actual_options.partial_filter_expression != expected_options.partial_filter_expression
         || actual_options.sparse.unwrap_or(false) != expected_options.sparse.unwrap_or(false)
         || actual_options.expire_after != expected_options.expire_after
+        || actual_options.collation.is_some()
     {
         return false;
     }
@@ -463,7 +464,7 @@ fn compatible_index(actual: &IndexModel, expected: &IndexModel) -> bool {
             && weights.len() == fields.len()
             && fields
                 .iter()
-                .all(|field| weights.contains_key(field.as_str()))
+                .all(|field| weights.get_i32(field.as_str()) == Ok(1))
             && actual.keys.get(SCOPE) == expected.keys.get(SCOPE);
     }
     actual.keys.iter().eq(expected.keys.iter())

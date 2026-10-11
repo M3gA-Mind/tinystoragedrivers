@@ -7,6 +7,7 @@ use serde_json::json;
 #[tokio::test]
 async fn existing_schema_reuses_declared_database_and_refuses_declaration() {
     let storage = MemoryStorage::new();
+    storage.prepare_schema().await.unwrap();
     let declared = storage.database("sessions").unwrap();
     let spec = CollectionSpec::new("notes").ttl("until");
     declared
@@ -188,4 +189,32 @@ async fn existing_schema_validates_supersets_and_preserves_metadata() {
             .kind(),
         ErrorKind::NotFound
     );
+}
+
+#[cfg(feature = "blocking")]
+#[test]
+fn existing_schema_native_fence_refusal_survives_blocking_bridge() {
+    let bridge = crate::Blocking::new().unwrap();
+    bridge
+        .run(async {
+            let storage = MemoryStorage::new();
+            let scope = Scope::local();
+            let docs = storage.for_scope(&scope).unwrap().documents().clone();
+            docs.ensure_collection(&CollectionSpec::new("notes"))
+                .await
+                .unwrap();
+            let fence = Fence::new(scope.clone(), "notes", "absent", Filter::All);
+            let actor = storage
+                .existing_schema()
+                .unwrap()
+                .for_scope_fenced(&scope, &fence)
+                .unwrap();
+            actor
+                .documents()
+                .put("notes", "n", json!({}), Precondition::None)
+                .await
+        })
+        .unwrap()
+        .map_err(|error| assert_eq!(error.kind(), ErrorKind::Fenced))
+        .unwrap_err();
 }

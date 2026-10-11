@@ -24,7 +24,7 @@ use crate::blobs::MongoBlobs;
 use crate::documents::MongoDocuments;
 use crate::errors;
 use crate::fence::Fencing;
-use crate::naming::{database_prefix, validate_mongo_database};
+use crate::naming::{BLOBS, STREAM_HEADS, STREAMS, database_prefix, validate_mongo_database};
 use crate::scoped::ScopedCollection;
 use crate::streams::MongoStreams;
 
@@ -297,7 +297,6 @@ impl StorageBackend for MongoStorage {
                 "existing-schema handles cannot prepare internal schema",
             ));
         }
-        use crate::naming::{BLOBS, STREAM_HEADS, STREAMS};
         for name in [
             STREAMS.to_owned(),
             STREAM_HEADS.to_owned(),

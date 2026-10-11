@@ -14,7 +14,7 @@ use crate::error::{Result, StorageError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Capability {
-    /// Native handles never initialize or repair schema.
+    /// The backend can issue native handles that never initialize or repair schema.
     ExistingSchema,
     /// Read-only validation of persisted document collection declarations.
     CollectionValidation,

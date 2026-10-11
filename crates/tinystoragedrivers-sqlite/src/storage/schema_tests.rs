@@ -8,6 +8,7 @@ use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition};
 async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
+    storage.prepare_schema().await.unwrap();
     let named = storage.database("sessions").unwrap();
     let scope = Scope::new("alice").unwrap();
     let other = Scope::new("bob").unwrap();
@@ -62,4 +63,251 @@ async fn existing_schema_does_not_create_missing_named_database() {
         ErrorKind::NotFound
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+}
+
+#[tokio::test]
+async fn existing_schema_requires_persisted_specs_and_refuses_bootstrap() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let restricted = storage.existing_schema().unwrap();
+    assert!(restricted.prepare_schema().await.is_err());
+    let docs = restricted
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    assert_eq!(
+        docs.validate_collection_spec(&CollectionSpec::new("missing"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        docs.put("missing", "n", json!({}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+    let spec = CollectionSpec::new("notes")
+        .ttl("until")
+        .searchable(["body", "title"]);
+    storage
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .ensure_collection(&spec)
+        .await
+        .unwrap();
+    docs.validate_collection_spec(&CollectionSpec::new("notes").searchable(["title"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        docs.validate_collection_spec(&CollectionSpec::new("notes").ttl("changed"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        docs.validate_collection_spec(&CollectionSpec::new("notes").searchable(["missing"]))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn existing_schema_preserves_cross_database_guard_for_every_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let cluster = Scope::new("cluster").unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let leases = storage.for_scope(&cluster).unwrap().documents().clone();
+    leases
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    leases
+        .put("leases", "alice", json!({"epoch": 1}), Precondition::None)
+        .await
+        .unwrap();
+    storage
+        .database("sessions")
+        .unwrap()
+        .for_scope(&scope)
+        .unwrap()
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    let fence = tinystoragedrivers_core::Fence::new(
+        cluster,
+        "leases",
+        "alice",
+        tinystoragedrivers_core::Filter::eq("epoch", 1),
+    );
+    let backend = storage
+        .existing_schema()
+        .unwrap()
+        .database("sessions")
+        .unwrap();
+    let actor = backend
+        .for_scope_fenced_in_database(
+            &scope,
+            &fence,
+            &tinystoragedrivers_core::GuardDatabase::Default,
+        )
+        .unwrap();
+    actor
+        .documents()
+        .put("notes", "n", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    leases
+        .put("leases", "alice", json!({"epoch": 2}), Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        actor
+            .documents()
+            .drop_collection("notes")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        actor
+            .streams()
+            .append_batch_if_offset("s", 0, vec![])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        actor
+            .blobs()
+            .put("b", vec![1], None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+}
+
+#[tokio::test]
+async fn existing_schema_does_not_repair_incompatible_tables_or_create_guard_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let restricted = storage.existing_schema().unwrap();
+    let fence = tinystoragedrivers_core::Fence::new(
+        Scope::local(),
+        "leases",
+        "l",
+        tinystoragedrivers_core::Filter::All,
+    );
+    assert_eq!(
+        restricted
+            .for_scope_fenced_in_database(
+                &Scope::local(),
+                &fence,
+                &GuardDatabase::Named("missing".into())
+            )
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+    assert!(!dir.path().join("missing.db").exists());
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute_batch("DROP TABLE _tsd_blobs; CREATE TABLE _tsd_blobs (wrong TEXT)")
+                .map_err(crate::error::during("replace test schema"))
+        })
+        .unwrap();
+    assert_eq!(
+        storage.existing_schema().unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name = '_tsd_blobs'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(sql, "CREATE TABLE _tsd_blobs (wrong TEXT)");
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn existing_schema_reopens_named_files_without_initializing_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    {
+        let named = storage.database("sessions").unwrap();
+        named
+            .for_scope(&Scope::local())
+            .unwrap()
+            .documents()
+            .ensure_collection(&CollectionSpec::new("notes"))
+            .await
+            .unwrap();
+    }
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .database("sessions")
+        .unwrap();
+    let docs = actor
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    docs.validate_collection_spec(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    docs.put("notes", "n", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    // The actor refuses bootstrap even after reopening an existing database.
+    assert!(actor.prepare_schema().await.is_err());
+}
+
+#[tokio::test]
+async fn existing_schema_reports_corrupt_declaration_with_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                "INSERT INTO _tsd_collections (coll, spec) VALUES ('notes', 'not json')",
+                [],
+            )
+            .map_err(crate::error::during("seed corrupt metadata"))?;
+            Ok(())
+        })
+        .unwrap();
+    let error = actor
+        .documents()
+        .validate_collection_spec(&CollectionSpec::new("notes"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Serialization);
+    assert!(std::error::Error::source(&error).is_some());
 }

@@ -109,7 +109,8 @@ export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
 The design and its guarantees are in
 [`docs/specs/storage-ports.md`](docs/specs/storage-ports.md). The order in which
 drivers land and consumers migrate is in
-[`docs/plans/storage-rollout.md`](docs/plans/storage-rollout.md).
+[`docs/plans/storage-rollout.md`](docs/plans/storage-rollout.md). Native restricted handles and trusted schema bootstrap are described in
+[`docs/specs/existing-schema.md`](docs/specs/existing-schema.md).
 
 ## Releases
 
