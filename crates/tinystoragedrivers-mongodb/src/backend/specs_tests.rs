@@ -22,7 +22,7 @@ async fn live_a_newer_search_declaration_retries_the_index_build_before_publicat
         .fixture_named(&fixture)
         .unwrap();
     assert_eq!(backend.shared.db.name(), configured);
-    assert!(!backend.shared.prefix.is_empty());
+    assert_eq!(backend.shared.prefix, format!("{fixture}:"));
     let name = "search_union";
     let first = CollectionSpec::new(name).searchable(["first"]);
     let second = CollectionSpec::new(name).searchable(["second"]);
