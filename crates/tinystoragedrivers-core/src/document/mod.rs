@@ -21,9 +21,9 @@ use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
 pub use types::{
-    CollectionSpec, Cursor, IndexSpec, MAX_COLLECTION_LEN, MAX_ID_LEN, Page, Precondition, Query,
-    RESERVED_PREFIX, SearchHit, SearchSpec, Version, Versioned, WriteOp, WriteResult,
-    validate_collection, validate_doc, validate_id,
+    CollectionSpec, Cursor, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN, MAX_ID_LEN, Page,
+    Precondition, Query, RESERVED_PREFIX, ReadCheck, SearchHit, SearchSpec, Version, Versioned,
+    WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
 };
 
 /// Versioned JSON documents in named collections, bound to one scope.
@@ -130,6 +130,29 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         Err(StorageError::unsupported(
             Capability::Transactions,
             "this driver cannot apply writes atomically across documents",
+        ))
+    }
+
+    /// Validate every read-only dependency and apply writes in one native
+    /// transaction or lock. Dependencies are never rewritten. Native fencing
+    /// is checked inside that same atomic operation, including empty batches.
+    /// Checks describe the pre-write state: repeated checks are allowed, and
+    /// contradictory checks fail without writes. Expired documents are absent.
+    /// Write operations apply in input order after all checks succeed.
+    ///
+    /// # Errors
+    /// [Unsupported](crate::ErrorKind::Unsupported) without
+    /// [ValidatedBatch](Capability::ValidatedBatch); [Conflict](crate::ErrorKind::Conflict)
+    /// if a live dependency differs. Invalid inputs and failed writes change nothing.
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        let _ = (checks, ops);
+        Err(StorageError::unsupported(
+            Capability::ValidatedBatch,
+            "this driver cannot atomically validate read dependencies",
         ))
     }
 

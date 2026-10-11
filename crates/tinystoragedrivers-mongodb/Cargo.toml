@@ -28,6 +28,10 @@ mongodb = { version = "3.6", default-features = false, features = [
 # `TryStreamExt` to drain cursors. Already in the tree through `mongodb`.
 futures-util = { version = "0.3", default-features = false, features = ["io"] }
 
+
+# Yield between transient transaction conflicts; the client already uses Tokio.
+tokio = { version = "1", default-features = false, features = ["time"] }
+
 [dev-dependencies]
 # The conformance suite, and the memory driver the differential test compares
 # against.

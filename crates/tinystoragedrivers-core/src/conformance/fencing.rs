@@ -197,6 +197,13 @@ async fn refused_documents(fenced: &ScopedStorage, names: &Names, check: &str) {
         ErrorKind::Fenced,
         &fenced_kind("drop_collection"),
     );
+    if docs.capabilities().contains(Capability::ValidatedBatch) {
+        fails(
+            docs.atomic_batch_checked(vec![], vec![]).await,
+            ErrorKind::Fenced,
+            &fenced_kind("empty checked batch"),
+        );
+    }
     let batch = docs
         .atomic_batch(vec![WriteOp::Put {
             collection: names.coll.clone(),
@@ -287,6 +294,13 @@ async fn holding(fenced: &ScopedStorage, plain: &ScopedStorage, names: &Names) {
 /// Fenced document writes land while the fence holds.
 async fn holding_documents(fenced: &ScopedStorage, plain: &ScopedStorage, names: &Names) {
     let docs = fenced.documents();
+    if docs.capabilities().contains(Capability::ValidatedBatch) {
+        ok(
+            docs.atomic_batch_checked(vec![], vec![]).await,
+            "holding checked batch",
+        );
+    }
+
     let v1 = ok(
         docs.put(&names.coll, "seed", json!({"n": 1}), Precondition::Absent)
             .await,
