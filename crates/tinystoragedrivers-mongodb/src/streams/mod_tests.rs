@@ -67,3 +67,42 @@ fn malformed_segments_are_rejected() {
     );
     assert_eq!(segment_models().len(), 2);
 }
+
+#[tokio::test]
+async fn live_conditional_append_rejects_a_generation_deleted_after_its_snapshot() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let backend = crate::MongoStorage::connect(&url, "conditional_generation_test")
+        .await
+        .unwrap();
+    let streams = MongoStreams::new(Arc::clone(&backend.shared), Scope::local(), None);
+    let name = format!("generation_{}", std::process::id());
+    streams.delete_stream(&name).await.unwrap();
+    streams.append(&name, json!(1)).await.unwrap();
+    let handle = streams.segments().await.unwrap();
+    let mut session = backend.shared.client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    streams.generation(&name, Some(&mut session)).await.unwrap();
+    streams.delete_stream(&name).await.unwrap();
+    let attempt = streams
+        .append_once(&handle, &name, &[json!(2)], Some(1), Some(&mut session))
+        .await;
+    assert!(
+        attempt.is_err(),
+        "deleted generation must abort the conditional attempt"
+    );
+    session.abort_transaction().await.unwrap();
+    assert_eq!(streams.len(&name).await.unwrap(), 0);
+    assert_eq!(
+        streams
+            .append_batch_if_offset(&name, 0, vec![json!(3)])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        streams.read_window(&name, 0, 10).await.unwrap()[0].value,
+        json!(3)
+    );
+}

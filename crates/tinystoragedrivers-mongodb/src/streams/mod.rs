@@ -237,6 +237,26 @@ impl MongoStreams {
         expected: Option<u64>,
         mut session: Option<&mut ClientSession>,
     ) -> Result<Option<u64>> {
+        if expected.is_some() {
+            // Snapshot reads alone do not conflict with deletion. Holding the
+            // generation header by writing it makes deletion/takeover abort
+            // this attempt rather than publish into an obsolete generation.
+            self.heads()
+                .update_one(
+                    doc! {"_id": head_id(&self.scope, stream), "n": stream},
+                    doc! {"$inc": {"conditional_append_epoch": 1_i64}},
+                    true,
+                    session.as_deref_mut(),
+                )
+                .await
+                .map_err(|error| {
+                    if errors::duplicate_index(&error).is_some() {
+                        StorageError::unavailable("stream header changed concurrently; retry")
+                    } else {
+                        errors::map(error, "hold a stream generation")
+                    }
+                })?;
+        }
         let generation = self.generation(stream, session.as_deref_mut()).await?;
         let end = self
             .edge(handle, stream, generation, -1, session.as_deref_mut())
