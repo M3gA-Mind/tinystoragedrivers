@@ -550,6 +550,16 @@ impl StorageBackend for MongoStorage {
 }
 
 impl MongoStorage {
+    /// Typed fixture access to the same logical namespace as `database(name)`.
+    /// Kept test-only so fixture isolation does not expand the production API.
+    #[cfg(test)]
+    pub(crate) fn fixture_named(&self, name: &str) -> Result<Self> {
+        Ok(Self {
+            shared: self.named(name)?,
+            databases: Arc::clone(&self.databases),
+        })
+    }
+
     pub(crate) fn named(&self, name: &str) -> Result<Arc<Shared>> {
         validate_database(name)?;
         let mut databases = self
