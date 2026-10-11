@@ -403,15 +403,31 @@ fn lock_wait_can_be_canceled_without_waiting_for_other_writer() {
 }
 #[test]
 fn string_codec_is_bounded_compatible_and_wipes_error_scratch() {
-    let source = br#" {"a":"\"\\\/\b\f\n\r\t\u0041\u00e9\uD83D\uDE00", "a":"duplicate", "b":""} "#;
+    let source = r#" {"escapes":"\"\\\/\b\f\n\r\t\u0041\u00e9\uD83D\uDE00", "\u00e9":"\u00e9", "raw-é":"é😀", "a":"first", "a":"duplicate", "b":""} "#.as_bytes();
     let parsed = decode(source, &budget()).unwrap();
     let ordinary: BTreeMap<String, String> = serde_json::from_slice(source).unwrap();
+    assert_eq!(parsed.0.len(), 5);
+    assert_eq!(parsed.0.len(), ordinary.len());
     assert!(
         parsed
             .0
             .iter()
             .all(|(n, v)| ordinary.get(n.as_str()).is_some_and(|s| s == v.as_str()))
     );
+    for (name, expected) in [
+        ("escapes", "\"\\/\u{8}\u{c}\n\r\tAé😀"),
+        ("é", "é"),
+        ("raw-é", "é😀"),
+        ("a", "duplicate"),
+        ("b", ""),
+    ] {
+        assert!(
+            parsed
+                .0
+                .iter()
+                .any(|(n, v)| n.as_str() == name && v.as_str() == expected)
+        );
+    }
     for source in [
         b"[]".as_slice(),
         b"{",
@@ -726,4 +742,169 @@ fn native_directory_read_failure_is_sanitized() {
     let path = dir.0.join(&resource.lock.name);
     let read_only = File::open(path).unwrap();
     assert!(acquire(&read_only, &budget(), &Guard).is_ok());
+}
+
+thread_local! {
+    static BEFORE_READ_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    static AFTER_READ_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+pub(super) fn before_read_open() {
+    let hook = BEFORE_READ_OPEN.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+pub(super) fn after_read_open() {
+    let hook = AFTER_READ_OPEN.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+pub(super) fn after_read() {
+    let hook = AFTER_READ.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+// Move legitimate private fixtures only during the actual bounded open. The
+// name is restored before any subsequent path verification; the selected file
+// handle must itself match the resource's captured identity/presence.
+fn retarget_read(path: PathBuf, temporary: Option<Vec<u8>>) {
+    let retained = path.with_file_name("retained-read-fixture");
+    let replacement = path.with_file_name("alternate-read-fixture");
+    if let Some(bytes) = temporary.as_ref() {
+        super::super::tests::fixture_write(&replacement, bytes).unwrap();
+    }
+    let originally_present = path.exists();
+    let restore_path = path.clone();
+    BEFORE_READ_OPEN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            if originally_present {
+                std::fs::rename(&path, &retained).unwrap();
+            }
+            if temporary.is_some() {
+                std::fs::rename(&replacement, &path).unwrap();
+            }
+        }));
+    });
+    AFTER_READ_OPEN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            if restore_path.exists() {
+                std::fs::rename(
+                    &restore_path,
+                    restore_path.with_file_name("opened-read-fixture"),
+                )
+                .unwrap();
+            }
+            if originally_present {
+                std::fs::rename(
+                    restore_path.with_file_name("retained-read-fixture"),
+                    &restore_path,
+                )
+                .unwrap();
+            }
+        }));
+    });
+}
+
+#[test]
+fn bounded_open_rejects_retargeted_present_data_for_every_operation() {
+    for operation in [
+        FileTransactionOperation::Get("a"),
+        FileTransactionOperation::Set("a", b"new"),
+        FileTransactionOperation::Delete("a"),
+    ] {
+        for temporary_present in [false, true] {
+            let (dir, mut resource, key) = fixture();
+            set(&mut resource, &key);
+            let path = dir.0.join(SECRETS_FILE_NAME);
+            let before = std::fs::read(&path).unwrap();
+            let alternate =
+                temporary_present.then(|| crypto::encrypt(&key, br#"{"a":"alternate"}"#).unwrap());
+            retarget_read(path.clone(), alternate);
+            assert!(resource.execute(&key, operation, budget(), &Guard).is_err());
+            assert!(!resource.fenced);
+            assert!(secret_bytes_match(&std::fs::read(&path).unwrap(), &before));
+            present(
+                resource.execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard),
+                b"value",
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_open_rejects_temporary_presence_for_every_absent_operation() {
+    for operation in [
+        FileTransactionOperation::Get("a"),
+        FileTransactionOperation::Set("a", b"new"),
+        FileTransactionOperation::Delete("a"),
+    ] {
+        let (dir, mut resource, key) = fixture();
+        let path = dir.0.join(SECRETS_FILE_NAME);
+        retarget_read(
+            path.clone(),
+            Some(crypto::encrypt(&key, br#"{"a":"alternate"}"#).unwrap()),
+        );
+        assert!(resource.execute(&key, operation, budget(), &Guard).is_err());
+        assert!(!path.exists());
+        assert!(!resource.fenced);
+    }
+}
+
+#[test]
+fn published_readback_rejects_same_bytes_from_another_opened_object() {
+    for operation in [
+        FileTransactionOperation::Set("a", b"new"),
+        FileTransactionOperation::Delete("a"),
+    ] {
+        let (dir, mut resource, key) = fixture();
+        set(&mut resource, &key);
+        let path = dir.0.join(SECRETS_FILE_NAME);
+        AFTER_PUBLISH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let bytes = std::fs::read(&path).unwrap();
+                retarget_read(path, Some(bytes));
+            }));
+        });
+        assert!(resource.execute(&key, operation, budget(), &Guard).is_err());
+        assert!(resource.fenced);
+        assert!(
+            resource
+                .execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_open_rechecks_private_floor_on_the_actual_read_handle() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut resource, key) = fixture();
+    set(&mut resource, &key);
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    let changed = path.clone();
+    AFTER_READ_OPEN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            std::fs::set_permissions(changed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }));
+    });
+    let restored = path.clone();
+    AFTER_READ.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            std::fs::set_permissions(restored, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }));
+    });
+    assert!(
+        resource
+            .execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard)
+            .is_err()
+    );
+    AFTER_READ.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }

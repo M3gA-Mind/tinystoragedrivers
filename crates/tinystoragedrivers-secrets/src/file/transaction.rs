@@ -276,10 +276,38 @@ impl FileTransactionResource {
     }
 
     fn read(&self, maximum: usize) -> Result<Zeroizing<Vec<u8>>> {
-        match open_data(&self.lock.namespace, &self.path)? {
+        #[cfg(test)]
+        tests::before_read_open();
+        let observed = open_data(&self.lock.namespace, &self.path)?;
+        #[cfg(test)]
+        tests::after_read_open();
+        // Authenticate the handle that supplies ciphertext, not a separate
+        // lookup before/after the read. Publication installs the staging identity
+        // in self.data before calling this same exact-resource reader.
+        match (&self.data, &observed) {
+            (None, None) => {}
+            (Some(expected), Some(file))
+                if secure::identity(expected)
+                    .map_err(|e| io_error("inspect retained transaction identity", e))?
+                    == secure::identity(file)
+                        .map_err(|e| io_error("inspect read transaction identity", e))? =>
+            {
+                #[cfg(unix)]
+                super::unix::verify_file(file)
+                    .map_err(|e| io_error("verify transaction read handle", e))?;
+                #[cfg(windows)]
+                super::windows::verify_file(file)
+                    .map_err(|e| io_error("verify transaction read handle", e))?;
+            }
+            _ => return Err(StorageError::conflict("transaction read object changed")),
+        }
+        let result = match observed {
             None => Ok(Zeroizing::new(Vec::new())),
             Some(file) => read_bounded(file, maximum),
-        }
+        };
+        #[cfg(test)]
+        tests::after_read();
+        result
     }
 
     fn publish(
