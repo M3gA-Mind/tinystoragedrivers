@@ -83,7 +83,7 @@ pub use document::{
     Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
 };
 pub use error::{ErrorKind, Result, StorageError};
-pub use fence::Fence;
+pub use fence::{Fence, GuardDatabase};
 pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
 pub use scope::{MAX_SCOPE_LEN, Scope};

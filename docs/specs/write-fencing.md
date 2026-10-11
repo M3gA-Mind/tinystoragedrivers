@@ -28,8 +28,8 @@ Goals:
 Non-goals:
 
 - Lease acquisition, renewal or expiry policy. Those belong to the host.
-- Fencing across databases or backends. The guard lives in the same backend
-  and named database as the data it fences.
+- Fencing across independently connected backends. Guard and target databases
+  must belong to the same connected backend.
 - Clock-based expiry of the grant. A host that wants "and my grant has not
   expired" puts that in the filter it builds for each binding, or relies on
   the epoch, which a takeover always moves.
@@ -43,14 +43,31 @@ impl Fence {
     pub fn epoch(scope: Scope, collection, id, field, epoch: u64) -> Self;
 }
 
+pub enum GuardDatabase { Current, Default, Named(String) }
+
 trait StorageBackend {
     // default: Err(Unsupported(Capability::Fencing))
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage>;
+    fn for_scope_fenced_in_database(&self, scope: &Scope, fence: &Fence,
+        guard_database: &GuardDatabase) -> Result<ScopedStorage>;
 }
 
 ErrorKind::Fenced          // new, not retryable
-Capability::Fencing        // new
+Capability::Fencing
+Capability::CrossDatabaseFencing
 ```
+
+The existing binding checks the guard in the target database. The explicit
+binding selects Current (the target), Default (the connected backend root),
+or Named(name) (the shared named database namespace). The guard scope stays
+independent of the target scope. The host chooses this locator when granting a
+handle; model metadata does not choose a guard address.
+
+Explicit default/named addressing requires CrossDatabaseFencing. Unknown
+adapters default to Unsupported(CrossDatabaseFencing) for these addresses;
+Current delegates to their existing fencing implementation. Invalid names
+fail before a handle is returned. A host must propagate refusal rather than
+replace native enforcement with a preflight read.
 
 A fence *holds* while the document `collection/id` in the fence's scope
 exists, is live (not expired under its collection's `ttl_field`), and matches
@@ -75,10 +92,10 @@ filter) is `InvalidInput` from `for_scope_fenced`.
 
 | Driver | Fencing | How | Limits |
 | --- | --- | --- | --- |
-| memory | yes | Checked under the database mutex that every write holds. | One process, by nature. |
-| SQLite | yes | The guard is read inside the write's `BEGIN IMMEDIATE` transaction, which holds the file's write lock. | Holds across processes on the same file. In directory mode a named database is its own file, so the guard must be in the same database. |
-| file | yes | Checked under the in-process database mutex. | **Single process only**, like every other guarantee of this driver. |
-| MongoDB | with transactions | Each fenced write runs in a multi-document transaction that reads the guard and increments a hidden `_fence` counter on it, so a concurrent takeover write conflicts with the transaction. | Needs a replica set or sharded cluster. Fenced writes through one fence serialize on the guard document, and contention is retried (64 attempts) and then reported as `Unavailable`. Blob writes are refused with `Unsupported(Fencing)` because GridFS cannot join a transaction. |
+| memory | yes | Checked under a shared native gate covering the guard and target states. | One process, by nature. |
+| SQLite | yes | The guard is read inside the target write transaction. Directory-mode guards in other files are attached before BEGIN IMMEDIATE, locking both files; file-mode named guards use prefixed tables. | Holds across independent connections and processes. Only the target file is mutated. Guard attachments are removed after the operation. |
+| file | yes | Guard check and target mutation share one process-wide native gate, including independently reopened directories. | **Single process only**, like every other guarantee of this driver. |
+| MongoDB | with transactions | Each fenced write runs in one multi-document transaction across guard and target collection prefixes that reads the guard and increments a hidden `_fence` counter on it, so a concurrent takeover write conflicts with the transaction. | Needs a replica set or sharded cluster. Fenced writes through one fence serialize on the guard document, and contention is retried (64 attempts) and then reported as `Unavailable`. Blob writes are refused with `Unsupported(Fencing)` because GridFS cannot join a transaction. |
 
 ## Invariants
 
@@ -94,4 +111,8 @@ filter) is `InvalidInput` from `for_scope_fenced`.
   absent, success while it matches, refusal after it moves on (with no state
   change), the new holder's fence writing again, an expired guard (with
   `Ttl`), an invalid fence, and `Unsupported(Fencing)` without the capability.
+- Cross-database conformance exercises default and named guards, live holder
+  mutations, stale holder refusal with unchanged target data, and unsupported
+  adapters. Persistent-driver tests cover reopening and independent SQLite
+  guard connections. Mongo standalone never advertises either fence capability.
 - Every source file keeps at least 90% line coverage.

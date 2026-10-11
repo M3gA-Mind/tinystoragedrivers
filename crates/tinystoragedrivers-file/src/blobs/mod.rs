@@ -9,6 +9,8 @@
 //! either the old blob, or (when replacing) the new bytes under the old
 //! content type, never a blob without bytes.
 
+use crate::storage::Fencing;
+
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Fence, Result, Scope, StorageError, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Result, Scope, StorageError, clamp_range, validate_blob_key,
 };
 
 use crate::documents::guard;
@@ -44,7 +46,7 @@ pub struct FileBlobs {
     db: Arc<Db>,
     scope: Scope,
     /// Checked under the database lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<Fencing>>,
 }
 
 /// The paths of one blob.
@@ -54,7 +56,7 @@ struct Paths {
 }
 
 impl FileBlobs {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
         Self { db, scope, fence }
     }
 
@@ -81,7 +83,7 @@ impl FileBlobs {
         self.run(key, self.fence.clone(), work).await
     }
 
-    async fn run<T, F>(&self, key: &str, fence: Option<Arc<Fence>>, work: F) -> Result<T>
+    async fn run<T, F>(&self, key: &str, fence: Option<Arc<Fencing>>, work: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,

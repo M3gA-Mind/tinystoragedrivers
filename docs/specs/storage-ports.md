@@ -85,6 +85,8 @@ Versioned JSON **objects** in named collections.
 
   - `FullText`: `search` over the declared `SearchSpec` fields. Conformance
     checks single-token membership only, never ranking.
+  - CrossDatabaseFencing: native guard addressing in the default or another
+    named database through for_scope_fenced_in_database.
   - `Fencing`: `StorageBackend::for_scope_fenced`, see
     [`write-fencing.md`](write-fencing.md).
 

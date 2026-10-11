@@ -9,14 +9,16 @@
 
 mod store;
 
+use crate::storage::Fencing;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, CollectionSpec, Cursor, DocumentStore, Fence, Filter, Page, Precondition, Query,
-    Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection,
-    validate_doc, value,
+    Capabilities, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition, Query, Result,
+    Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection, validate_doc,
+    value,
 };
 
 use crate::encode::fnv1a_64;
@@ -29,7 +31,7 @@ pub struct FileDocuments {
     db: Arc<Db>,
     scope: Scope,
     /// Checked under the database lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<Fencing>>,
 }
 
 /// Refuse a write unless `fence` (when there is one) holds. Called under the
@@ -40,10 +42,12 @@ pub struct FileDocuments {
 ///
 /// [`ErrorKind::Fenced`](tinystoragedrivers_core::ErrorKind::Fenced), or a
 /// failure reading the guard document.
-pub(crate) fn guard(db: &Db, fence: Option<&Fence>) -> Result<()> {
+pub(crate) fn guard(_db: &Db, fence: Option<&Fencing>) -> Result<()> {
     let Some(fence) = fence else {
         return Ok(());
     };
+    let db = &fence.db;
+    let fence = &fence.fence;
     let docs = Docs {
         db,
         scope: fence.scope(),
@@ -53,7 +57,7 @@ pub(crate) fn guard(db: &Db, fence: Option<&Fence>) -> Result<()> {
 }
 
 impl FileDocuments {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
         Self { db, scope, fence }
     }
 
@@ -76,7 +80,7 @@ impl FileDocuments {
         self.run(self.fence.clone(), work).await
     }
 
-    async fn run<T, F>(&self, fence: Option<Arc<Fence>>, work: F) -> Result<T>
+    async fn run<T, F>(&self, fence: Option<Arc<Fencing>>, work: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Docs<'_>) -> Result<T> + Send + 'static,

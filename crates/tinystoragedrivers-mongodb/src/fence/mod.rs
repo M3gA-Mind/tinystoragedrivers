@@ -22,6 +22,7 @@
 
 use mongodb::ClientSession;
 use mongodb::bson::doc;
+use std::sync::Arc;
 use tinystoragedrivers_core::{CollectionSpec, Fence, Result, StorageError};
 
 use crate::backend::Shared;
@@ -29,6 +30,20 @@ use crate::documents::stored::{Stored, at_version, is_live};
 use crate::documents::{CommitFailure, MongoDocuments, commit_failure};
 use crate::errors;
 use crate::naming::{FENCE, document_id};
+
+/// The native guard database bound by the host.
+#[derive(Debug)]
+pub(crate) struct Fencing {
+    pub(crate) fence: Fence,
+    pub(crate) shared: Arc<Shared>,
+}
+
+impl std::ops::Deref for Fencing {
+    type Target = Fence;
+    fn deref(&self) -> &Fence {
+        &self.fence
+    }
+}
 
 /// How many transactions one fenced write starts before giving up with a
 /// retryable error.
@@ -53,8 +68,7 @@ pub(crate) use in_fence;
 
 /// One fenced write's session and attempt count.
 pub(crate) struct FencedTxn<'a> {
-    shared: &'a Shared,
-    fence: &'a Fence,
+    fence: &'a Fencing,
     session: ClientSession,
     attempts: usize,
     last: StorageError,
@@ -79,14 +93,13 @@ impl<'a> FencedTxn<'a> {
     /// # Errors
     ///
     /// When no session can be started.
-    pub(crate) async fn start(shared: &'a Shared, fence: &'a Fence) -> Result<Self> {
+    pub(crate) async fn start(shared: &'a Shared, fence: &'a Fencing) -> Result<Self> {
         let session = shared
             .client
             .start_session()
             .await
             .map_err(errors::failed("start a session"))?;
         Ok(Self {
-            shared,
             fence,
             session,
             attempts: 0,
@@ -104,7 +117,7 @@ impl<'a> FencedTxn<'a> {
     /// is spent, or a server error.
     pub(crate) async fn begin(&mut self) -> Result<&mut ClientSession> {
         // Outside the transaction: the spec cache may read the server.
-        let spec = self.shared.spec(self.fence.collection()).await?;
+        let spec = self.fence.shared.spec(self.fence.collection()).await?;
         loop {
             if self.attempts == FENCE_ATTEMPTS {
                 return Err(std::mem::replace(&mut self.last, kept_aborting()));
@@ -130,7 +143,7 @@ impl<'a> FencedTxn<'a> {
     /// Check the guard document and hold it for this transaction.
     async fn guard(&mut self, spec: &CollectionSpec) -> Result<()> {
         let fence = self.fence;
-        let handle = self.shared.scoped(fence.collection(), fence.scope());
+        let handle = self.fence.shared.scoped(fence.collection(), fence.scope());
         let found = handle
             .find_one(
                 doc! {"_id": document_id(fence.scope(), fence.id())},
@@ -138,7 +151,7 @@ impl<'a> FencedTxn<'a> {
             )
             .await
             .map_err(errors::failed("read a fence document"))?;
-        let now = self.shared.now();
+        let now = self.fence.shared.now();
         let Some(live) = found
             .as_ref()
             .map(Stored::decode)

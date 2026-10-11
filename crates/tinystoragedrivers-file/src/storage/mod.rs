@@ -21,23 +21,22 @@
 //!
 //! # Concurrency
 //!
-//! Every operation on a database runs under one mutex shared by every handle
-//! in the process that opened the same directory, so operations are
+//! Every operation runs under one native mutex shared by all file-driver
+//! handles in the process, so guard and target operations are
 //! serialized exactly like the memory driver's and `claim` is atomic. The file
 //! IO runs on tokio's blocking pool when a runtime is present. Several
 //! *processes* writing the same directory are not coordinated: each file
 //! replacement is atomic, but a compare-and-swap, claim or fenced write can
 //! race another process.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
-    StorageError, validate_database,
+    Capabilities, Capability, Clock, Fence, GuardDatabase, Result, Scope, ScopedStorage,
+    StorageBackend, StorageError, validate_database,
 };
 
 use crate::blobs::FileBlobs;
@@ -50,11 +49,12 @@ use crate::streams::FileStreams;
 /// transactions, because a batch spanning several files cannot be made
 /// crash-atomic with renames alone. Fencing holds only among the handles of
 /// one process, like every other guarantee here: the fence is checked under
-/// the in-process database lock.
+/// the process-wide native gate.
 pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Ttl)
     .with(Capability::FullText)
     .with(Capability::Fencing)
+    .with(Capability::CrossDatabaseFencing)
     .with(Capability::ConditionalStreamAppend)
     .with(Capability::CollectionEnumeration);
 
@@ -66,14 +66,19 @@ fn system_clock() -> u64 {
         })
 }
 
-/// One lock per database directory in this process.
-fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-    let registry = LOCKS.get_or_init(Mutex::default);
-    // The map only ever gains entries; a panic while holding it cannot leave
-    // it inconsistent.
-    let mut locks = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    Arc::clone(locks.entry(dir.to_path_buf()).or_default())
+/// One native gate coordinates target and guard directories, including handles
+/// independently opened on a named directory. This driver promises process-local
+/// atomicity only.
+fn lock_for(_dir: &Path) -> Arc<Mutex<()>> {
+    static LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+    Arc::clone(LOCK.get_or_init(|| Arc::new(Mutex::new(()))))
+}
+
+/// A validated guard address bound by the host when creating a handle.
+#[derive(Debug)]
+pub(crate) struct Fencing {
+    pub(crate) fence: Fence,
+    pub(crate) db: Arc<Db>,
 }
 
 /// One database directory and the lock guarding it.
@@ -208,7 +213,7 @@ impl FileStorage {
         Ok(Self { root, db })
     }
 
-    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
@@ -252,27 +257,56 @@ impl StorageBackend for FileStorage {
 
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         fence.validate()?;
-        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                db: Arc::clone(&self.db),
+            })),
+        ))
+    }
+
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        guard_database: &GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        guard_database.validate()?;
+        let db = match guard_database {
+            GuardDatabase::Current => Arc::clone(&self.db),
+            GuardDatabase::Default => {
+                Arc::new(Db::new(self.root.clone(), Arc::clone(&self.db.clock)))
+            }
+            GuardDatabase::Named(name) => self.named(name)?,
+        };
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                db,
+            })),
+        ))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
+        Ok(Arc::new(Self {
+            root: self.root.clone(),
+            db: self.named(name)?,
+        }))
+    }
+}
+
+impl FileStorage {
+    fn named(&self, name: &str) -> Result<Arc<Db>> {
         validate_database(name)?;
-        // Named databases share one namespace under the root, as the memory
-        // driver's registry does: `database("x")` names the same database
-        // from the root or from any other named database.
-        // Encoded like every other stored name, so a Windows device name such
-        // as `con` or `com1` is a legal directory. The directory is created
-        // and canonicalized so a symlinked name and a handle opened on its
-        // target share one lock.
         let dir = self.root.join("databases").join(file_stem(name));
         std::fs::create_dir_all(&dir).map_err(io_error("create the database directory"))?;
         let dir = dir
             .canonicalize()
             .map_err(io_error("resolve the database directory"))?;
-        Ok(Arc::new(Self {
-            root: self.root.clone(),
-            db: Arc::new(Db::new(dir, Arc::clone(&self.db.clock))),
-        }))
+        Ok(Arc::new(Db::new(dir, Arc::clone(&self.db.clock))))
     }
 }
 
