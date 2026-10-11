@@ -244,3 +244,45 @@ fn sensitive_payload_encoding_preserves_nested_shape() {
     let encoded = payload.encode().unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&encoded).unwrap(), expected);
 }
+
+#[tokio::test]
+async fn deterministic_kms_rejections_are_not_retryable_and_transient_statuses_are() {
+    use tinystoragedrivers_core::ErrorKind;
+    for (status, body, expected) in [
+        (
+            "400 Bad Request",
+            json!({"__type":"InvalidCiphertextException", "message":"private"}),
+            ErrorKind::Crypto,
+        ),
+        (
+            "400 Bad Request",
+            json!({"error":{"status":"INVALID_ARGUMENT"}}),
+            ErrorKind::InvalidInput,
+        ),
+        (
+            "404 Not Found",
+            json!({"error":{"status":"NOT_FOUND"}}),
+            ErrorKind::NotFound,
+        ),
+        (
+            "403 Forbidden",
+            json!({"error":{"status":"PERMISSION_DENIED"}}),
+            ErrorKind::Backend,
+        ),
+        ("429 Too Many Requests", json!({}), ErrorKind::Unavailable),
+        ("503 Service Unavailable", json!({}), ErrorKind::Unavailable),
+    ] {
+        let (endpoint, request) = server(status, body).await;
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        let error = super::response(response).await.err().unwrap();
+        assert_eq!(error.kind(), expected);
+        assert_eq!(error.is_retryable(), expected == ErrorKind::Unavailable);
+        assert!(!error.to_string().contains("private"));
+        request.await.unwrap();
+    }
+}

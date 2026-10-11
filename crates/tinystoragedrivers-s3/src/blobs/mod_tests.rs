@@ -343,3 +343,62 @@ fn scoped_s3_clients_and_named_databases_are_constructed_without_network() {
     );
     assert!(format!("{blobs:?} {backend:?}").contains("S3"));
 }
+
+#[derive(Debug)]
+struct FailsAfter(u64);
+impl tokio::io::AsyncRead for FailsAfter {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.0 == 0 {
+            return std::task::Poll::Ready(Err(std::io::Error::from(
+                std::io::ErrorKind::ConnectionReset,
+            )));
+        }
+        let count = usize::try_from(self.0.min(buffer.remaining() as u64)).unwrap();
+        buffer.initialize_unfilled()[..count].fill(0);
+        buffer.advance(count);
+        self.0 -= count as u64;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+#[tokio::test]
+async fn multipart_extra_byte_probe_preserves_source_failure_and_does_not_publish() {
+    use std::error::Error;
+    let store = handle(Arc::new(object_store::memory::InMemory::new()), "alice");
+    let len = PART_SIZE as u64 + 1;
+    let error = store
+        .put_stream("probe", Box::pin(FailsAfter(len)), len, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    assert!(store.head("probe").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn small_upload_reader_failure_preserves_its_source() {
+    use std::error::Error;
+    let store = handle(Arc::new(object_store::memory::InMemory::new()), "alice");
+    let error = store
+        .put_stream("failed", Box::pin(FailedReader), 1, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    assert!(store.head("failed").await.unwrap().is_none());
+}

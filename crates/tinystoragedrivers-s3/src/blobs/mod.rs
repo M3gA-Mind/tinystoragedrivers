@@ -394,7 +394,7 @@ impl BlobStore for S3Blobs {
                 .take(len + 1)
                 .read_to_end(&mut data)
                 .await
-                .map_err(|_| StorageError::backend("blob reader failed"))?;
+                .map_err(|error| StorageError::backend("blob reader failed").with_source(error))?;
             if data.len() as u64 != len {
                 return Err(StorageError::invalid_input(
                     "blob reader length differs from declared length",
@@ -445,11 +445,9 @@ impl BlobStore for S3Blobs {
                     remaining -= size as u64;
                 }
                 let mut extra = [0];
-                if reader
-                    .read(&mut extra)
-                    .await
-                    .map_err(|_| StorageError::backend("blob reader failed"))?
-                    != 0
+                if reader.read(&mut extra).await.map_err(|error| {
+                    StorageError::backend("blob reader failed").with_source(error)
+                })? != 0
                 {
                     return Err(StorageError::invalid_input(
                         "blob reader exceeds declared length",
@@ -553,7 +551,13 @@ impl BlobStore for S3Blobs {
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         // A partial key prefix need not itself be a valid full key.
-        let root = Path::parse(self.prefix.trim_end_matches('/'))
+        // ObjectStore list prefixes match complete path segments. Push the
+        // requested directory portion down; filter its partial last segment below.
+        let directory = prefix
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory);
+        let query_prefix = format!("{}{directory}", self.prefix);
+        let root = Path::parse(query_prefix.trim_end_matches('/'))
             .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
         let mut objects = self.store.list(Some(&root));
         let mut metas = Vec::new();

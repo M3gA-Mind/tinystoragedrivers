@@ -11,6 +11,7 @@ struct Totals {
     parts: AtomicUsize,
     maximum: AtomicUsize,
     completed: AtomicUsize,
+    list_prefix: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -87,6 +88,7 @@ impl ObjectStore for Recorder {
         &self,
         prefix: Option<&Path>,
     ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        *self.totals.list_prefix.lock().unwrap() = prefix.map(ToString::to_string);
         self.inner.list(prefix)
     }
     async fn list_with_delimiter(
@@ -127,4 +129,30 @@ async fn a_500_mib_source_is_uploaded_in_bounded_parts() {
     assert_eq!(totals.parts.load(Ordering::Relaxed), 63);
     assert_eq!(totals.maximum.load(Ordering::Relaxed), PART_SIZE);
     assert_eq!(totals.completed.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn listing_pushes_complete_requested_directories_into_the_backend_query() {
+    let totals = Arc::new(Totals::default());
+    let recorder = Arc::new(Recorder {
+        inner: object_store::memory::InMemory::new(),
+        totals: totals.clone(),
+    });
+    let blobs = S3Blobs::with_store(
+        recorder,
+        None,
+        "root",
+        &Scope::new("alice").unwrap(),
+        "default",
+    )
+    .unwrap();
+    blobs.put("folder/file-one", vec![1], None).await.unwrap();
+    blobs.put("folder/file-two", vec![2], None).await.unwrap();
+    blobs.put("elsewhere/file", vec![3], None).await.unwrap();
+    let listed = blobs.list("folder/fil").await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        totals.list_prefix.lock().unwrap().as_deref(),
+        Some(format!("{}folder", blobs.prefix).as_str())
+    );
 }

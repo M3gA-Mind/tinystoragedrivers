@@ -42,10 +42,43 @@ fn http_client() -> Result<reqwest::Client> {
 
 const LABEL: &str = "tinystoragedrivers-secrets/v1";
 
-async fn response(response: reqwest::Response) -> Result<SensitiveJson> {
+async fn response(mut response: reqwest::Response) -> Result<SensitiveJson> {
     // Never echo cloud response bodies: an upstream could include plaintext.
-    if !response.status().is_success() {
-        return Err(StorageError::unavailable("kms request rejected"));
+    let status = response.status();
+    if !status.is_success() {
+        use tinystoragedrivers_core::ErrorKind;
+        let kind = if status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+        {
+            ErrorKind::Unavailable
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            ErrorKind::NotFound
+        } else if status == reqwest::StatusCode::BAD_REQUEST {
+            // Read only a bounded error payload to distinguish ciphertext failure
+            // from invalid input. Neither service messages nor raw bodies escape.
+            let mut bytes = Zeroizing::new(Vec::new());
+            while let Ok(Some(chunk)) = response.chunk().await {
+                if bytes.len() + chunk.len() > 16 * 1024 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let payload = SensitiveJson(serde_json::from_slice(&bytes).unwrap_or(Value::Null));
+            let code = payload
+                .0
+                .get("__type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if code.rsplit('#').next() == Some("InvalidCiphertextException") {
+                ErrorKind::Crypto
+            } else {
+                ErrorKind::InvalidInput
+            }
+        } else {
+            ErrorKind::Backend
+        };
+        return Err(StorageError::new(kind, "kms request rejected"));
     }
     response
         .json()
