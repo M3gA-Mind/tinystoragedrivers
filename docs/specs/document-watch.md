@@ -99,7 +99,13 @@ is required. Wait cancellation and admission cancellation have separate tests.
 
 At this point strict full-workspace Clippy, all-target/all-feature build,
 573 all-feature tests, 530 default tests (including doctests, none ignored),
-strict rustdoc, fmt and Rust 1.88 locked workspace check all passed. Per-source
-coverage is still a required publication gate and is recorded separately after
-its instrumented execution. Disposable log filenames are not a substitute for
-these retained behavior names and recorded terminal outcomes.
+strict rustdoc, fmt and Rust 1.88 locked workspace check all passed. The fresh
+full coverage gate also passed (exit 0): all 79 executable production source
+files exceed 90%, with a minimum of 90.14%. Core Watch types cover 90.91%,
+polling 100%, conformance 100%, and native Mongo Watch 95.36%. This gate includes
+the instrumented local replica/standalone suite, eight injected native I/O
+faults, the stopped two-link key publisher/concurrent reader, and the real
+SecretService tests. It includes the pure CI-only helper correction from PR20
+(a44e09f) through a preserved merge; no unpublished library API, copied profile
+or fabricated filename alias is consumed. Disposable log filenames are not a
+substitute for these retained behavior names and recorded terminal outcomes.
