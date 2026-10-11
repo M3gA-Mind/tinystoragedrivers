@@ -183,3 +183,28 @@ async fn conformance_rejects_cross_scope_collection_enumeration() {
         "collection enumeration must reject a tenant leak"
     );
 }
+
+#[tokio::test]
+async fn overlapping_blob_boundary_checks_cannot_delete_each_others_payloads() {
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let blobs = storage.blobs();
+    let limit = blobs.max_key_len();
+    for utf8 in [false, true] {
+        let first = super::blobs::boundary_key(limit, utf8);
+        let second = super::blobs::boundary_key(limit, utf8);
+        assert_eq!(first.len(), limit);
+        assert_eq!(second.len(), limit);
+        crate::validate_blob_key(&first).unwrap();
+        crate::validate_blob_key(&second).unwrap();
+        blobs.put(&first, vec![1], None).await.unwrap();
+        blobs.put(&second, vec![2], None).await.unwrap();
+        assert!(blobs.delete(&second).await.unwrap());
+        let retained = blobs.get(&first).await.unwrap();
+        assert!(
+            retained.is_some(),
+            "another boundary check deleted our blob"
+        );
+        assert_eq!(retained.unwrap().bytes, [1]);
+        assert!(blobs.delete(&first).await.unwrap());
+    }
+}

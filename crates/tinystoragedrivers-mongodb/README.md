@@ -143,3 +143,16 @@ Fenced subscriptions validate their captured guard before opening and delivery
 through native checked batches. Consumed hints remain pending across canceled
 validation. No application worker or unbounded queue exists; dropping the
 subscription drops the owned driver cursor, including a pending getMore.
+
+### Mongo live-test database permissions
+
+Run the complete live suite on a disposable MongoDB server. Transaction race
+fixtures use isolated logical collection prefixes inside the database named in
+`TSD_MONGO_URL` (or `tsd_test` when the URL has no database). This prevents
+parallel schema changes from invalidating unrelated transactions without
+requiring access to other databases.
+
+The test account must be allowed to create collections and indexes, and read,
+write and delete documents in the configured database. On an authenticated
+disposable server, `readWrite` on that database is sufficient. The URL's
+`authSource` continues to select the authentication database independently.
