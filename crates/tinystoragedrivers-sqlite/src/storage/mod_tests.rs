@@ -289,3 +289,241 @@ fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes()
         }
     });
 }
+
+#[tokio::test]
+async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
+    use tinystoragedrivers_core::{
+        ErrorKind, PurgeMode, PurgeRequest, PurgeStatus, ScopeGeneration,
+    };
+    for filename in ["directory", "single.db"] {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join(filename);
+        let storage = SqliteStorage::open(&location).unwrap();
+        let scope = Scope::new("reset").unwrap();
+        let other = Scope::new("keep").unwrap();
+        for backend in [
+            Arc::new(storage.clone()) as Arc<dyn StorageBackend>,
+            storage.database("sessions").unwrap(),
+        ] {
+            let target = backend.for_scope(&scope).unwrap();
+            let keep = backend.for_scope(&other).unwrap();
+            for ports in [&target, &keep] {
+                ports
+                    .documents()
+                    .put("records", "one", json!({}), Precondition::None)
+                    .await
+                    .unwrap();
+                ports.streams().append("events", json!({})).await.unwrap();
+                ports.blobs().put("blob", vec![1], None).await.unwrap();
+            }
+            let request = PurgeRequest {
+                operation_id: "reset_one".into(),
+                mode: PurgeMode::Atomic,
+            };
+            let receipt = target.purge(&request).await.unwrap();
+            assert_eq!(receipt.status, PurgeStatus::Complete);
+            assert_eq!(receipt.generation, ScopeGeneration(1));
+            assert_eq!(target.purge(&request).await.unwrap(), receipt);
+            assert!(
+                target
+                    .documents()
+                    .get("records", "one")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(target.streams().len("events").await.unwrap(), 0);
+            assert!(target.blobs().get("blob").await.unwrap().is_none());
+            assert!(
+                keep.documents()
+                    .get("records", "one")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(keep.streams().len("events").await.unwrap(), 1);
+            assert!(keep.blobs().get("blob").await.unwrap().is_some());
+            assert_eq!(
+                target
+                    .documents()
+                    .put("records", "late", json!({}), Precondition::None)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Fenced
+            );
+            assert_eq!(
+                target
+                    .streams()
+                    .append("events", json!({}))
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Fenced
+            );
+            assert_eq!(
+                target
+                    .blobs()
+                    .put("late", vec![], None)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::Fenced
+            );
+        }
+        drop(storage);
+        verify_reopened_generation(&location, &scope).await;
+    }
+}
+
+async fn verify_reopened_generation(location: &Path, scope: &Scope) {
+    use tinystoragedrivers_core::{ErrorKind, ScopeGeneration};
+    let reopened = SqliteStorage::open(location).unwrap();
+    let old = reopened
+        .database("sessions")
+        .unwrap()
+        .for_scope(scope)
+        .unwrap();
+    assert_eq!(
+        old.streams()
+            .append("events", json!({}))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    let fresh = reopened
+        .database("sessions")
+        .unwrap()
+        .for_scope_generation(scope, ScopeGeneration(1))
+        .unwrap();
+    assert_eq!(
+        fresh.streams().append("events", json!({})).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn failed_scope_purge_rolls_back_data_and_generation() {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest, ScopeGeneration};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("reset").unwrap();
+    let target = storage.for_scope(&scope).unwrap();
+    target
+        .documents()
+        .put("records", "one", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    target.streams().append("events", json!({})).await.unwrap();
+    target.blobs().put("blob", vec![1], None).await.unwrap();
+    let trigger = format!(
+        "CREATE TRIGGER fail_purge BEFORE DELETE ON {} BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        crate::sql::ident(&storage.tables.blobs)
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute_batch(&trigger).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let request = PurgeRequest {
+        operation_id: "failed_reset".into(),
+        mode: PurgeMode::Atomic,
+    };
+    assert!(target.purge(&request).await.is_err());
+    assert!(
+        target
+            .documents()
+            .get("records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(target.streams().len("events").await.unwrap(), 1);
+    assert!(target.blobs().get("blob").await.unwrap().is_some());
+    assert_eq!(
+        target.streams().append("events", json!({})).await.unwrap(),
+        1
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute_batch("DROP TRIGGER fail_purge").unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        target.purge(&request).await.unwrap().generation,
+        ScopeGeneration(1)
+    );
+}
+
+#[tokio::test]
+async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("exhausted").unwrap();
+    let target = storage.for_scope(&scope).unwrap();
+    target
+        .documents()
+        .put("records", "one", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    let table = crate::sql::ident(&storage.tables.admissions);
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                &format!("INSERT INTO {table} VALUES (?1,-1,'old')"),
+                [scope.as_str()],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        target
+            .streams()
+            .append("events", json!({}))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Serialization
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                &format!("UPDATE {table} SET generation=?1 WHERE scope=?2"),
+                rusqlite::params![i64::MAX, scope.as_str()],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let admitted = storage
+        .for_scope_generation(&scope, ScopeGeneration(u64::try_from(i64::MAX).unwrap()))
+        .unwrap();
+    assert_eq!(
+        admitted
+            .purge(&PurgeRequest {
+                operation_id: "overflow_reset".into(),
+                mode: PurgeMode::Atomic
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Backend
+    );
+    assert!(
+        admitted
+            .documents()
+            .get("records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

@@ -17,6 +17,7 @@ use crate::stream::{StreamEntry, StreamStore, validate_stream};
 pub struct MemoryStreams {
     db: Arc<MemoryDb>,
     scope: Scope,
+    generation: crate::ScopeGeneration,
     clock: Clock,
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
@@ -41,14 +42,21 @@ impl MemoryStreams {
         Self {
             db,
             scope,
+            generation: crate::ScopeGeneration::default(),
             clock,
             fence,
         }
     }
 
+    pub(super) fn with_generation(mut self, generation: crate::ScopeGeneration) -> Self {
+        self.generation = generation;
+        self
+    }
+
     /// Refuse a write unless this handle's fence (if any) holds. An
     /// unfenced handle never reads the clock.
     fn guard(&self, state: &DbState) -> Result<()> {
+        state.check_generation(self.scope.as_str(), self.generation)?;
         match self.fence.as_deref() {
             None => Ok(()),
             fence => self.db.guard(state, fence, (self.clock)()),

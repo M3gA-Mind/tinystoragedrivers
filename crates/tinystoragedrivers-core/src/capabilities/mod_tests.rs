@@ -34,6 +34,8 @@ fn all_holds_every_capability() {
             Capability::ConditionalStreamAppend,
             Capability::CrossDatabaseFencing,
             Capability::ValidatedBatch,
+            Capability::ScopePurge,
+            Capability::AtomicScopePurge,
         ]
     );
 }

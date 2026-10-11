@@ -20,6 +20,7 @@ mod blobs;
 mod documents;
 mod fencing;
 mod isolation;
+mod purge;
 mod streams;
 mod validated;
 
@@ -59,6 +60,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     } else {
         isolation::run(backend).await;
         validated::isolation(backend).await;
+        purge::run(backend).await;
     }
     isolation::databases(backend).await;
     fencing::run(backend, single_scope).await;

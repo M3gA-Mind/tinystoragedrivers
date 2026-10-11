@@ -203,3 +203,58 @@ nonretryable backend error because the mutation may have committed: callers
 must read their durable outcome before retrying. The API has no deadline
 parameter. Scope serialization trades same-scope mutation throughput for
 cross-document serializability.
+
+## Scoped reset and writer admission
+
+Reset targets an explicit host-owned manifest of root-relative
+`DatabaseAddress::Default` and `DatabaseAddress::Named(name)` addresses.
+Every first-party `database(name)` is root-relative. A receipt from one
+address says nothing about the other addresses; a host reports a full reset
+only after every owned address and external owner stage completes.
+
+`ScopedStorage::purge(PurgeRequest { operation_id, mode })` is optional.
+Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
+`ScopePurge` advertises native scope admission and reset support;
+`AtomicScopePurge` additionally promises one atomic all-port operation.
+A stable operation identity makes retries idempotent and its receipt survives
+the erased data. `PurgeMode::Quiescent` is a trusted host assertion that every
+writer has been stopped and drained; it is never a model-selectable option.
+`PurgeMode::Atomic` requires native atomic erasure of all storage ports.
+
+Memory and SQLite implement atomic erasure of documents, deleted-document
+versions, document-backed secrets and wrapped-key envelopes, import receipts,
+stream records and lifetime cursors, and blobs for exactly one scope.
+SQLite also removes that scope's search mirror. Shared collection declarations,
+indexes and native admission/receipt metadata remain: removing shared schemas
+would alter other scopes. Query results become empty while declarations remain.
+Standalone secrets backends, OS keyrings, arbitrary native SQL tables and other
+external owner stores are outside these ports and require explicit owner stages.
+
+The operation issues a monotonically increasing `ScopeGeneration`.
+Generation zero is the legacy handle default. Every mutation, including empty
+operations and schema declarations, validates its issued generation under the
+same native lock/transaction as the mutation. Old handles therefore fail
+`Fenced` after reset, even if the operation would otherwise change nothing.
+Hosts persist the returned generation in authoritative profile state before
+reopening through `for_scope_generation` or
+`for_scope_fenced_in_database_generation`. Generations come from trusted
+native receipts and profile admission, never model arguments or document
+metadata. A matching receipt retry does not erase data written in the new
+generation. Reusing an older operation identity after a later reset cannot
+revive the old generation.
+
+A fenced purge checks and holds the native guard through the operation. The
+guard's scope must differ from the erased scope, including when the guard is
+in the default or another named database. A stale guard changes nothing.
+Memory and SQLite support this natively. File, Mongo GridFS, S3 and composite
+storage do not currently advertise atomic all-port purge; they must not turn
+an unsupported native guarantee into an unfenced best-effort success.
+
+Reset invalidates application query caches, old version preconditions, stream
+cursors, import receipts and scoped secret providers. Shared declaration caches
+remain valid because declarations are retained. Hosts stop and drain KMS loads
+and secret writers, call `KmsKeyProvider::invalidate(scope)` to zeroize the
+local cached key, then rebuild/rebind providers over the admitted generation.
+KMS async reads already revalidate the durable envelope before using cached
+plaintext; the synchronous KMS path refuses to use unvalidated cached keys.
+The new envelope must be created through a generation-admitted handle.

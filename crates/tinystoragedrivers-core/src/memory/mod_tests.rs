@@ -365,3 +365,126 @@ async fn changed_read_only_dependency_aborts_checked_batch_without_mutation() {
     assert_eq!(error.kind(), crate::ErrorKind::Conflict);
     assert!(docs.get("claims", "c").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn scope_purge_erases_all_ports_and_revokes_old_writers() {
+    use crate::{PurgeMode, PurgeRequest, PurgeStatus, ScopeGeneration};
+    let backend = MemoryStorage::new();
+    let scope = Scope::new("reset_owner").unwrap();
+    let other = Scope::new("keep_owner").unwrap();
+    let target = backend.for_scope(&scope).unwrap();
+    let keep = backend.for_scope(&other).unwrap();
+    for ports in [&target, &keep] {
+        ports
+            .documents()
+            .put("records", "one", serde_json::json!({}), Precondition::None)
+            .await
+            .unwrap();
+        ports
+            .streams()
+            .append("events", serde_json::json!({}))
+            .await
+            .unwrap();
+        ports.blobs().put("blob", vec![1], None).await.unwrap();
+    }
+    let request = PurgeRequest {
+        operation_id: "reset_one".into(),
+        mode: PurgeMode::Atomic,
+    };
+    let receipt = target.purge(&request).await.unwrap();
+    assert_eq!(receipt.status, PurgeStatus::Complete);
+    assert_eq!(receipt.generation, ScopeGeneration(1));
+    assert!(
+        target
+            .documents()
+            .get("records", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(target.streams().len("events").await.unwrap(), 0);
+    assert!(target.blobs().get("blob").await.unwrap().is_none());
+    assert!(
+        keep.documents()
+            .get("records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(keep.streams().len("events").await.unwrap(), 1);
+    assert!(keep.blobs().get("blob").await.unwrap().is_some());
+    assert_eq!(
+        target
+            .documents()
+            .put("records", "late", serde_json::json!({}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        target
+            .streams()
+            .append("events", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        target
+            .blobs()
+            .put("late", vec![], None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(target.purge(&request).await.unwrap(), receipt);
+    let resumed = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    assert_eq!(
+        resumed
+            .streams()
+            .append("events", serde_json::json!({}))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn exhausted_scope_generation_does_not_erase_data() {
+    let storage = MemoryStorage::new();
+    let scope = Scope::new("exhausted").unwrap();
+    let target = storage.for_scope(&scope).unwrap();
+    target
+        .documents()
+        .put("records", "one", serde_json::json!({}), Precondition::None)
+        .await
+        .unwrap();
+    storage.db.state.lock().unwrap().admissions.insert(
+        scope.as_str().into(),
+        (crate::ScopeGeneration(u64::MAX), "old".into()),
+    );
+    let admitted = storage
+        .for_scope_generation(&scope, crate::ScopeGeneration(u64::MAX))
+        .unwrap();
+    let error = admitted
+        .purge(&crate::PurgeRequest {
+            operation_id: "overflow_reset".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(
+        admitted
+            .documents()
+            .get("records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
