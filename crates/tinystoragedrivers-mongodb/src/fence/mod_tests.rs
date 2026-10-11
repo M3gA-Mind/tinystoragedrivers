@@ -704,6 +704,68 @@ async fn live_every_document_mutator_invalidates_a_dependency_snapshot() {
 }
 
 #[tokio::test]
+async fn live_checked_dependencies_share_one_expiry_instant() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tinystoragedrivers_core::{CollectionSpec, ExpectedDocument, ReadCheck, WriteOp};
+    let Some(backend) = live("live_checked_dependencies_share_one_expiry_instant").await else {
+        return;
+    };
+    if !backend.capabilities().contains(Capability::Transactions) {
+        eprintln!("skipped transaction-dependent checked expiry regression: standalone MongoDB");
+        return;
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::clone(&calls);
+    let backend = backend.with_clock(Arc::new(move || {
+        match clock.fetch_add(1, Ordering::SeqCst) {
+            0 => 999,
+            _ => 1001,
+        }
+    }));
+    let scoped = backend.for_scope(&Scope::local()).unwrap();
+    let docs = scoped.documents();
+    let collection = unique("checked_expiry_instant");
+    docs.ensure_collection(&CollectionSpec::new(&collection).ttl("exp"))
+        .await
+        .unwrap();
+    let version = docs
+        .put(
+            &collection,
+            "dep",
+            json!({"exp":1000}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    calls.store(0, Ordering::SeqCst);
+    let error = docs
+        .atomic_batch_checked(
+            vec![
+                ReadCheck {
+                    collection: collection.clone(),
+                    id: "dep".into(),
+                    expected: ExpectedDocument::Version(version),
+                },
+                ReadCheck {
+                    collection: collection.clone(),
+                    id: "dep".into(),
+                    expected: ExpectedDocument::Absent,
+                },
+            ],
+            vec![WriteOp::Put {
+                collection: collection.clone(),
+                id: "claim".into(),
+                doc: json!({}),
+                precondition: Precondition::Absent,
+            }],
+        )
+        .await
+        .expect_err("no instant can satisfy version and absence of the same dependency");
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert!(docs.get(&collection, "claim").await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn live_distinct_test_fixtures_keep_schema_mutation_out_of_dependency_snapshot() {
     use tinystoragedrivers_core::{CollectionSpec, IndexSpec};
     let Some(first) =

@@ -73,8 +73,16 @@ async fn live_conditional_append_rejects_a_generation_deleted_after_its_snapshot
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return;
     };
-    let backend = crate::MongoStorage::connect(&url, "conditional_generation_test")
+    let configured = mongodb::options::ClientOptions::parse(&url)
         .await
+        .unwrap()
+        .default_database
+        .unwrap_or_else(|| "tsd_test".into());
+    let fixture = format!("conditional_generation_{}", std::process::id());
+    let backend = crate::MongoStorage::connect(&url, &configured)
+        .await
+        .unwrap()
+        .fixture_named(&fixture)
         .unwrap();
     let streams = MongoStreams::new(Arc::clone(&backend.shared), Scope::local(), None);
     let name = format!("generation_{}", std::process::id());

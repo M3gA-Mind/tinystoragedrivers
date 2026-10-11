@@ -431,7 +431,13 @@ impl Shared {
             match stored {
                 Some(stored) => {
                     let (current, rev) = decode_meta(&stored)?;
-                    (current.merge(&requested)?, Some(rev))
+                    let merged = current.merge(&requested)?;
+                    if merged != requested {
+                        // Indexes were built for requested before this transaction.
+                        // Retry the outer build before declaring the newer union.
+                        return Ok(None);
+                    }
+                    (merged, Some(rev))
                 }
                 None => (requested, None),
             }
@@ -551,3 +557,6 @@ fn compatible_index(actual: &IndexModel, expected: &IndexModel) -> bool {
     }
     actual.keys.iter().eq(expected.keys.iter())
 }
+#[cfg(test)]
+#[path = "specs_tests.rs"]
+mod tests;
