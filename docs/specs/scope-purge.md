@@ -55,6 +55,10 @@ file keeps the operation pending and causes manifest replanning.
 MongoDB standalone deployments refuse ScopePurge. MongoDB Atomic mode and
 native fenced GridFS purge refuse their unsupported guarantees before starting.
 Native error kinds and causes remain intact. Corrupt authority fails closed.
+A durable MongoDB reset witness is committed independently of the admission
+row in the same transaction that first closes admission. Lost or recreated
+admission remains corruption while that first reset is pending; completed
+receipt history also detects authority loss from older schema versions.
 A pre-reset registration may omit reset fields; once any reset marker exists,
 all authority fields are required. Manifest publication, chunk deletion,
 file/manifest removal and completion validate and write the same native

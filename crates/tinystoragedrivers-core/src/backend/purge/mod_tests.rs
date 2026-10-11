@@ -1,3 +1,4 @@
+//! Native scope purge authority and replay behavior.
 use super::*;
 use crate::{Capabilities, ErrorKind, Fence, GuardDatabase, MemoryStorage, ScopedStorage};
 

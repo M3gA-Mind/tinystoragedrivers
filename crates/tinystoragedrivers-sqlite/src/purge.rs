@@ -73,8 +73,26 @@ pub(crate) fn check(
     scope: &str,
     expected: ScopeGeneration,
 ) -> Result<()> {
-    let current = admission(conn, tables, scope)?
-        .map_or(ScopeGeneration::default(), |(generation, _)| generation);
+    let current = if let Some((generation, _)) = admission(conn, tables, scope)? {
+        generation
+    } else {
+        let reset_history: bool = conn
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE scope = ?1)",
+                    ident(&tables.purge_receipts)
+                ),
+                [scope],
+                |row| row.get(0),
+            )
+            .map_err(during("verify missing scope admission"))?;
+        if reset_history {
+            return Err(StorageError::serialization(
+                "scope admission is missing despite reset history",
+            ));
+        }
+        ScopeGeneration::default()
+    };
     if current != expected {
         return Err(StorageError::fenced(
             "scope writer generation has been revoked",

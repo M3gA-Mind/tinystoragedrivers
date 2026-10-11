@@ -11,15 +11,17 @@ pub(crate) fn scope_key(scope: &Scope) -> String {
     format!("scope:{}", scope.as_str())
 }
 
+fn has_reset_marker(record: &Document) -> bool {
+    ["generation", "pending", "operation", "stage"]
+        .iter()
+        .any(|field| record.contains_key(*field))
+}
+
 fn verify(document: Option<&Document>, expected: ScopeGeneration) -> Result<()> {
     // Before the first reset, scope-validation registrations have no reset
     // fields. Any reset marker requires the complete authority record.
     let receipt = document
-        .filter(|record| {
-            ["generation", "pending", "operation", "stage"]
-                .iter()
-                .any(|field| record.contains_key(*field))
-        })
+        .filter(|record| has_reset_marker(record))
         .map(decode)
         .transpose()?;
     let current = receipt
@@ -42,15 +44,35 @@ pub(crate) async fn check(
     shared: &Shared,
     scope: &Scope,
     expected: ScopeGeneration,
-    session: Option<&mut ClientSession>,
+    mut session: Option<&mut ClientSession>,
 ) -> Result<()> {
     let collection = shared.raw(ADMISSIONS);
     let action = collection.find_one(doc! {"_id": scope_key(scope)});
-    let document = match session {
-        Some(session) => action.session(session).await,
+    let document = match session.as_mut() {
+        Some(session) => action.session(&mut **session).await,
         None => action.await,
     }
     .map_err(errors::failed("read scope admission"))?;
+    // A registration recreated after authority loss still has no reset
+    // markers. Completed history distinguishes that corruption from a scope
+    // that has legitimately never been reset.
+    if !document.as_ref().is_some_and(has_reset_marker) {
+        let receipts = shared.raw(RECEIPTS);
+        let action = receipts.find_one(doc! {"$or": [
+            {"_id": format!("scope:{}", scope.as_str())},
+            {"_id.s": scope.as_str()},
+        ]});
+        let history = match session {
+            Some(session) => action.session(session).await,
+            None => action.await,
+        }
+        .map_err(errors::failed("verify missing scope admission"))?;
+        if history.is_some() {
+            return Err(StorageError::serialization(
+                "scope admission is missing despite reset history",
+            ));
+        }
+    }
     verify(document.as_ref(), expected)
 }
 
@@ -189,7 +211,7 @@ impl MongoPurge {
             if record.get_bool("pending").unwrap_or(false) {
                 return Err(StorageError::conflict("another scope reset remains pending"));
             }
-            verify(Some(&record), self.generation)?;
+            check(&self.shared, &self.scope, self.generation, Some(&mut *session)).await?;
             // Backfill the latest completed receipt from an earlier driver
             // before replacing its admission record with the next operation.
             if record.contains_key("operation") {
@@ -201,7 +223,15 @@ impl MongoPurge {
             metadata.update_one(doc! {"_id": scope_key(&self.scope)}, doc! {"$set": {
                 "generation": next, "operation": &request.operation_id,
                 "pending": true, "stage": "records",
-            }}).session(session).await.map_err(errors::failed("close reset admission"))?;
+            }}).session(&mut *session).await.map_err(errors::failed("close reset admission"))?;
+            // The first pending operation has no completed receipt. Record a
+            // durable witness in the same transaction as admission closure so
+            // losing/recreating admission cannot reopen generation zero.
+            self.shared.raw(RECEIPTS).update_one(
+                doc! {"_id": format!("scope:{}", self.scope.as_str())},
+                doc! {"$setOnInsert": {"version": 1_i64}},
+            ).upsert(true).session(session).await
+                .map_err(errors::failed("persist scope reset witness"))?;
             Ok(PurgeReceipt { operation_id: request.operation_id.clone(),
                 generation: ScopeGeneration(u64::try_from(next).map_err(|_| StorageError::serialization("invalid issued generation"))?), status: PurgeStatus::Pending,
                 stage: PurgeStage::Records })
@@ -486,5 +516,5 @@ impl ScopePurge for MongoPurge {
 }
 
 #[cfg(test)]
-#[path = "purge_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;

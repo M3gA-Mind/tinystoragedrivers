@@ -1,3 +1,4 @@
+//! Native scope purge authority and replay behavior.
 use super::*;
 use crate::MongoStorage;
 use serde_json::json;
@@ -688,6 +689,219 @@ async fn unexpected_late_file_remains_pending_and_replans_after_writer_drain() {
         PurgeStatus::Complete
     );
     assert_eq!(files.count_documents(doc! {"_id": id}).await.unwrap(), 0);
+}
+
+async fn stale_operations_with_missing_admission(
+    old: &tinystoragedrivers_core::ScopedStorage,
+    operation_id: &str,
+) -> [Option<tinystoragedrivers_core::ErrorKind>; 5] {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest};
+    [
+        old.documents()
+            .get("records", "replacement")
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.streams()
+            .read_window("records", 0, 10)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.blobs().get("replacement").await.err().map(|e| e.kind()),
+        old.documents()
+            .put("records", "stale", json!({"old": true}), Precondition::None)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.purge(&PurgeRequest {
+            operation_id: operation_id.into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .err()
+        .map(|e| e.kind()),
+    ]
+}
+
+async fn assert_replacements_survive_authority_loss(
+    current: &tinystoragedrivers_core::ScopedStorage,
+) {
+    assert!(
+        current
+            .documents()
+            .get("records", "replacement")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        current
+            .documents()
+            .get("records", "stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        current
+            .streams()
+            .read_window("records", 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn missing_admission_with_receipt_history_never_revives_legacy_ports() {
+    let Some((backend, scope)) = live("missing_admission").await else {
+        return;
+    };
+    let old = backend.for_scope(&scope).unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "missing_admission_first".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    let current = backend
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "replacement",
+            json!({"new": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    current
+        .streams()
+        .append("records", json!({"new": true}))
+        .await
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![1, 2], None)
+        .await
+        .unwrap();
+    let original_authority = backend
+        .shared
+        .raw(ADMISSIONS)
+        .find_one(doc! {"_id": scope_key(&scope)})
+        .await
+        .unwrap()
+        .unwrap();
+    backend
+        .shared
+        .raw(ADMISSIONS)
+        .delete_one(doc! {"_id": scope_key(&scope)})
+        .await
+        .unwrap();
+    for recreated_registration in [false, true] {
+        if recreated_registration {
+            let mut registration = original_authority.clone();
+            for field in ["generation", "pending", "operation", "stage"] {
+                registration.remove(field);
+            }
+            backend
+                .shared
+                .raw(ADMISSIONS)
+                .insert_one(registration)
+                .await
+                .unwrap();
+        }
+        let errors =
+            stale_operations_with_missing_admission(&old, "missing_admission_second").await;
+        assert_eq!(&errors[..3], &[Some(ErrorKind::Serialization); 3]);
+        // Native validation already refuses writes/reset when the registration
+        // itself is missing. Preserve that native failure instead of remapping it.
+        assert!(errors[3..].iter().all(Option::is_some));
+    }
+    backend
+        .shared
+        .raw(ADMISSIONS)
+        .replace_one(doc! {"_id": scope_key(&scope)}, original_authority)
+        .await
+        .unwrap();
+    assert_replacements_survive_authority_loss(&current).await;
+}
+
+#[tokio::test]
+async fn first_pending_reset_with_lost_authority_never_reopens_admission() {
+    let Some((backend, scope)) = live("pending_missing_admission").await else {
+        return;
+    };
+    let old = backend.for_scope(&scope).unwrap();
+    old.documents()
+        .put(
+            "records",
+            "existing",
+            json!({"old": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    old.streams()
+        .append("records", json!({"old": true}))
+        .await
+        .unwrap();
+    old.blobs().put("existing", vec![1, 2], None).await.unwrap();
+    let reset = port(&backend, &scope);
+    reset
+        .begin(&PurgeRequest {
+            operation_id: "first_pending".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    let authority = backend
+        .shared
+        .raw(ADMISSIONS)
+        .find_one(doc! {"_id": scope_key(&scope)})
+        .await
+        .unwrap()
+        .unwrap();
+    backend
+        .shared
+        .raw(ADMISSIONS)
+        .delete_one(doc! {"_id": scope_key(&scope)})
+        .await
+        .unwrap();
+    let mut outcomes = Vec::new();
+    for recreated_registration in [false, true] {
+        if recreated_registration {
+            let mut registration = authority.clone();
+            for field in ["generation", "pending", "operation", "stage"] {
+                registration.remove(field);
+            }
+            backend
+                .shared
+                .raw(ADMISSIONS)
+                .insert_one(registration)
+                .await
+                .unwrap();
+        }
+        outcomes.push(stale_operations_with_missing_admission(&old, "different_pending").await);
+    }
+    for errors in outcomes {
+        assert_eq!(&errors[..3], &[Some(ErrorKind::Serialization); 3]);
+        assert!(errors[3..].iter().all(Option::is_some));
+    }
 }
 
 #[tokio::test]

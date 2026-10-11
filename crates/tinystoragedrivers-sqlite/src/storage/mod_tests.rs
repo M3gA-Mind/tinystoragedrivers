@@ -680,6 +680,150 @@ async fn corrupt_historical_receipt_refuses_retry_without_erasing_replacements()
     );
 }
 
+async fn stale_operations_with_missing_admission(
+    old: &tinystoragedrivers_core::ScopedStorage,
+    operation_id: &str,
+) -> [Option<tinystoragedrivers_core::ErrorKind>; 5] {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest};
+    [
+        old.documents()
+            .get("records", "replacement")
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.streams()
+            .read_window("records", 0, 10)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.blobs().get("replacement").await.err().map(|e| e.kind()),
+        old.documents()
+            .put("records", "stale", json!({"old": true}), Precondition::None)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        old.purge(&PurgeRequest {
+            operation_id: operation_id.into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .err()
+        .map(|e| e.kind()),
+    ]
+}
+
+async fn assert_replacements_survive_authority_loss(
+    current: &tinystoragedrivers_core::ScopedStorage,
+) {
+    assert!(
+        current
+            .documents()
+            .get("records", "replacement")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        current
+            .documents()
+            .get("records", "stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        current
+            .streams()
+            .read_window("records", 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn missing_admission_with_receipt_history_never_revives_legacy_ports() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("missing_admission").unwrap();
+    let old = storage.for_scope(&scope).unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "missing_admission_first".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "replacement",
+            json!({"new": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    current
+        .streams()
+        .append("records", json!({"new": true}))
+        .await
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![1, 2], None)
+        .await
+        .unwrap();
+    let delete = format!(
+        "DELETE FROM {} WHERE scope = ?1",
+        crate::sql::ident(&storage.tables.admissions)
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(&delete, [scope.as_str()]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let errors = stale_operations_with_missing_admission(&old, "missing_admission_second").await;
+    assert_eq!(errors, [Some(ErrorKind::Serialization); 5]);
+    let restore = format!(
+        "INSERT INTO {} (scope, generation, operation) VALUES (?1, ?2, ?3)",
+        crate::sql::ident(&storage.tables.admissions)
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                &restore,
+                rusqlite::params![
+                    scope.as_str(),
+                    i64::try_from(receipt.generation.0).unwrap(),
+                    receipt.operation_id
+                ],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_replacements_survive_authority_loss(&current).await;
+}
+
 #[tokio::test]
 async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
     use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};

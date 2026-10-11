@@ -146,5 +146,5 @@ pub(super) fn unsupported_generation<T>(scope: &Scope, generation: ScopeGenerati
 }
 
 #[cfg(test)]
-#[path = "purge_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;
