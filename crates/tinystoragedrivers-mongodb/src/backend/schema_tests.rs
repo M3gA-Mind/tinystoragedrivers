@@ -7,6 +7,52 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Filter, Precondition};
 
+fn fixture_prefix() -> String {
+    format!(
+        "existing_schema_{}",
+        mongodb::bson::oid::ObjectId::new().to_hex()
+    )
+}
+
+async fn configured_fixture(url: &str) -> (MongoStorage, String) {
+    let options = ClientOptions::parse(url).await.unwrap();
+    let database = options
+        .default_database
+        .unwrap_or_else(|| "tsd_test".into());
+    let root = MongoStorage::connect(url, &database).await.unwrap();
+    assert_eq!(root.shared.db.name(), database);
+    let prefix = fixture_prefix();
+    (root.fixture_named(&prefix).unwrap(), prefix)
+}
+
+fn default_fixture(fixture: &MongoStorage) -> MongoStorage {
+    MongoStorage {
+        shared: Arc::new(Shared::new(
+            fixture.shared.client.clone(),
+            fixture.shared.db.clone(),
+            String::new(),
+            Arc::new(|| 0),
+            fixture.shared.transactions,
+            fixture.shared.physical_transactions,
+        )),
+        databases: Arc::default(),
+    }
+}
+
+async fn cleanup_fixture(storage: &MongoStorage, prefix: &str) {
+    for name in storage.shared.db.list_collection_names().await.unwrap() {
+        if name.starts_with(&format!("{prefix}:")) || name.starts_with(&format!("{prefix}_")) {
+            storage
+                .shared
+                .db
+                .collection::<mongodb::bson::Document>(&name)
+                .drop()
+                .await
+                .unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn existing_schema_refuses_declaration_before_backend_network() {
     let client = Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=10")
@@ -63,6 +109,10 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
             observed.fetch_add(1, Ordering::SeqCst);
         }
     }));
+    let database = options
+        .default_database
+        .clone()
+        .unwrap_or_else(|| "tsd_test".into());
     let client = Client::with_options(options).unwrap();
     let hello = client
         .database("admin")
@@ -70,20 +120,22 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
         .await
         .unwrap();
     let transactions = supports_transactions(&hello);
-    let db = client.database(&format!("existing_schema_{}", std::process::id()));
-    db.drop().await.unwrap();
+    let db = client.database(&database);
+    assert_eq!(db.name(), database);
+    let prefix = fixture_prefix();
     let storage = MongoStorage {
         shared: Arc::new(Shared::new(
             client.clone(),
             db.clone(),
-            String::new(),
+            format!("{prefix}:"),
             Arc::new(|| 0),
             transactions,
             transactions,
         )),
         databases: Arc::default(),
     };
-    let named = storage.database("sessions").unwrap();
+    let target = format!("{prefix}_sessions");
+    let named = storage.database(&target).unwrap();
     named.prepare_schema().await.unwrap();
     let scope = Scope::new("alice").unwrap();
     let spec = CollectionSpec::new("notes")
@@ -95,11 +147,7 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
     trusted.blobs().put("b", vec![1, 2], None).await.unwrap();
     // Rebuild native caches so classic preparation cannot mask lazy DDL.
     let fresh = storage.rebuild(Arc::new(|| 0), transactions);
-    let restricted = fresh
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let restricted = fresh.existing_schema().unwrap().database(&target).unwrap();
     let actor = restricted.for_scope(&scope).unwrap();
     ddl.store(0, Ordering::SeqCst);
     actor
@@ -125,7 +173,7 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
             .kind(),
         ErrorKind::Unsupported(Capability::ExistingSchema)
     );
-    db.drop().await.unwrap();
+    cleanup_fixture(&storage, &prefix).await;
 }
 
 #[tokio::test]
@@ -133,9 +181,7 @@ async fn live_existing_schema_missing_and_corrupt_metadata_never_repairs() {
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return;
     };
-    let storage = MongoStorage::connect(&url, &format!("schema_negative_{}", std::process::id()))
-        .await
-        .unwrap();
+    let (storage, prefix) = configured_fixture(&url).await;
     let restricted = storage.existing_schema().unwrap();
     let docs = restricted
         .for_scope(&Scope::local())
@@ -198,7 +244,7 @@ async fn live_existing_schema_missing_and_corrupt_metadata_never_repairs() {
     assert!(std::error::Error::source(&error).is_some());
     assert_eq!(
         restricted
-            .database("absent")
+            .database(&format!("{prefix}_absent"))
             .unwrap()
             .for_scope(&Scope::local())
             .unwrap()
@@ -209,7 +255,7 @@ async fn live_existing_schema_missing_and_corrupt_metadata_never_repairs() {
             .kind(),
         ErrorKind::NotFound
     );
-    storage.shared.db.drop().await.unwrap();
+    cleanup_fixture(&storage, &prefix).await;
 }
 
 #[tokio::test]
@@ -217,21 +263,27 @@ async fn live_existing_schema_keeps_captured_native_grant() {
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return;
     };
-    let storage = MongoStorage::connect(&url, &format!("schema_fence_{}", std::process::id()))
-        .await
-        .unwrap();
-    let cluster = Scope::new("cluster").unwrap();
+    let (fixture, prefix) = configured_fixture(&url).await;
+    let storage = default_fixture(&fixture);
+    let lease_collection = format!("{prefix}_leases");
+    let cluster = Scope::new(format!("cluster_{prefix}")).unwrap();
     let scope = Scope::new("alice").unwrap();
     let leases = storage.for_scope(&cluster).unwrap().documents().clone();
     leases
-        .ensure_collection(&CollectionSpec::new("leases"))
+        .ensure_collection(&CollectionSpec::new(&lease_collection))
         .await
         .unwrap();
     leases
-        .put("leases", "alice", json!({"epoch": 1}), Precondition::None)
+        .put(
+            &lease_collection,
+            "alice",
+            json!({"epoch": 1}),
+            Precondition::None,
+        )
         .await
         .unwrap();
-    let named = storage.database("sessions").unwrap();
+    let target = format!("{prefix}_sessions");
+    let named = storage.database(&target).unwrap();
     named.prepare_schema().await.unwrap();
     named
         .for_scope(&scope)
@@ -240,11 +292,11 @@ async fn live_existing_schema_keeps_captured_native_grant() {
         .ensure_collection(&CollectionSpec::new("notes"))
         .await
         .unwrap();
-    let fence = Fence::new(cluster, "leases", "alice", Filter::eq("epoch", 1));
+    let fence = Fence::new(cluster, &lease_collection, "alice", Filter::eq("epoch", 1));
     let restricted = storage
         .existing_schema()
         .unwrap()
-        .database("sessions")
+        .database(&target)
         .unwrap();
     let actor = restricted
         .for_scope_fenced_in_database(
@@ -259,7 +311,12 @@ async fn live_existing_schema_keeps_captured_native_grant() {
         .await
         .unwrap();
     leases
-        .put("leases", "alice", json!({"epoch": 2}), Precondition::None)
+        .put(
+            &lease_collection,
+            "alice",
+            json!({"epoch": 2}),
+            Precondition::None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -298,7 +355,7 @@ async fn live_existing_schema_keeps_captured_native_grant() {
             .kind(),
         ErrorKind::Unsupported(Capability::Fencing)
     );
-    storage.shared.db.drop().await.unwrap();
+    cleanup_fixture(&storage, &prefix).await;
 }
 
 #[tokio::test]
@@ -306,9 +363,7 @@ async fn live_existing_schema_missing_validation_registry_is_not_created() {
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return;
     };
-    let storage = MongoStorage::connect(&url, &format!("schema_registry_{}", std::process::id()))
-        .await
-        .unwrap();
+    let (storage, prefix) = configured_fixture(&url).await;
     if !storage.shared.transactions {
         return;
     }
@@ -331,7 +386,7 @@ async fn live_existing_schema_missing_validation_registry_is_not_created() {
         .collection_exists("_tsd_validated_batch")
         .await
         .unwrap();
-    storage.shared.db.drop().await.unwrap();
+    cleanup_fixture(&storage, &prefix).await;
     assert!(
         absent,
         "restricted mutation implicitly created internal schema"
