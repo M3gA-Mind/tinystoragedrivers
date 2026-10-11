@@ -404,6 +404,8 @@ fn next_temp_seq() -> u64 {
 fn stage(path: &Path, bytes: &[u8], next_seq: &mut dyn FnMut() -> u64) -> Result<PathBuf> {
     let namespace = open_parent(path, true)?;
     let (tmp_path, mut file) = reserve_temp_file(path, next_seq)?;
+    #[cfg(test)]
+    tests::after_staged_reservation(&tmp_path, &file);
     let staged = (|| -> std::io::Result<()> {
         namespace.verify()?;
         let reopened = namespace.open_file(secure::file_name(&tmp_path)?, false)?;

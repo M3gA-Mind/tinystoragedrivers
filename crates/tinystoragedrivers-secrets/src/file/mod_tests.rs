@@ -935,3 +935,107 @@ fn borrowed_namespace_path_reopens_the_same_private_master_key() {
         0
     );
 }
+
+mod staging_pause {
+    use super::{File, Path};
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce(&Path, &File)>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce(&Path, &File) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(path: &Path, file: &File) {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(path, file);
+        }
+    }
+}
+
+pub(super) fn after_staged_reservation(path: &Path, file: &File) {
+    staging_pause::run(path, file);
+}
+
+fn weaken_reserved_fixture(path: &Path, file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        use windows_permissions::{
+            LocalBox, SecurityDescriptor,
+            constants::{SeObjectType, SecurityInformation},
+            wrappers,
+        };
+        let descriptor = wrappers::GetSecurityInfo(
+            file,
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+        )
+        .unwrap();
+        let owner = wrappers::ConvertSidToStringSid(descriptor.owner().unwrap())
+            .unwrap()
+            .into_string()
+            .unwrap();
+        // Grant Everyone access only to this empty, disposable fixture. The
+        // production admission must reject it before writing secret material.
+        let broad: LocalBox<SecurityDescriptor> =
+            format!("D:P(A;;FA;;;{owner})(A;;FA;;;WD)").parse().unwrap();
+        wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+            None,
+            None,
+            broad.dacl(),
+            None,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn private_admission_lost_after_reservation_never_writes_staged_secret_bytes() {
+    let root = TempDir::new("staging-admission-loss");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let _pause = staging_pause::Guard::install(weaken_reserved_fixture);
+    let error = stage(
+        &target,
+        b"must never reach the staged file",
+        &mut next_temp_seq,
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert!(!target.exists());
+    // Cleanup is best effort if native I/O refuses it. Even a retained staged
+    // object must remain empty because admission preceded every byte write.
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn an_unreservable_staging_name_leaves_no_private_objects() {
+    let root = TempDir::new("staging-name-limit");
+    let target = root.0.join("x".repeat(300));
+    let error = reserve_temp_file(&target, &mut || 0).unwrap_err();
+    assert_eq!(error.message(), "could not reserve a private staging file");
+    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
+}
