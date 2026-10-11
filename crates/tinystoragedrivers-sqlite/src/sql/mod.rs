@@ -47,6 +47,8 @@ pub(crate) fn json_path(field: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct Tables {
     pub(crate) docs: String,
+    pub(crate) admissions: String,
+    pub(crate) purge_receipts: String,
     pub(crate) specs: String,
     pub(crate) fts: String,
     pub(crate) streams: String,
@@ -65,6 +67,8 @@ impl Tables {
         let name = |table: &str| format!("{prefix}_tsd_{table}");
         Self {
             docs: name("docs"),
+            admissions: name("scope_admissions"),
+            purge_receipts: name("purge_receipts"),
             specs: name("collections"),
             fts: name("fts"),
             streams: name("streams"),
@@ -78,7 +82,20 @@ impl Tables {
     /// Create every table if missing.
     pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
         let sql = format!(
-            "CREATE TABLE IF NOT EXISTS {docs} (
+            "CREATE TABLE IF NOT EXISTS {admissions} (
+                 scope TEXT PRIMARY KEY,
+                 generation INTEGER NOT NULL,
+                 operation TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS {purge_receipts} (
+                 scope TEXT NOT NULL,
+                 operation TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 PRIMARY KEY (scope, operation)
+             ) WITHOUT ROWID;
+             INSERT OR IGNORE INTO {purge_receipts} (scope, operation, generation)
+                 SELECT scope, operation, generation FROM {admissions};
+             CREATE TABLE IF NOT EXISTS {docs} (
                  scope TEXT NOT NULL,
                  coll TEXT NOT NULL,
                  id TEXT NOT NULL,
@@ -123,6 +140,8 @@ impl Tables {
                  PRIMARY KEY (scope, coll, id)
              ) WITHOUT ROWID;",
             docs = ident(&self.docs),
+            admissions = ident(&self.admissions),
+            purge_receipts = ident(&self.purge_receipts),
             specs = ident(&self.specs),
             fts = ident(&self.fts),
             streams = ident(&self.streams),

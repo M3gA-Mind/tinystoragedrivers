@@ -61,3 +61,76 @@ async fn fenced_composite_blobs_allow_reads_but_refuse_every_mutation() {
         [1, 2, 3]
     );
 }
+
+#[derive(Debug)]
+struct FullCapabilitiesBlobs(BackendBlobs);
+impl BlobBackend for FullCapabilitiesBlobs {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+            .with(Capability::ScopePurge)
+            .with(Capability::AtomicScopePurge)
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
+        self.0.for_scope(scope)
+    }
+    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>> {
+        self.0.database(name)
+    }
+}
+
+#[tokio::test]
+async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
+    use crate::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};
+    let records = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(MemoryStorage::new());
+    let backend = CompositeStorage::new(
+        records.clone(),
+        Arc::new(FullCapabilitiesBlobs(BackendBlobs::new(blobs.clone()))),
+    );
+    let scope = Scope::local();
+    let bound = backend.for_scope(&scope).unwrap();
+    bound
+        .streams()
+        .append("retained", serde_json::json!(1))
+        .await
+        .unwrap();
+    bound.blobs().put("retained", vec![1], None).await.unwrap();
+    for cap in [Capability::ScopePurge, Capability::AtomicScopePurge] {
+        assert!(!backend.capabilities().contains(cap));
+    }
+    let error = bound
+        .purge(&PurgeRequest {
+            operation_id: "reset".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported(Capability::ScopePurge));
+    assert_eq!(
+        backend
+            .for_scope_generation(&scope, ScopeGeneration(1))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        records
+            .for_scope(&scope)
+            .unwrap()
+            .streams()
+            .len("retained")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        blobs
+            .for_scope(&scope)
+            .unwrap()
+            .blobs()
+            .get("retained")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

@@ -1,5 +1,5 @@
-//! [`StreamStore`] on MongoDB, with dense offsets and no transactions (a
-//! fenced handle runs each write in one, see [`crate::fence`]).
+//! Stream storage on MongoDB. Replica-set writes use native scope-admission
+//! transactions; standalone writes retain the segment uniqueness protocol.
 //!
 //! A stream is a run of *segments* in `<prefix>_tsd_streams`, one per append:
 //! `{_scope, s, o, n, e, t, vs}` covers offsets `o..e` (`e = o + n`), of which
@@ -45,7 +45,7 @@ use tinystoragedrivers_core::{
 use crate::backend::Shared;
 use crate::convert::{from_bson, to_bson};
 use crate::errors;
-use crate::fence::in_fence;
+use crate::fence::in_write;
 use crate::naming::{
     SCOPE, STREAM_END_INDEX, STREAM_HEADS, STREAM_SEGMENT_INDEX, STREAMS, prefix_regex,
 };
@@ -173,6 +173,7 @@ pub(crate) fn head_id(scope: &Scope, stream: &str) -> Document {
 pub(crate) struct MongoStreams {
     shared: Arc<Shared>,
     scope: Scope,
+    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Every write runs in a transaction that holds this fence, when set.
     fence: Option<Arc<Fencing>>,
 }
@@ -182,8 +183,23 @@ impl MongoStreams {
         Self {
             shared,
             scope,
+            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fence,
         }
+    }
+    pub(crate) fn with_generation(
+        mut self,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    async fn hold_admission(&self, session: &mut ClientSession) -> Result<()> {
+        self.shared
+            .hold_validation(Some(&self.scope), &mut *session)
+            .await?;
+        crate::purge::check(&self.shared, &self.scope, self.generation, Some(session)).await
     }
 
     async fn segments(&self) -> Result<ScopedCollection> {
@@ -380,32 +396,29 @@ impl StreamStore for MongoStreams {
     }
 
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
-        validate_stream(stream)?;
-        let handle = self.segments().await?;
-        if let Some(fence) = &self.fence {
-            // A lost race aborts the transaction (a duplicate key ends it),
-            // so it is retried as a transient failure.
-            return in_fence!(&self.shared, fence, session => {
-                self.append_once(&handle, stream, &values, None, Some(session))
-                    .await
-                    .and_then(|end| {
-                        end.ok_or_else(|| {
-                            StorageError::unavailable("stream grew concurrently; retry")
-                        })
-                    })
-            });
-        }
-        for _ in 0..APPEND_ATTEMPTS {
-            if let Some(end) = self
-                .append_once(&handle, stream, &values, None, None)
-                .await?
-            {
-                return Ok(end);
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            if self.shared.physical_transactions {
+                self.shared.prepare_validation(Some(&self.scope)).await?;
+                return in_write!(&self.shared, self.fence.as_deref(), session => {
+                    self.hold_admission(&mut *session).await?;
+                    self.append_once(&handle, stream, &values, None, Some(session)).await
+                        .and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
+                });
             }
-        }
-        Err(StorageError::unavailable(
-            "stream kept growing concurrently; retry",
-        ))
+            for _ in 0..APPEND_ATTEMPTS {
+                if let Some(end) = self
+                    .append_once(&handle, stream, &values, None, None)
+                    .await?
+                {
+                    return Ok(end);
+                }
+            }
+            Err(StorageError::unavailable(
+                "stream kept growing concurrently; retry",
+            ))
+        })
     }
 
     async fn append_batch_if_offset(
@@ -414,172 +427,135 @@ impl StreamStore for MongoStreams {
         expected_next_offset: u64,
         values: Vec<Value>,
     ) -> Result<u64> {
-        validate_stream(stream)?;
-        if !self.shared.transactions {
-            return Err(StorageError::unsupported(
-                Capability::ConditionalStreamAppend,
-                "conditional stream append requires MongoDB transactions",
-            ));
-        }
-        let handle = self.segments().await?;
-        if let Some(fence) = &self.fence {
-            return in_fence!(&self.shared, fence, session => {
-                self.append_once(&handle, stream, &values, Some(expected_next_offset), Some(session))
-                    .await.and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
-            });
-        }
-        let mut session = self
-            .shared
-            .client
-            .start_session()
-            .await
-            .map_err(errors::failed("start a session"))?;
-        let mut last = StorageError::unavailable("conditional append kept aborting; retry");
-        for _ in 0..APPEND_ATTEMPTS {
-            session
-                .start_transaction()
-                .await
-                .map_err(errors::failed("start a transaction"))?;
-            let outcome = self
-                .append_once(
-                    &handle,
-                    stream,
-                    &values,
-                    Some(expected_next_offset),
-                    Some(&mut session),
-                )
-                .await;
-            let first = match outcome {
-                Ok(Some(first)) => first,
-                Ok(None) => {
-                    let _ = session.abort_transaction().await;
-                    continue;
-                }
-                Err(error) => {
-                    let _ = session.abort_transaction().await;
-                    if error.is_retryable() {
-                        last = error;
-                        continue;
-                    }
-                    return Err(error);
-                }
-            };
-            match crate::documents::MongoDocuments::commit(&mut session).await {
-                Ok(()) => return Ok(first),
-                Err(error) => match crate::documents::commit_failure(&error) {
-                    crate::documents::CommitFailure::Aborted => {
-                        last = errors::map(error, "commit conditional append");
-                    }
-                    crate::documents::CommitFailure::Unknown => return Err(StorageError::backend(
-                        "conditional append may or may not have committed; read before retrying",
-                    )
-                    .with_source(error)),
-                    crate::documents::CommitFailure::Failed => {
-                        return Err(errors::map(error, "commit conditional append"));
-                    }
-                },
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            if !self.shared.transactions {
+                return Err(StorageError::unsupported(
+                    Capability::ConditionalStreamAppend,
+                    "conditional stream append requires MongoDB transactions",
+                ));
             }
-        }
-        Err(last)
+            let handle = self.segments().await?;
+            self.shared.prepare_validation(Some(&self.scope)).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_admission(&mut *session).await?;
+                self.append_once(&handle, stream, &values, Some(expected_next_offset), Some(session)).await
+                    .and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
+            })
+        })
     }
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
-        validate_stream(stream)?;
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let handle = self.segments().await?;
-        let generation = self.generation(stream, None).await?;
-        let mut cursor = handle
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let handle = self.segments().await?;
+            let generation = self.generation(stream, None).await?;
+            let mut cursor = handle
             .cursor(
                 doc! {"s": stream, "g": generation, "e": {"$gt": stored_offset(from).unwrap_or(i64::MAX)}},
                 FindOptions::builder().sort(doc! {"o": 1}).build(),
             )
             .await
             .map_err(errors::failed("read a stream"))?;
-        let mut out = Vec::new();
-        while let Some(doc) = cursor
-            .try_next()
-            .await
-            .map_err(errors::failed("read a stream"))?
-        {
-            for (offset, value) in Segment::decode(&doc)?.entries_from(from) {
-                out.push(StreamEntry {
-                    offset,
-                    value: from_bson(value)?,
-                });
-                if out.len() == limit {
-                    return Ok(out);
+            let mut out = Vec::new();
+            while let Some(doc) = cursor
+                .try_next()
+                .await
+                .map_err(errors::failed("read a stream"))?
+            {
+                for (offset, value) in Segment::decode(&doc)?.entries_from(from) {
+                    out.push(StreamEntry {
+                        offset,
+                        value: from_bson(value)?,
+                    });
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
                 }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 
     async fn len(&self, stream: &str) -> Result<u64> {
-        validate_stream(stream)?;
-        let handle = self.segments().await?;
-        let generation = self.generation(stream, None).await?;
-        Ok(self
-            .edge(&handle, stream, generation, -1, None)
-            .await?
-            .map_or(0, |last| last.end))
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            let generation = self.generation(stream, None).await?;
+            Ok(self
+                .edge(&handle, stream, generation, -1, None)
+                .await?
+                .map_or(0, |last| last.end))
+        })
     }
 
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
-        validate_stream(stream)?;
-        let handle = self.segments().await?;
-        match &self.fence {
-            None => self.truncate_in(&handle, stream, offset, None).await,
-            Some(fence) => in_fence!(&self.shared, fence, session => {
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            if !self.shared.physical_transactions {
+                return self.truncate_in(&handle, stream, offset, None).await;
+            }
+            self.shared.prepare_validation(Some(&self.scope)).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_admission(&mut *session).await?;
                 self.truncate_in(&handle, stream, offset, Some(session)).await
-            }),
-        }
+            })
+        })
     }
 
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
-        validate_stream(stream)?;
-        let handle = self.segments().await?;
-        match &self.fence {
-            None => self.delete_in(&handle, stream, None).await,
-            Some(fence) => in_fence!(&self.shared, fence, session => {
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            if !self.shared.physical_transactions {
+                return self.delete_in(&handle, stream, None).await;
+            }
+            self.shared.prepare_validation(Some(&self.scope)).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_admission(&mut *session).await?;
                 self.delete_in(&handle, stream, Some(session)).await
-            }),
-        }
+            })
+        })
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
-        let handle = self.segments().await?;
-        let present = handle
-            .aggregate(
-                doc! {"s": prefix_regex(prefix)},
-                vec![doc! {"$group": {"_id": {"s": "$s", "g": "$g"}}}],
-            )
-            .await
-            .map_err(errors::failed("list streams"))?;
-        let heads = self
-            .heads()
-            .find(doc! {"n": prefix_regex(prefix)}, FindOptions::default())
-            .await
-            .map_err(errors::failed("list streams"))?;
-        let generations: std::collections::HashMap<&str, i64> = heads
-            .iter()
-            .filter_map(|head| Some((head.get_str("n").ok()?, head.get_i64("g").ok()?)))
-            .collect();
-        let mut names: Vec<String> = present
-            .iter()
-            .filter_map(|group| {
-                let key = group.get_document("_id").ok()?;
-                let name = key.get_str("s").ok()?;
-                let generation = key.get_i64("g").unwrap_or(0);
-                (name.starts_with(prefix)
-                    && generations.get(name).copied().unwrap_or(0) == generation)
-                    .then(|| name.to_owned())
-            })
-            .collect();
-        names.sort();
-        names.dedup();
-        Ok(names)
+        crate::purge::admitted!(self, {
+            let handle = self.segments().await?;
+            let present = handle
+                .aggregate(
+                    doc! {"s": prefix_regex(prefix)},
+                    vec![doc! {"$group": {"_id": {"s": "$s", "g": "$g"}}}],
+                )
+                .await
+                .map_err(errors::failed("list streams"))?;
+            let heads = self
+                .heads()
+                .find(doc! {"n": prefix_regex(prefix)}, FindOptions::default())
+                .await
+                .map_err(errors::failed("list streams"))?;
+            let generations: std::collections::HashMap<&str, i64> = heads
+                .iter()
+                .filter_map(|head| Some((head.get_str("n").ok()?, head.get_i64("g").ok()?)))
+                .collect();
+            let mut names: Vec<String> = present
+                .iter()
+                .filter_map(|group| {
+                    let key = group.get_document("_id").ok()?;
+                    let name = key.get_str("s").ok()?;
+                    let generation = key.get_i64("g").unwrap_or(0);
+                    (name.starts_with(prefix)
+                        && generations.get(name).copied().unwrap_or(0) == generation)
+                        .then(|| name.to_owned())
+                })
+                .collect();
+            names.sort();
+            names.dedup();
+            Ok(names)
+        })
     }
 }
 

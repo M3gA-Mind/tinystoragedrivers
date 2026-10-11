@@ -74,6 +74,7 @@ pub(crate) fn commit_failure(error: &mongodb::error::Error) -> CommitFailure {
 pub(crate) struct MongoDocuments {
     shared: Arc<Shared>,
     scope: Scope,
+    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Every write runs in a transaction that holds this fence, when set.
     fence: Option<Arc<Fencing>>,
 }
@@ -92,8 +93,16 @@ impl MongoDocuments {
         Self {
             shared,
             scope,
+            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fence,
         }
+    }
+    pub(crate) fn with_generation(
+        mut self,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Validate `collection` and do what cannot run inside a transaction
@@ -111,8 +120,9 @@ impl MongoDocuments {
     /// without rewriting dependencies or changing their logical versions.
     pub(crate) async fn hold_validation(&self, session: &mut ClientSession) -> Result<()> {
         self.shared
-            .hold_validation(Some(&self.scope), session)
-            .await
+            .hold_validation(Some(&self.scope), &mut *session)
+            .await?;
+        crate::purge::check(&self.shared, &self.scope, self.generation, Some(session)).await
     }
 
     /// One claim attempt: pick the first match and compare-and-swap it.
@@ -228,19 +238,24 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
-        self.shared.ensure(spec).await
+        crate::purge::admitted!(
+            self,
+            self.shared.ensure(spec, &self.scope, self.generation).await
+        )
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
-        validate_collection(collection)?;
-        validate_id(id)?;
-        let spec = self.shared.spec(collection).await?;
-        let now = self.shared.now();
-        Ok(self
-            .read_raw(&self.collection(collection), id, None)
-            .await?
-            .filter(|found| stored::is_live(&spec, found, now))
-            .map(stored::Stored::into_versioned))
+        crate::purge::admitted!(self, {
+            validate_collection(collection)?;
+            validate_id(id)?;
+            let spec = self.shared.spec(collection).await?;
+            let now = self.shared.now();
+            Ok(self
+                .read_raw(&self.collection(collection), id, None)
+                .await?
+                .filter(|found| stored::is_live(&spec, found, now))
+                .map(stored::Stored::into_versioned))
+        })
     }
 
     async fn put(
@@ -250,61 +265,71 @@ impl DocumentStore for MongoDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
-        if !self.shared.physical_transactions {
-            return self.put_one(collection, id, &doc, precondition, None).await;
-        }
-        self.ready(collection).await?;
-        in_write!(&self.shared, self.fence.as_deref(), session => {
-            self.hold_validation(session).await?;
-            self.shared.spec_in_session(collection, &mut *session).await?;
-            self.put_one(collection, id, &doc, precondition, Some(session)).await
+        crate::purge::admitted!(self, {
+            if !self.shared.physical_transactions {
+                return self.put_one(collection, id, &doc, precondition, None).await;
+            }
+            self.ready(collection).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_validation(session).await?;
+                self.shared.spec_in_session(collection, &mut *session).await?;
+                self.put_one(collection, id, &doc, precondition, Some(session)).await
+            })
         })
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
-        if !self.shared.physical_transactions {
-            return self.delete_one(collection, id, precondition, None).await;
-        }
-        self.ready(collection).await?;
-        in_write!(&self.shared, self.fence.as_deref(), session => {
-            self.hold_validation(session).await?;
-            self.shared.spec_in_session(collection, &mut *session).await?;
-            self.delete_one(collection, id, precondition, Some(session)).await
+        crate::purge::admitted!(self, {
+            if !self.shared.physical_transactions {
+                return self.delete_one(collection, id, precondition, None).await;
+            }
+            self.ready(collection).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_validation(session).await?;
+                self.shared.spec_in_session(collection, &mut *session).await?;
+                self.delete_one(collection, id, precondition, Some(session)).await
+            })
         })
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
-        query.validate()?;
-        validate_collection(collection)?;
-        let offset = decode_cursor(collection, query)?;
-        let (items, more) = self
-            .page(collection, &query.filter, &query.sort, offset, query.limit)
-            .await?;
-        let next = more.then(|| encode_cursor(collection, query, offset + items.len() as u64));
-        Ok(Page { items, next })
+        crate::purge::admitted!(self, {
+            query.validate()?;
+            validate_collection(collection)?;
+            let offset = decode_cursor(collection, query)?;
+            let (items, more) = self
+                .page(collection, &query.filter, &query.sort, offset, query.limit)
+                .await?;
+            let next = more.then(|| encode_cursor(collection, query, offset + items.len() as u64));
+            Ok(Page { items, next })
+        })
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
-        validate_collection(collection)?;
-        filter.validate()?;
-        self.count_matching(collection, filter).await
+        crate::purge::admitted!(self, {
+            validate_collection(collection)?;
+            filter.validate()?;
+            self.count_matching(collection, filter).await
+        })
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
-        validate_collection(collection)?;
-        filter.validate()?;
-        if !self.shared.physical_transactions {
-            let pairs = self.live_pairs(collection, filter).await?;
-            return self.remove(collection, &pairs, None).await;
-        }
-        self.ready(collection).await?;
-        in_write!(&self.shared, self.fence.as_deref(), session => {
-            self.hold_validation(session).await?;
-            self.shared.spec_in_session(collection, &mut *session).await?;
-            match self.live_pairs(collection, filter).await {
-                Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
-                Err(error) => Err(error),
+        crate::purge::admitted!(self, {
+            validate_collection(collection)?;
+            filter.validate()?;
+            if !self.shared.physical_transactions {
+                let pairs = self.live_pairs(collection, filter).await?;
+                return self.remove(collection, &pairs, None).await;
             }
+            self.ready(collection).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_validation(session).await?;
+                self.shared.spec_in_session(collection, &mut *session).await?;
+                match self.live_pairs(collection, filter).await {
+                    Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
+                    Err(error) => Err(error),
+                }
+            })
         })
     }
 
@@ -315,15 +340,16 @@ impl DocumentStore for MongoDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
-        validate_doc(patch)?;
-        validate_collection(collection)?;
-        filter.validate()?;
-        if self.shared.physical_transactions {
-            self.ready(collection).await?;
-        }
-        for _ in 0..CLAIM_ATTEMPTS {
-            let outcome = if self.shared.physical_transactions {
-                in_write!(&self.shared, self.fence.as_deref(), session => {
+        crate::purge::admitted!(self, {
+            validate_doc(patch)?;
+            validate_collection(collection)?;
+            filter.validate()?;
+            if self.shared.physical_transactions {
+                self.ready(collection).await?;
+            }
+            for _ in 0..CLAIM_ATTEMPTS {
+                let outcome = if self.shared.physical_transactions {
+                    in_write!(&self.shared, self.fence.as_deref(), session => {
                     self.hold_validation(session).await?;
                     self.shared.spec_in_session(collection, &mut *session).await?;
                     match self.claim_once(collection, filter, sort, patch, Some(session)).await {
@@ -334,28 +360,31 @@ impl DocumentStore for MongoDocuments {
                 .and_then(|step| {
                     step.ok_or_else(|| StorageError::conflict("claim lost to a concurrent claimer"))
                 })
-            } else {
-                self.claim_once(collection, filter, sort, patch, None).await
-            };
-            match outcome {
-                Ok(claimed) => return Ok(claimed),
-                Err(error) if error.kind() == ErrorKind::Conflict => {}
-                Err(error) => return Err(error),
+                } else {
+                    self.claim_once(collection, filter, sort, patch, None).await
+                };
+                match outcome {
+                    Ok(claimed) => return Ok(claimed),
+                    Err(error) if error.kind() == ErrorKind::Conflict => {}
+                    Err(error) => return Err(error),
+                }
             }
-        }
-        Err(StorageError::unavailable(
-            "every claim attempt lost to a concurrent claimer; retry",
-        ))
+            Err(StorageError::unavailable(
+                "every claim attempt lost to a concurrent claimer; retry",
+            ))
+        })
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        if !self.shared.transactions {
-            return Err(StorageError::unsupported(
-                Capability::Transactions,
-                "this MongoDB handle disables public transactions",
-            ));
-        }
-        self.atomic_batch_checked(Vec::new(), ops).await
+        crate::purge::admitted!(self, {
+            if !self.shared.transactions {
+                return Err(StorageError::unsupported(
+                    Capability::Transactions,
+                    "this MongoDB handle disables public transactions",
+                ));
+            }
+            self.atomic_batch_checked(Vec::new(), ops).await
+        })
     }
 
     async fn atomic_batch_checked(
@@ -363,89 +392,97 @@ impl DocumentStore for MongoDocuments {
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
-        if !self.shared.transactions {
-            return Err(StorageError::unsupported(
-                Capability::ValidatedBatch,
-                "this MongoDB handle disables validated batches",
-            ));
-        }
-        self.shared.prepare_validation(Some(&self.scope)).await?;
-        for check in &checks {
-            check.validate()?;
-            self.ready(&check.collection).await?;
-        }
-        for op in &ops {
-            let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
-            self.ready(collection).await?;
-        }
-        in_write!(&self.shared, self.fence.as_deref(), session => {
-            self.hold_validation(session).await?;
-            let now = self.shared.now();
-            for check in &checks {
-                let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
-                let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
-                    .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
-                check.verify(current)?;
+        crate::purge::admitted!(self, {
+            if !self.shared.transactions {
+                return Err(StorageError::unsupported(
+                    Capability::ValidatedBatch,
+                    "this MongoDB handle disables validated batches",
+                ));
             }
-            self.run_batch(&ops, session).await
+            self.shared.prepare_validation(Some(&self.scope)).await?;
+            for check in &checks {
+                check.validate()?;
+                self.ready(&check.collection).await?;
+            }
+            for op in &ops {
+                let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+                self.ready(collection).await?;
+            }
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_validation(session).await?;
+                let now = self.shared.now();
+                for check in &checks {
+                    let spec = self.shared.spec_in_session(&check.collection, &mut *session).await?;
+                    let current = self.read_raw(&self.collection(&check.collection), &check.id, Some(&mut *session)).await?
+                        .filter(|found| stored::is_live(&spec, found, now)).map(|found| found.version);
+                    check.verify(current)?;
+                }
+                self.run_batch(&ops, session).await
+            })
         })
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        validate_collection(collection)?;
-        self.search_hits(collection, text, limit).await
+        crate::purge::admitted!(self, {
+            validate_collection(collection)?;
+            self.search_hits(collection, text, limit).await
+        })
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
-        validate_collection(collection)?;
-        if !self.shared.physical_transactions {
-            let pairs = self.matching_pairs(collection, &Filter::All).await?;
-            self.remove(collection, &pairs, None).await?;
-            return Ok(());
-        }
-        self.ready(collection).await?;
-        in_write!(&self.shared, self.fence.as_deref(), session => {
-            self.hold_validation(session).await?;
-            self.shared.spec_in_session(collection, &mut *session).await?;
-            match self.matching_pairs(collection, &Filter::All).await {
-                Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
-                Err(error) => Err(error),
+        crate::purge::admitted!(self, {
+            validate_collection(collection)?;
+            if !self.shared.physical_transactions {
+                let pairs = self.matching_pairs(collection, &Filter::All).await?;
+                self.remove(collection, &pairs, None).await?;
+                return Ok(());
             }
-        })?;
-        Ok(())
+            self.ready(collection).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_validation(session).await?;
+                self.shared.spec_in_session(collection, &mut *session).await?;
+                match self.matching_pairs(collection, &Filter::All).await {
+                    Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
+                    Err(error) => Err(error),
+                }
+            })?;
+            Ok(())
+        })
     }
 
     async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
-        let physical_prefix = &self.shared.prefix;
-        let names = self
-            .shared
-            .db
-            .list_collection_names()
-            .await
-            .map_err(errors::failed("list document collections"))?;
-        let mut found = Vec::new();
-        for physical in names {
-            let Some(name) = physical.strip_prefix(physical_prefix) else {
-                continue;
-            };
-            if name.starts_with(RESERVED_PREFIX)
-                || !name.starts_with(prefix)
-                || validate_collection(name).is_err()
-            {
-                continue;
-            }
-            let count = self
+        crate::purge::admitted!(self, {
+            let physical_prefix = &self.shared.prefix;
+            let names = self
                 .shared
-                .raw(name)
-                .count_documents(mongodb::bson::doc! {"_scope": self.scope.as_str()})
+                .db
+                .list_collection_names()
                 .await
-                .map_err(errors::failed("list scoped document collections"))?;
-            if count > 0 {
-                found.push(name.to_owned());
+                .map_err(errors::failed("list document collections"))?;
+            let mut found = Vec::new();
+            for physical in names {
+                let Some(name) = physical.strip_prefix(physical_prefix) else {
+                    continue;
+                };
+                if name.starts_with(RESERVED_PREFIX)
+                    || !name.starts_with(prefix)
+                    || validate_collection(name).is_err()
+                {
+                    continue;
+                }
+                let count = self
+                    .shared
+                    .raw(name)
+                    .count_documents(mongodb::bson::doc! {"_scope": self.scope.as_str()})
+                    .await
+                    .map_err(errors::failed("list scoped document collections"))?;
+                if count > 0 {
+                    found.push(name.to_owned());
+                }
             }
-        }
-        found.sort();
-        Ok(found)
+            found.sort();
+            Ok(found)
+        })
     }
 }
 
