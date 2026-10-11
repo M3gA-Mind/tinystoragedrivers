@@ -53,6 +53,54 @@ async fn cleanup_fixture(storage: &MongoStorage, prefix: &str) {
     }
 }
 
+async fn empty_window_refuses_damaged_schema(target: &str, expected: ErrorKind) {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    assert!(
+        actor
+            .streams()
+            .read_window("s", 0, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    match target {
+        "index" => storage
+            .shared
+            .raw(STREAMS)
+            .drop_index(crate::naming::STREAM_SEGMENT_INDEX)
+            .await
+            .unwrap(),
+        collection => storage.shared.raw(collection).drop().await.unwrap(),
+    }
+    let outcome = actor.streams().read_window("s", 0, 0).await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.unwrap_err().kind(), expected);
+}
+
+#[tokio::test]
+async fn live_empty_stream_window_requires_heads_schema() {
+    empty_window_refuses_damaged_schema(STREAM_HEADS, ErrorKind::NotFound).await;
+}
+
+#[tokio::test]
+async fn live_empty_stream_window_requires_segments_schema() {
+    empty_window_refuses_damaged_schema(STREAMS, ErrorKind::NotFound).await;
+}
+
+#[tokio::test]
+async fn live_empty_stream_window_requires_segment_index() {
+    empty_window_refuses_damaged_schema("index", ErrorKind::InvalidInput).await;
+}
+
 #[tokio::test]
 async fn live_standalone_existing_schema_drop_requires_persisted_declaration() {
     let Ok(url) = std::env::var("TSD_MONGO_STANDALONE_URL") else {
@@ -263,6 +311,14 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
     let restricted = fresh.existing_schema().unwrap().database(&target).unwrap();
     let actor = restricted.for_scope(&scope).unwrap();
     ddl.store(0, Ordering::SeqCst);
+    assert!(
+        actor
+            .streams()
+            .read_window("s", 0, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     actor
         .documents()
         .validate_collection_spec(&spec)

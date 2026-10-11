@@ -489,6 +489,9 @@ impl StreamStore for MongoStreams {
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         validate_stream(stream)?;
         if limit == 0 {
+            if self.shared.existing {
+                self.segments().await?;
+            }
             return Ok(Vec::new());
         }
         let handle = self.segments().await?;
