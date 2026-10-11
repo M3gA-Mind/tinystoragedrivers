@@ -123,3 +123,16 @@ without transactions, a differential test against the memory driver over
 documents chosen to trip MongoDB's semantics, and focused behavior tests.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
+
+### Mongo live-test database permissions
+
+Run the complete live suite on a disposable MongoDB server. Transaction race
+fixtures use isolated logical collection prefixes inside the database named in
+`TSD_MONGO_URL` (or `tsd_test` when the URL has no database). This prevents
+parallel schema changes from invalidating unrelated transactions without
+requiring access to other databases.
+
+The test account must be allowed to create collections and indexes, and read,
+write and delete documents in the configured database. On an authenticated
+disposable server, `readWrite` on that database is sufficient. The URL's
+`authSource` continues to select the authentication database independently.
