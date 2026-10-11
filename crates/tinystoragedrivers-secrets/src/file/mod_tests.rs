@@ -1039,3 +1039,26 @@ fn an_unreservable_staging_name_leaves_no_private_objects() {
     assert!(std::error::Error::source(&error).is_some());
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
 }
+
+#[test]
+fn substituted_staging_object_is_rejected_before_secret_bytes_are_written() {
+    let root = TempDir::new("staging-object-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("original-empty-reservation");
+    let retained = preserved.clone();
+    let _pause = staging_pause::Guard::install(move |path, file| {
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        // Keep the original handle alive while replacing its visible leaf with
+        // another genuinely private object. Permission checks alone cannot
+        // distinguish the replacement; the retained native identity must.
+        fs::rename(path, &retained).unwrap();
+        fixture_write(path, b"").unwrap();
+    });
+    let error = stage(&target, b"must not enter either object", &mut next_temp_seq).unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert_eq!(fs::metadata(preserved).unwrap().len(), 0);
+    assert!(!target.exists());
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+}
