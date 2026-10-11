@@ -824,3 +824,73 @@ fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_
     assert_eq!(fs::read_dir(private).unwrap().count(), 0);
     assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publication() {
+    let root = TempDir::new("staged-ciphertext-replacement");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("preserved-staged-ciphertext");
+    let directory = root.0.clone();
+    let original = preserved.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let staged = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .unwrap();
+        fs::rename(&staged, original).unwrap();
+        fixture_write(staged, b"substitute ciphertext").unwrap();
+    });
+    let error = write_atomic(&target, b"verified staged ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published secrets identity changed");
+    assert_eq!(fs::read(preserved).unwrap(), b"verified staged ciphertext");
+    assert_eq!(fs::read(target).unwrap(), b"substitute ciphertext");
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_material() {
+    let root = TempDir::new("staged-ciphertext-mutation");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let directory = root.0.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let staged = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .unwrap();
+        fixture_write(staged, b"changed ciphertext").unwrap();
+    });
+    let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published secrets readback differs");
+    assert_eq!(fs::read(target).unwrap(), b"changed ciphertext");
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publication() {
+    let root = TempDir::new("staged-key-replacement");
+    let target = root.0.join(KEY_FILE_NAME);
+    let expected = key_to_hex(&fixture_key());
+    let substitute = key_to_hex(&[42; KEY_LEN]);
+    let staged = stage(&target, expected.as_bytes(), &mut next_temp_seq).unwrap();
+    let preserved = root.0.join("preserved-staged-key");
+    let original = preserved.clone();
+    let source = staged.clone();
+    let changed = substitute.clone();
+    let _pause = publication_pause::Guard::install(true, move || {
+        fs::rename(&source, original).unwrap();
+        fixture_write(source, changed.as_bytes()).unwrap();
+    });
+    let error = publish_key(&staged, &target, fixture_key()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
+    assert_eq!(error.message(), "published key object changed");
+    assert_eq!(fs::read(preserved).unwrap(), expected.as_bytes());
+    assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
+    assert!(!staged.exists());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+}
