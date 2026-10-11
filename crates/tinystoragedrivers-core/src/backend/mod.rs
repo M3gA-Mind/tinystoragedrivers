@@ -8,7 +8,12 @@
 //! (`approvals`, `sessions`, `flows`) without inventing collection prefixes.
 
 mod composite;
+mod purge;
 pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
+pub use purge::{
+    DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
+    ScopeGeneration, ScopePurge,
+};
 
 use std::fmt;
 use std::sync::Arc;
@@ -127,6 +132,38 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         }
     }
 
+    /// Bind an explicitly issued native data-access generation.
+    ///
+    /// # Errors
+    /// Unsupported nonzero generations on unknown drivers.
+    fn for_scope_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+    ) -> Result<ScopedStorage> {
+        if generation == ScopeGeneration::default() {
+            return self.for_scope(scope);
+        }
+        purge::unsupported_generation(scope, generation)
+    }
+
+    /// Bind a generation and native guard database together.
+    ///
+    /// # Errors
+    /// Unsupported generation/fencing or invalid native binding.
+    fn for_scope_fenced_in_database_generation(
+        &self,
+        scope: &Scope,
+        generation: ScopeGeneration,
+        fence: &Fence,
+        guard_database: &crate::GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        if generation == ScopeGeneration::default() {
+            return self.for_scope_fenced_in_database(scope, fence, guard_database);
+        }
+        purge::unsupported_generation(scope, generation)
+    }
+
     /// The named database `name` on this backend. The same name always
     /// addresses the same data.
     ///
@@ -166,6 +203,7 @@ pub struct ScopedStorage {
     documents: Arc<dyn DocumentStore>,
     streams: Arc<dyn StreamStore>,
     blobs: Arc<dyn BlobStore>,
+    purge: Option<Arc<dyn ScopePurge>>,
 }
 
 impl ScopedStorage {
@@ -184,6 +222,49 @@ impl ScopedStorage {
             documents,
             streams,
             blobs,
+            purge: None,
+        }
+    }
+
+    /// Attach the driver's native scope reset port.
+    #[must_use]
+    pub fn with_purge(mut self, purge: Arc<dyn ScopePurge>) -> Self {
+        self.purge = Some(purge);
+        self
+    }
+
+    /// Purge this addressed scope. A root reset must cover its complete owner
+    /// database manifest and persist every issued generation before reopening.
+    ///
+    /// # Errors
+    /// Unsupported on unknown adapters; otherwise the native reset's error.
+    pub async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
+        request.validate()?;
+        match &self.purge {
+            Some(port) => port.purge(request).await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot purge a complete scope",
+            )),
+        }
+    }
+
+    /// Read a durable reset receipt without erasing data.
+    ///
+    /// # Errors
+    /// Invalid operation identity, unsupported port or native status error.
+    pub async fn purge_status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        PurgeRequest {
+            operation_id: operation_id.into(),
+            mode: PurgeMode::Atomic,
+        }
+        .validate()?;
+        match &self.purge {
+            Some(port) => port.status(operation_id).await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot read purge status",
+            )),
         }
     }
 

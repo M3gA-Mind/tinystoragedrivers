@@ -39,6 +39,8 @@ async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_b
         Capability::ValidatedBatch,
         Capability::Fencing,
         Capability::CrossDatabaseFencing,
+        Capability::ScopePurge,
+        Capability::AtomicScopePurge,
     ] {
         assert!(!backend.capabilities().contains(capability));
     }
@@ -69,6 +71,21 @@ async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_b
             .unwrap_err()
             .kind(),
         ErrorKind::Unsupported(Capability::ValidatedBatch)
+    );
+    let request = tinystoragedrivers_core::PurgeRequest {
+        operation_id: "standalone_reset".into(),
+        mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+    };
+    assert_eq!(
+        scoped.purge(&request).await.unwrap_err().kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        backend
+            .for_scope_generation(&Scope::local(), tinystoragedrivers_core::ScopeGeneration(1))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::ScopePurge)
     );
     conformance::run(&backend, false).await;
 }

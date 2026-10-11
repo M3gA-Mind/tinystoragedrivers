@@ -100,10 +100,14 @@ impl StorageBackend for CompositeStorage {
             .records
             .capabilities()
             .without(Capability::ExistingSchema)
+            .without(Capability::ScopePurge)
+            .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs);
-        for cap in self.blobs.capabilities().iter() {
-            caps = caps.with(cap);
+        for cap in [Capability::StreamingBlobs, Capability::PresignedUrls] {
+            if self.blobs.capabilities().contains(cap) {
+                caps = caps.with(cap);
+            }
         }
         caps
     }
@@ -151,7 +155,11 @@ impl BlobStore for FencedBlobs {
     }
     fn capabilities(&self) -> Capabilities {
         // Presigned PUT cannot enforce the document fence.
-        self.0.capabilities().without(Capability::PresignedUrls)
+        self.0
+            .capabilities()
+            .without(Capability::ScopePurge)
+            .without(Capability::AtomicScopePurge)
+            .without(Capability::PresignedUrls)
     }
     async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
         Err(unfenceable())

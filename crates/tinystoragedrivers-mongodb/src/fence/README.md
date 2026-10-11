@@ -40,7 +40,7 @@ counter, and the next ordinary write of the guard drops it.
 
 | Item | Role |
 | --- | --- |
-| `in_fence!(shared, fence, session => body)` | Runs `body` inside a fenced transaction and retries transient aborts. The document and stream handles use it for every write. |
+| `in_write!(shared, optional_fence, session => body)` | Runs `body` inside a native transaction with an optional fence and retries transient aborts. The document and stream handles use it for every write. |
 | `FencedTxn` | One fenced write's session and attempt counter: `start`, `begin` (checks and holds the guard), `finish` (commits or aborts). |
 | `settle` | Maps a commit result to done, retry, or a final error. |
 | `FENCE_ATTEMPTS` | 64. The retry budget for one fenced write. |

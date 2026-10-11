@@ -174,30 +174,58 @@ impl SqliteStorage {
     }
 
     fn handles(&self, scope: &Scope, fencing: Option<&Arc<Fencing>>) -> ScopedStorage {
+        self.handles_generation(
+            scope,
+            fencing,
+            tinystoragedrivers_core::ScopeGeneration::default(),
+        )
+    }
+    fn handles_generation(
+        &self,
+        scope: &Scope,
+        fencing: Option<&Arc<Fencing>>,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(SqliteDocuments::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-                Arc::clone(&self.clock),
-                fencing.cloned(),
-                self.existing,
-            )),
-            Arc::new(SqliteStreams::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-                fencing.cloned(),
-            )),
-            Arc::new(SqliteBlobs::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-                fencing.cloned(),
-            )),
+            Arc::new(
+                SqliteDocuments::new(
+                    Arc::clone(&self.db),
+                    Arc::clone(&self.tables),
+                    scope.clone(),
+                    Arc::clone(&self.clock),
+                    fencing.cloned(),
+                    self.existing,
+                )
+                .with_generation(generation),
+            ),
+            Arc::new(
+                SqliteStreams::new(
+                    Arc::clone(&self.db),
+                    Arc::clone(&self.tables),
+                    scope.clone(),
+                    fencing.cloned(),
+                )
+                .with_generation(generation),
+            ),
+            Arc::new(
+                SqliteBlobs::new(
+                    Arc::clone(&self.db),
+                    Arc::clone(&self.tables),
+                    scope.clone(),
+                    fencing.cloned(),
+                )
+                .with_generation(generation),
+            ),
         )
+        .with_purge(Arc::new(crate::purge::SqlitePurge {
+            db: Arc::clone(&self.db),
+            tables: Arc::clone(&self.tables),
+            scope: scope.clone(),
+            generation,
+            fencing: fencing.cloned(),
+        }))
     }
 
     /// The database file this storage reads and writes.
@@ -246,16 +274,39 @@ impl StorageBackend for SqliteStorage {
         Ok(self.handles(scope, Some(&fencing)))
     }
 
+    fn for_scope_generation(
+        &self,
+        scope: &Scope,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Result<ScopedStorage> {
+        Ok(self.handles_generation(scope, None, generation))
+    }
     fn for_scope_fenced_in_database(
         &self,
         scope: &Scope,
         fence: &Fence,
         locator: &GuardDatabase,
     ) -> Result<ScopedStorage> {
+        self.for_scope_fenced_in_database_generation(
+            scope,
+            tinystoragedrivers_core::ScopeGeneration::default(),
+            fence,
+            locator,
+        )
+    }
+
+    fn for_scope_fenced_in_database_generation(
+        &self,
+        scope: &Scope,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+        fence: &Fence,
+        locator: &GuardDatabase,
+    ) -> Result<ScopedStorage> {
         fence.validate()?;
         locator.validate()?;
         if *locator == GuardDatabase::Current {
-            return self.for_scope_fenced(scope, fence);
+            let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
+            return Ok(self.handles_generation(scope, Some(&fencing), generation));
         }
         let (file, prefix) = match (&self.layout, locator) {
             (Layout::Directory(dir), GuardDatabase::Default) => {
@@ -280,7 +331,7 @@ impl StorageBackend for SqliteStorage {
             attached,
             guard.tables,
         ));
-        Ok(self.handles(scope, Some(&fencing)))
+        Ok(self.handles_generation(scope, Some(&fencing), generation))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
