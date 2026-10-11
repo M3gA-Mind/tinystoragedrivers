@@ -314,3 +314,82 @@ async fn live_named_target_holds_default_guard_across_independent_clients() {
         ErrorKind::Fenced
     );
 }
+
+#[tokio::test]
+async fn live_cross_database_guard_snapshot_cannot_survive_a_takeover() {
+    let Some(backend) = live("live_cross_database_guard_snapshot_cannot_survive_a_takeover").await
+    else {
+        return;
+    };
+    if !backend
+        .capabilities()
+        .contains(Capability::CrossDatabaseFencing)
+    {
+        return;
+    }
+    let leases = unique("snapshot_leases");
+    let cluster = Scope::new("cluster").unwrap();
+    backend
+        .for_scope(&cluster)
+        .unwrap()
+        .documents()
+        .put(&leases, "l", json!({"epoch": 1}), Precondition::Absent)
+        .await
+        .unwrap();
+    let fence = Fence::epoch(cluster.clone(), &leases, "l", "epoch", 1);
+    let binding = Fencing {
+        fence: fence.clone(),
+        shared: Arc::clone(&backend.shared),
+    };
+    let mut txn = FencedTxn::start(&backend.shared, &binding).await.unwrap();
+    txn.session.start_transaction().await.unwrap();
+    // Establish a snapshot of the default guard without holding it yet.
+    backend
+        .shared
+        .raw(&leases)
+        .find_one(doc! {"_id": document_id(&cluster, "l")})
+        .session(&mut txn.session)
+        .await
+        .unwrap()
+        .unwrap();
+    let independent = live("independent snapshot takeover client").await.unwrap();
+    independent
+        .for_scope(&cluster)
+        .unwrap()
+        .documents()
+        .put(&leases, "l", json!({"epoch": 2}), Precondition::None)
+        .await
+        .unwrap();
+    // A snapshot-only check would still pass epoch 1. The native guard write
+    // must instead abort this transaction before any target write can commit.
+    let error = txn.guard(&CollectionSpec::new(&leases)).await.unwrap_err();
+    assert!(error.is_retryable(), "{error}");
+    txn.session.abort_transaction().await.unwrap();
+    let target = backend.database("snapshot_target").unwrap();
+    let stale = target
+        .for_scope_fenced_in_database(
+            &Scope::local(),
+            &fence,
+            &tinystoragedrivers_core::GuardDatabase::Default,
+        )
+        .unwrap();
+    assert_eq!(
+        stale
+            .documents()
+            .put("data", "late", json!({}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    assert!(
+        target
+            .for_scope(&Scope::local())
+            .unwrap()
+            .documents()
+            .get("data", "late")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
