@@ -106,6 +106,17 @@ impl SqliteStorage {
 
     fn assemble(layout: Layout, file: &Path, prefix: &str, clock: Clock) -> Result<Self> {
         let db = Db::open(file)?;
+        // Keep the opened namespace independent of later cwd changes. Resolve
+        // the directory itself, since storage.db may be a symlink elsewhere.
+        let layout = match layout {
+            Layout::Directory(dir) => Layout::Directory(dir.canonicalize().map_err(|error| {
+                tinystoragedrivers_core::StorageError::backend(
+                    "cannot resolve the sqlite layout directory",
+                )
+                .with_source(error)
+            })?),
+            Layout::File(_) => Layout::File(db.path().to_path_buf()),
+        };
         let tables = Arc::new(Tables::new(prefix));
         let create = Arc::clone(&tables);
         db.run_now(move |conn| create.ensure(conn))?;
