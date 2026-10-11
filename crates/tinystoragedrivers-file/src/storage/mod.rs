@@ -55,6 +55,7 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Ttl)
     .with(Capability::FullText)
     .with(Capability::Fencing)
+    .with(Capability::ConditionalStreamAppend)
     .with(Capability::CollectionEnumeration);
 
 fn system_clock() -> u64 {

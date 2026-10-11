@@ -73,3 +73,19 @@ and cross-scope isolation. Its own regression drivers verify that absent listing
 support is accepted and leaking collection enumeration is rejected. The MongoDB
 integration test runs on the replica-set CI fixture. Consumers can use this API
 to discover all collections during scoped cleanup without assuming a fixed list.
+
+
+## Conditional stream append
+
+Accepted contract: [storage ports](../specs/storage-ports.md#streamstore).
+
+1. Add the optional capability and default unsupported method so external
+   adapters keep compiling.
+2. Compare next offset inside the memory/file write lock and SQLite immediate
+   transaction, including the native fence.
+3. Use MongoDB transactions; reuse fenced transactions for fenced handles,
+   and refuse deployments without transactions.
+4. Enforce empty batches, stale offsets, races, truncation, tenant/database
+   isolation and stale fences in conformance. Cover file reopen and independent
+   MongoDB clients in regression tests.
+5. Publish the owning repository contract before downstream callers consume it.

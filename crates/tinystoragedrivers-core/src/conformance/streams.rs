@@ -7,6 +7,7 @@ use crate::backend::ScopedStorage;
 use crate::error::ErrorKind;
 
 pub(super) async fn run(storage: &ScopedStorage) {
+    conditional_append(storage).await;
     let streams = storage.streams();
     let name = unique("stream");
 
@@ -107,4 +108,69 @@ pub(super) async fn run(storage: &ScopedStorage) {
         ErrorKind::InvalidInput,
         "empty stream name",
     );
+}
+
+async fn conditional_append(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("conditional");
+    if !super::has(storage, crate::Capability::ConditionalStreamAppend) {
+        fails(
+            streams.append_batch_if_offset(&name, 0, vec![]).await,
+            ErrorKind::Unsupported(crate::Capability::ConditionalStreamAppend),
+            "conditional append unsupported",
+        );
+        return;
+    }
+    assert_eq!(
+        ok(
+            streams.append_batch_if_offset(&name, 0, vec![]).await,
+            "empty conditional"
+        ),
+        0
+    );
+    assert_eq!(
+        ok(
+            streams
+                .append_batch_if_offset(&name, 0, vec![json!(0), json!(1)])
+                .await,
+            "conditional batch"
+        ),
+        0
+    );
+    for values in [vec![], vec![json!(9)]] {
+        fails(
+            streams.append_batch_if_offset(&name, 0, values).await,
+            ErrorKind::Conflict,
+            "stale offset",
+        );
+    }
+    ok(
+        streams.truncate_before(&name, 2).await,
+        "truncate conditional",
+    );
+    assert_eq!(ok(streams.len(&name).await, "persistent offset"), 2);
+    assert_eq!(
+        ok(
+            streams.append_batch_if_offset(&name, 2, vec![]).await,
+            "empty after truncate"
+        ),
+        2
+    );
+    let (a, b) = tokio::join!(
+        streams.append_batch_if_offset(&name, 2, vec![json!(2)]),
+        streams.append_batch_if_offset(&name, 2, vec![json!(3)])
+    );
+    assert_eq!(
+        usize::from(a.is_ok()) + usize::from(b.is_ok()),
+        1,
+        "one conditional winner"
+    );
+    assert_eq!(
+        a.err()
+            .or_else(|| b.err())
+            .expect("one conditional append must conflict")
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(ok(streams.len(&name).await, "winner offset"), 3);
 }

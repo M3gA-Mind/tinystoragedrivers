@@ -51,7 +51,7 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     ///
     /// The fenced writes are the document port's `put`, `delete`,
     /// `delete_where`, `claim`, `atomic_batch` and `drop_collection`, the
-    /// stream port's `append`, `append_batch`, `truncate_before` and
+    /// stream port's `append`, `append_batch`, `append_batch_if_offset`, `truncate_before` and
     /// `delete_stream`, and the blob port's `put` and `delete`. Reads and
     /// `ensure_collection` are not fenced. A driver that cannot make one of
     /// these writes atomic with the check refuses it with

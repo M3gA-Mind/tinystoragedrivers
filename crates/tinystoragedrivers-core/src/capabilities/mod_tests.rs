@@ -31,6 +31,7 @@ fn all_holds_every_capability() {
             Capability::PresignedUrls,
             Capability::StreamingBlobs,
             Capability::CollectionEnumeration,
+            Capability::ConditionalStreamAppend,
         ]
     );
 }

@@ -72,6 +72,26 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         0,
         "streams leak"
     );
+    if has(&a, Capability::ConditionalStreamAppend) && has(&b, Capability::ConditionalStreamAppend)
+    {
+        ok(
+            a.streams()
+                .append_batch_if_offset(&stream, 1, vec![json!(2)])
+                .await,
+            "scope a conditional",
+        );
+        ok(
+            b.streams()
+                .append_batch_if_offset(&stream, 0, vec![json!(3)])
+                .await,
+            "scope b conditional",
+        );
+        assert_eq!(ok(a.streams().len(&stream).await, "scope a offset"), 2);
+        ok(
+            b.streams().delete_stream(&stream).await,
+            "cleanup scope b conditional",
+        );
+    }
     empty(
         &ok(b.streams().streams(&stream).await, "b list"),
         "expected nothing",
@@ -163,6 +183,36 @@ pub(super) async fn databases(backend: &dyn StorageBackend) {
     assert_eq!(ok(one_again.streams().len(&stream).await, "same stream"), 1);
     assert_eq!(ok(two.streams().len(&stream).await, "other stream"), 0);
     assert_eq!(ok(root.streams().len(&stream).await, "root stream"), 0);
+    if has(&one, Capability::ConditionalStreamAppend)
+        && has(&two, Capability::ConditionalStreamAppend)
+    {
+        ok(
+            one.streams()
+                .append_batch_if_offset(&stream, 1, vec![json!(2)])
+                .await,
+            "database one conditional",
+        );
+        ok(
+            two.streams()
+                .append_batch_if_offset(&stream, 0, vec![json!(3)])
+                .await,
+            "database two conditional",
+        );
+        assert_eq!(
+            ok(
+                one_again.streams().len(&stream).await,
+                "database offset shared"
+            ),
+            2
+        );
+        assert_eq!(
+            ok(
+                root.streams().len(&stream).await,
+                "root conditional isolation"
+            ),
+            0
+        );
+    }
 
     let key = format!("{}/k", unique("db_blob"));
     ok(one.blobs().put(&key, vec![1], None).await, "blob one");
