@@ -11,6 +11,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,10 +24,16 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = "file::tests::published_objects_are_ready_for_a_separate_user_access_probe"
 MUTATION_MASK = 0x500D0152
 IDENTITY_CLASSES = {"Current", "System", "Admins", "TrustedInstaller", "Everyone", "AuthUsers", "BuiltinUsers", "Owner", "Other"}
+SCRIPT_STAGES = {"Start", "Identity", "Paths", "Segments", "Serialize", "Complete"}
+ERROR_CATEGORIES = {"ParserError", "InvalidArgument", "ObjectNotFound", "PermissionDenied",
+                    "InvalidOperation", "ResourceUnavailable", "NotSpecified", "Other"}
 
 # Paths enter only through the child environment and Get-Acl's literal argument.
 # SID values remain inside the child; even error output is never copied.
 ACL_DIAGNOSTIC_SCRIPT = r"""$ErrorActionPreference='Stop'
+$stage='Start'
+try {
+$stage='Identity'
 $current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $trustedInstaller='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 function Trusted($sid) {
@@ -45,9 +52,14 @@ function Classify($sid,$owner) {
  if($owner -and $sid -eq $owner){return 'Owner'}
  return 'Other'
 }
+$stage='Paths'
 $paths=@(ConvertFrom-Json -InputObject $env:TSD_ACL_DIAGNOSTIC_PATHS)
 $roles=@('Volume','Outer','Private')
-if($paths.Count -ne 3){exit 21}
+if($paths.Count -ne 3){
+ ConvertTo-Json -Compress -InputObject @{status='ScriptFailed';stage='Paths';category='InvalidArgument'}
+ exit 21
+}
+$stage='Segments'
 $segments=@()
 for($ordinal=0;$ordinal -lt 3;$ordinal++) {
  $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed'}
@@ -77,7 +89,16 @@ for($ordinal=0;$ordinal -lt 3;$ordinal++) {
  } catch { $record=@{ordinal=$ordinal;role=$roles[$ordinal];status='ReadFailed'} }
  $segments+=$record
 }
-ConvertTo-Json -Depth 6 -Compress -InputObject @{segments=$segments}
+$stage='Serialize'
+$json=ConvertTo-Json -Depth 6 -Compress -InputObject @{segments=$segments}
+$stage='Complete'
+Write-Output $json
+} catch {
+ $category=[string]$_.CategoryInfo.Category
+ if($category -notin @('ParserError','InvalidArgument','ObjectNotFound','PermissionDenied','InvalidOperation','ResourceUnavailable','NotSpecified')){$category='Other'}
+ ConvertTo-Json -Compress -InputObject @{status='ScriptFailed';stage=$stage;category=$category}
+ exit 1
+}
 """
 
 
@@ -136,36 +157,140 @@ def fixture_failure_phase(stderr):
     return "OtherSetupFailure"
 
 
+def parse_script_failure(text):
+    """Validate the child's exact finite failure envelope, without error text."""
+    if len(text) > 131072:
+        raise ValueError("invalid finite diagnostic")
+    value = json.loads(text)
+    if (type(value) is not dict or set(value) != {"status", "stage", "category"}
+            or value["status"] != "ScriptFailed" or value["stage"] not in SCRIPT_STAGES
+            or value["category"] not in ERROR_CATEGORIES):
+        raise ValueError("invalid finite diagnostic")
+    return value["stage"], value["category"]
+
+
+def parser_error_category(stderr):
+    """Classify only PowerShell's exact CategoryInfo field, never nearby text.
+
+    This is contextual metadata for a nonzero exit, not ACL admission evidence.
+    """
+    return "ParserError" if re.search(r"(?m)^\s*\+?\s*CategoryInfo\s*:\s*ParserError\s*(?::|$)", stderr) else "Unknown"
+
+
+def bounded_integer(value, lower, upper):
+    return type(value) is int and lower <= value <= upper
+
+
+def validate_diagnostic_record(record):
+    """Require an exact finite discriminated union before writing metadata."""
+    common = {"source_phase", "diagnostic_version", "executable_resolution", "diagnostic_status"}
+    phases = {"NamespaceForeignMutation", "NamespaceOwnerUnsafe", "NamespaceOwnerAbsent",
+              "NamespaceDaclAbsent", "NamespaceDaclEmpty", "NamespaceAclUnsupported",
+              "NamespaceTypeUnsafe", "OtherSetupFailure"}
+    if (type(record) is not dict or not common <= record.keys()
+            or type(record["diagnostic_version"]) is not int or record["diagnostic_version"] != 1
+            or record["source_phase"] not in phases
+            or record["executable_resolution"] not in {"Resolved", "Missing", "ResolutionFailed"}):
+        raise ValueError("invalid finite diagnostic")
+    status = record["diagnostic_status"]
+    fields = set(record) - common
+    if status == "Observed" and fields == {"segments"}:
+        parse_acl_diagnostics(json.dumps({"segments": record["segments"]}))
+    elif status == "LaunchFailed" and fields in ({"launch_error_class"}, {"launch_error_class", "native_os_error"}):
+        if (record["launch_error_class"] not in {"FileNotFound", "PermissionDenied", "OtherOSError"}
+                or ("native_os_error" in record and not bounded_integer(record["native_os_error"], 0, 2**32 - 1))):
+            raise ValueError("invalid finite diagnostic")
+    elif status == "TimedOut" and fields == {"timeout_seconds"}:
+        if type(record["timeout_seconds"]) is not int or record["timeout_seconds"] != 30:
+            raise ValueError("invalid finite diagnostic")
+    elif status == "ProcessFailed" and fields == {"return_code", "failure_stage", "error_category"}:
+        if (not bounded_integer(record["return_code"], -(2**31), 2**32 - 1) or record["return_code"] == 0
+                or record["failure_stage"] not in SCRIPT_STAGES | {"Unknown"}
+                or record["error_category"] not in ERROR_CATEGORIES | {"Unknown"}):
+            raise ValueError("invalid finite diagnostic")
+    elif status != "ParserRejected" or fields:
+        raise ValueError("invalid finite diagnostic")
+    return record
+
+
 def capture_windows_setup_diagnostics(outer, private, stderr, evidence):
     """Read the three fixture ancestors after failed setup, before any user probe.
 
     This is diagnostic metadata, not native ACL admission or a denial receipt.
     Subprocess failure or unexpected output produces only a finite status.
     """
-    record = {"source_phase": fixture_failure_phase(stderr), "diagnostic_status": "ProcessFailed"}
+    try:
+        resolution = "Resolved" if shutil.which("powershell") else "Missing"
+    except OSError:
+        resolution = "ResolutionFailed"
+    record = {"source_phase": fixture_failure_phase(stderr), "diagnostic_version": 1,
+              "executable_resolution": resolution, "diagnostic_status": "ParserRejected"}
     try:
         result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ACL_DIAGNOSTIC_SCRIPT],
                                 env={**os.environ, "TSD_ACL_DIAGNOSTIC_PATHS": json.dumps([outer.anchor, str(outer), str(private)])},
                                 capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
+        if not bounded_integer(result.returncode, -(2**31), 2**32 - 1):
+            pass
+        elif result.returncode == 0:
             try:
                 record.update(parse_acl_diagnostics(result.stdout))
                 record["diagnostic_status"] = "Observed"
             except (ValueError, TypeError, KeyError):
-                record["diagnostic_status"] = "ParserRejected"
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+                pass
+        else:
+            try:
+                stage, category = parse_script_failure(result.stdout)
+            except (ValueError, TypeError, KeyError):
+                stage, category = "Unknown", parser_error_category(result.stderr)
+            record.update(diagnostic_status="ProcessFailed", return_code=result.returncode,
+                          failure_stage=stage, error_category=category)
+    except subprocess.TimeoutExpired:
+        record.update(diagnostic_status="TimedOut", timeout_seconds=30)
+    except OSError as error:
+        kind = "FileNotFound" if isinstance(error, FileNotFoundError) else "PermissionDenied" if isinstance(error, PermissionError) else "OtherOSError"
+        record.update(diagnostic_status="LaunchFailed", launch_error_class=kind)
+        number = getattr(error, "winerror", None)
+        if number is None:
+            number = error.errno
+        if bounded_integer(number, 0, 2**32 - 1):
+            record["native_os_error"] = number
+    validate_diagnostic_record(record)
     (evidence / "fixture-acl-diagnostics.json").write_text(json.dumps(record, indent=2) + "\n")
+    return record
+
+
+def check_windows_diagnostic_launcher(evidence):
+    """Execute the actual diagnostic launcher on owned disposable directories.
+
+    This neither admits a production namespace nor runs the separate-user probe.
+    No account is created and no ACL is modified.
+    """
+    if os.name != "nt":
+        raise RuntimeError("diagnostic launcher regression requires native Windows")
+    with tempfile.TemporaryDirectory(prefix="tsd-acl-launcher-") as name:
+        outer = Path(name)
+        private = outer / "private"
+        private.mkdir()
+        record = capture_windows_setup_diagnostics(outer, private, "", evidence)
+        if record["diagnostic_status"] != "Observed" or any(segment["status"] != "Observed" for segment in record["segments"]):
+            # Only already validated finite metadata reaches the console.
+            print(json.dumps(record, sort_keys=True))
+            raise RuntimeError("native diagnostic launcher did not observe three fixture segments")
+        print("WINDOWS_DIAGNOSTIC_LAUNCHER_THREE_SEGMENTS_OBSERVED")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path)
+    parser.add_argument("--check-windows-diagnostic-launcher", action="store_true")
     args = parser.parse_args()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     evidence = (args.evidence_dir or ROOT / "target") / ("native-user-denial-" + stamp)
     evidence.mkdir(parents=True)
     capture_provenance(ROOT, evidence)
+    if args.check_windows_diagnostic_launcher:
+        check_windows_diagnostic_launcher(evidence)
+        return
     windows = os.name == "nt"
     # Windows fixture ancestors must be independent of an administrator profile.
     outer = Path(tempfile.mkdtemp(prefix="tsd-denial-", dir="C:\\" if windows else str(Path("/var/tmp").resolve())))

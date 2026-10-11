@@ -67,6 +67,9 @@ jobs:
       - name: Native existing file and key tests
         if: always()
         run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests -- --nocapture
+      - name: Exercise the actual Windows finite diagnostic launcher
+        if: ${{ runner.os == 'Windows' }}
+        run: python .github/scripts/check-native-user-denial.py --check-windows-diagnostic-launcher
       - name: Actual separate standard user cannot read key data or either lock
         run: python .github/scripts/check-native-user-denial.py
       - name: Native strict secrets lint
