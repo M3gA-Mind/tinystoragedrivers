@@ -31,9 +31,8 @@ impl Namespace {
         let Some(Component::Prefix(prefix)) = components.next() else {
             return Err(denied("missing local volume"));
         };
-        let drive = match prefix.kind() {
-            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
-            _ => return Err(denied("unsupported namespace path")),
+        let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+            return Err(denied("unsupported namespace path"));
         };
         if components.next() != Some(Component::RootDir) {
             return Err(denied("ambiguous namespace path"));

@@ -189,7 +189,13 @@ def main():
         # both reports, independent of the instantiated JSON summary count.
         if lines != coordinates[name]:
             failed.append(name + ": JSON/LCOV executable coordinates or counters differ")
-        if len(coordinates[name]) > count or covered > count:
+        unique_covered = sum(value > 0 for value in coordinates[name].values())
+        unique_uncovered = len(coordinates[name]) - unique_covered
+        # Each merged covered/uncovered coordinate must be contributed by at
+        # least one function/instantiation counted in the summary. Additional
+        # overlapping instantiations are valid; impossible lower totals are not.
+        if (covered > count or covered < unique_covered
+                or count - covered < unique_uncovered):
             failed.append(name + ": malformed JSON/LCOV counters")
         if covered * 100 < count * 90:
             failed.append(f"{name}: {covered}/{count} below 90%")

@@ -161,6 +161,27 @@ class NativeCoverageGate(unittest.TestCase):
         receipt = json.loads((self.root / "target/secrets-native-coverage-receipt.json").read_text())
         self.assertEqual(receipt["changed_lines"], 1)
 
+    def test_summary_cannot_claim_coverage_for_an_uncovered_coordinate(self):
+        self.entry["segments"][0][2] = 0
+        other_name = gate.SOURCE + "file/secure.rs"
+        other = self.root / other_name
+        other.write_text("pub fn covered() {}\n")
+        covered = {"filename": str(other), "summary": {"lines": {"count": 1, "covered": 1}},
+                   "segments": [[1, 1, 1, True, True, False], [1, 20, 0, False, False, False]]}
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry, covered]}]}))
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nend_of_record\n"
+                            + "SF:" + str(other) + "\nDA:1,1\nend_of_record\n")
+        self.diff = "+++ b/" + other_name + "\n@@ -0,0 +1 @@\n+pub fn covered() {}\n"
+        target = self.root / "target"
+        manifest = target / "secrets-native-provenance.json"
+        provenance = json.loads(manifest.read_text())
+        provenance["sources"] = gate.source_hashes()
+        manifest.write_text(json.dumps(provenance))
+        dep = target / "llvm-cov-target/debug/deps/tinystoragedrivers_secrets-fixture.d"
+        dep.write_text("fixture: " + self.module + " " + other_name + "\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
 
 if __name__ == "__main__":
     unittest.main()

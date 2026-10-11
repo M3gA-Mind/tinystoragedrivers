@@ -73,7 +73,8 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
 /// use tinystoragedrivers_secrets::{EncryptedFileSecrets, SecretStore, crypto};
 ///
-/// let dir = std::env::temp_dir().join(format!("tsd-doc-{}", std::process::id()));
+/// let dir = std::env::temp_dir().canonicalize().unwrap()
+///     .join(format!("tsd-doc-{}", std::process::id()));
 /// let secrets = EncryptedFileSecrets::new(&dir, crypto::generate_key()?);
 /// secrets.set("alice:api_key", b"sk-live-abc").await?;
 /// assert!(dir.join("secrets.enc").exists());
