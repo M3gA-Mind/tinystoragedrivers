@@ -372,10 +372,8 @@ async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
 
     let second = EncryptedFileSecrets::with_key_file(dir.0.clone()).unwrap();
     assert_eq!(second.get("a").await.unwrap().unwrap().as_slice(), b"1");
-    assert_eq!(
-        fs::read_to_string(dir.0.join(KEY_FILE_NAME)).unwrap(),
-        key_hex
-    );
+    let master_retained = fs::read_to_string(dir.0.join(KEY_FILE_NAME)).unwrap() == key_hex;
+    assert!(master_retained, "reopening must retain the master bytes");
     let ciphertext = fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap();
     drop(first);
     drop(second);
@@ -384,7 +382,11 @@ async fn owned_key_file_constructor_reuses_the_master_and_refuses_its_loss() {
         panic!("lost master must deny reopening existing ciphertext");
     };
     assert_eq!(error.kind(), ErrorKind::Conflict);
-    assert_eq!(fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap(), ciphertext);
+    let ciphertext_retained = fs::read(dir.0.join(SECRETS_FILE_NAME)).unwrap() == ciphertext;
+    assert!(
+        ciphertext_retained,
+        "failed reopening must retain ciphertext"
+    );
     assert!(!dir.0.join(KEY_FILE_NAME).exists());
 }
 

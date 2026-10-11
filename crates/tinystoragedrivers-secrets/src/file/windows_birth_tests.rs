@@ -333,7 +333,11 @@ fn unsafe_native_data_lock_and_ledger_are_retained_before_master_creation() {
             };
             assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
             assert!(!private.join(KEY_FILE_NAME).exists());
-            assert_eq!(fs::read(&path).unwrap(), before_bytes);
+            let leaf_bytes_retained = fs::read(&path).unwrap() == before_bytes;
+            assert!(
+                leaf_bytes_retained,
+                "denial must retain existing leaf bytes"
+            );
             assert_eq!(
                 super::super::secure::identity(&authority).unwrap(),
                 before_id

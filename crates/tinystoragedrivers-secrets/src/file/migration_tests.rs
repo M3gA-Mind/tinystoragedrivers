@@ -238,7 +238,8 @@ fn native_private_sources_preserve_empty_exact_bound_and_oversized_bytes() {
         for result in [owned, borrowed] {
             if length <= 1_048_576 {
                 let admitted = result.unwrap();
-                assert_eq!(admitted.bytes(), bytes);
+                let admitted_bytes_match = admitted.bytes() == bytes;
+                assert!(admitted_bytes_match, "admission must preserve source bytes");
             } else {
                 assert_eq!(
                     result.unwrap_err().kind(),
@@ -246,7 +247,8 @@ fn native_private_sources_preserve_empty_exact_bound_and_oversized_bytes() {
                 );
             }
         }
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let source_bytes_retained = std::fs::read(&path).unwrap() == bytes;
+        assert!(source_bytes_retained, "admission must retain source bytes");
         let parent = path.parent().unwrap();
         assert!(!parent.join(KEY_FILE_NAME).exists());
         assert!(!parent.join(super::super::SECRETS_FILE_NAME).exists());
