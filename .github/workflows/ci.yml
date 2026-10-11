@@ -74,6 +74,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python .github/scripts/check-native-user-denial.py --check-windows-diagnostic-launcher
       - name: Actual separate standard user cannot read key data or either lock
+        if: always()
         run: python .github/scripts/check-native-user-denial.py
       - name: Native strict secrets lint
         run: cargo clippy --locked -p tinystoragedrivers-secrets --all-features --all-targets -- -D warnings

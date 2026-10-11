@@ -32,6 +32,95 @@ def print_finite_failure(record):
     print(json.dumps(record, sort_keys=True))
 
 
+DISPOSAL_EXCEPTION_CLASSES = {"ObjectDisposed", "GetValueInvocation", "MethodInvocation",
+                              "TargetInvocation", "Runtime", "Other"}
+DISPOSAL_STAGES = {"Start", "Lifecycle", "CaughtAssertion", "Getter", "MethodProbe", "DisposedAssertion", "Complete"}
+
+
+def parse_disposal_diagnostic(text):
+    """Validate only static lifecycle metadata; discard all native payloads."""
+    if len(text) > 8192:
+        raise ValueError("invalid finite disposal diagnostic")
+    value = json.loads(text)
+    fields = {"status", "stage", "phase", "caught", "getter_status", "getter_null",
+              "getter_exception_classes", "method_status", "method_exception_classes", "exception_classes"}
+    if (type(value) is not dict or set(value) != fields
+            or value["status"] not in {"Passed", "Failed"} or value["stage"] not in DISPOSAL_STAGES
+            or value["phase"] not in {"Construction", "Probe", "Cleanup"}
+            or type(value["caught"]) is not bool or type(value["getter_null"]) is not bool
+            or value["getter_status"] not in {"NotRun", "Returned", "TypedCaught", "OtherCaught"}
+            or value["method_status"] not in {"NotRun", "Returned", "Threw"}):
+        raise ValueError("invalid finite disposal diagnostic")
+    for field in ["getter_exception_classes", "method_exception_classes", "exception_classes"]:
+        chain = value[field]
+        if (type(chain) is not list or len(chain) > 4
+                or any(type(item) is not str or item not in DISPOSAL_EXCEPTION_CLASSES for item in chain)):
+            raise ValueError("invalid finite disposal diagnostic")
+    return value
+
+
+DISPOSAL_EXCEPTION_SCRIPT = r"""function FiniteExceptionChain($exception) {
+ $classes=@()
+ for($depth=0;$depth -lt 4 -and $null -ne $exception;$depth++) {
+  $class=switch($exception.GetType().FullName) {
+   'System.ObjectDisposedException' {'ObjectDisposed'}
+   'System.Management.Automation.GetValueInvocationException' {'GetValueInvocation'}
+   'System.Management.Automation.MethodInvocationException' {'MethodInvocation'}
+   'System.Reflection.TargetInvocationException' {'TargetInvocation'}
+   'System.Management.Automation.RuntimeException' {'Runtime'}
+   default {'Other'}
+  }
+  $classes+=$class
+  $exception=$exception.InnerException
+ }
+ return ,$classes
+}
+"""
+
+
+def parse_engine_metadata(text):
+    """Accept bounded engine components and module-path booleans only."""
+    if len(text) > 8192:
+        raise ValueError("invalid finite engine metadata")
+    record = json.loads(text)
+    if (type(record) is not dict or set(record) != {"edition", "major", "minor", "build", "revision", "module_path_present", "child_default_included"}
+            or record["edition"] not in {"Desktop", "Core", "Other"}
+            or any(type(record[key]) is not int or not -1 <= record[key] <= 65535 for key in ["major", "minor", "build", "revision"])
+            or any(type(record[key]) is not bool for key in ["module_path_present", "child_default_included"])):
+        raise ValueError("invalid finite engine metadata")
+    return record
+
+
+class FiniteDisposalDiagnostics(unittest.TestCase):
+    def test_engine_metadata_rejects_paths_unknown_editions_and_nonfinite_components(self):
+        record = {"edition": "Desktop", "major": 5, "minor": 1, "build": 0, "revision": -1,
+                  "module_path_present": True, "child_default_included": False}
+        self.assertEqual(parse_engine_metadata(json.dumps(record)), record)
+        for key, value in [("edition", "PRIVATE_SENTINEL"), ("major", True), ("build", 65536),
+                           ("module_path_present", "PRIVATE_SENTINEL"), ("path", "PRIVATE_SENTINEL")]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                parse_engine_metadata(json.dumps({**record, key: value}))
+
+    def test_strict_static_envelope_rejects_payloads_types_and_unbounded_chains(self):
+        record = {"status": "Failed", "stage": "Getter", "phase": "Probe", "caught": True,
+                  "getter_status": "OtherCaught", "getter_null": False,
+                  "getter_exception_classes": ["GetValueInvocation", "ObjectDisposed"],
+                  "method_status": "Threw", "method_exception_classes": ["MethodInvocation", "ObjectDisposed"],
+                  "exception_classes": ["GetValueInvocation", "ObjectDisposed"]}
+        self.assertEqual(parse_disposal_diagnostic(json.dumps(record)), record)
+        for field, value in [("stage", "PRIVATE_SENTINEL"), ("phase", 1), ("caught", 1),
+                             ("getter_null", None), ("getter_status", "PRIVATE_SENTINEL"),
+                             ("method_status", False), ("exception_classes", ["Other"] * 5),
+                             ("getter_exception_classes", [False]),
+                             ("method_exception_classes", ["System.PRIVATE_SENTINEL"]),
+                             ("password", "PRIVATE_SENTINEL"), ("path", "PRIVATE_SENTINEL")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                parse_disposal_diagnostic(json.dumps({**record, field: value}))
+        for text in ["PRIVATE_SENTINEL", "[]", " " * 8193]:
+            with self.assertRaises(ValueError):
+                parse_disposal_diagnostic(text)
+
+
 class FiniteAclDiagnostics(unittest.TestCase):
     def test_nonzero_process_retains_only_bounded_exit_and_finite_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -518,6 +607,37 @@ class NativeWindowsOuterFixture(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "requires the native Windows SecureString runtime")
 class NativeWindowsSecurePassword(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        stamp = probe.datetime.datetime.now(probe.datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        cls.evidence = probe.ROOT / "target" / ("native-user-denial-securestring-" + stamp)
+        cls.evidence.mkdir(parents=True)
+        probe.capture_provenance(probe.ROOT, cls.evidence)
+
+    def test_engine_environment_metadata_is_bounded_without_module_or_path_output(self):
+        script = r"""$ErrorActionPreference='Stop'
+try {
+ $edition=if($PSVersionTable.PSEdition -in @('Desktop','Core')){$PSVersionTable.PSEdition}else{'Other'}
+ $version=$PSVersionTable.PSVersion
+ $present=([Environment]::GetEnvironmentVariable('PSModulePath') -ne $null)
+ $default=[IO.Path]::Combine($PSHOME,'Modules').TrimEnd([char[]]'\/')
+ $included=$false
+ foreach($entry in ([string]$env:PSModulePath).Split([IO.Path]::PathSeparator)) {
+  if([string]::Equals($entry.TrimEnd([char[]]'\/'),$default,[StringComparison]::OrdinalIgnoreCase)){$included=$true}
+ }
+ ConvertTo-Json -Compress -InputObject @{edition=$edition;major=$version.Major;minor=$version.Minor;
+  build=$version.Build;revision=$version.Revision;module_path_present=$present;child_default_included=$included}
+} catch {exit 1}
+"""
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+        try:
+            record = parse_engine_metadata(result.stdout)
+        except (ValueError, TypeError, KeyError):
+            (self.evidence / "engine-environment.json").write_text('{"diagnostic_status":"ParserRejected"}\n')
+            self.fail("native engine metadata was rejected")
+        (self.evidence / "engine-environment.json").write_text(json.dumps(record, sort_keys=True) + "\n")
+        self.assertTrue(result.returncode == 0 and not result.stderr.strip(), "native engine metadata failed")
+
     def run_static_check(self, script):
         result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
                                 capture_output=True, text=True)
@@ -548,28 +668,64 @@ Write-Output 'SECURE_PASSWORD_CHECK_PASSED'
         for phase in ["Construction", "Probe", "Cleanup"]:
             with self.subTest(phase=phase):
                 script = """$ErrorActionPreference='Stop'
-function Remove-LocalUser { param($Name) throw 'expected cleanup failure' }
-$password=[System.Security.SecureString]::new()
-$created=$false
-$name='disposal-regression'
-$caught=$false
+FINITE_EXCEPTION_SCRIPT
+$stage='Start';$caught=$false;$getterStatus='NotRun';$getterNull=$false
+$getterClasses=@();$methodStatus='NotRun';$methodClasses=@();$failureClasses=@()
+$status='Failed'
 try {
+ function Remove-LocalUser { param($Name) throw 'expected cleanup failure' }
+ $password=[System.Security.SecureString]::new()
+ $created=$false
+ $name='disposal-regression'
+ $stage='Lifecycle'
  try {
-  if('PHASE' -eq 'Construction'){throw 'expected construction failure'}
-  PASSWORD_CONSTRUCTION
-  if('PHASE' -eq 'Probe'){throw 'expected probe failure'}
-  $created=$true
- } finally { PASSWORD_CLEANUP }
-} catch { $caught=$true }
-if(-not $caught){throw 'expected lifecycle failure was absent'}
-$disposed=$false
-try { $null=$password.Length }
-catch [System.ObjectDisposedException] { $disposed=$true }
-if(-not $disposed){throw 'password disposal failed'}
-Write-Output 'SECURE_PASSWORD_CHECK_PASSED'
-""".replace("PHASE", phase).replace("PASSWORD_CONSTRUCTION", probe.WINDOWS_PASSWORD_CONSTRUCTION).replace(
+  try {
+   if('PHASE' -eq 'Construction'){throw 'expected construction failure'}
+   PASSWORD_CONSTRUCTION
+   if('PHASE' -eq 'Probe'){throw 'expected probe failure'}
+   $created=$true
+  } finally { PASSWORD_CLEANUP }
+ } catch { $caught=$true }
+ $stage='CaughtAssertion'
+ if(-not $caught){throw 'expected lifecycle failure was absent'}
+ $disposed=$false
+ $getterFailure=$null
+ $stage='Getter'
+ try { $value=$password.Length; $getterStatus='Returned';$getterNull=($null -eq $value) }
+ catch [System.ObjectDisposedException] {
+  $disposed=$true;$getterStatus='TypedCaught';$getterClasses=FiniteExceptionChain $_.Exception
+ }
+ catch { $getterStatus='OtherCaught';$getterClasses=FiniteExceptionChain $_.Exception;$getterFailure=$_ }
+ # Independent nonsecret method probe on this same disposed instance. Its
+ # outcome is diagnostic only and never makes the original assertion pass.
+ $stage='MethodProbe'
+ try { $null=$password.IsReadOnly();$methodStatus='Returned' }
+ catch { $methodStatus='Threw';$methodClasses=FiniteExceptionChain $_.Exception }
+ if($null -ne $getterFailure){$stage='Getter';throw $getterFailure}
+ $stage='DisposedAssertion'
+ if(-not $disposed){throw 'password disposal failed'}
+ $stage='Complete';$status='Passed'
+} catch { $failureClasses=FiniteExceptionChain $_.Exception }
+ConvertTo-Json -Depth 4 -Compress -InputObject @{status=$status;stage=$stage;phase='PHASE';caught=$caught;
+ getter_status=$getterStatus;getter_null=$getterNull;getter_exception_classes=$getterClasses;
+ method_status=$methodStatus;method_exception_classes=$methodClasses;exception_classes=$failureClasses}
+if($status -ne 'Passed'){exit 1}
+""".replace("PHASE", phase).replace("FINITE_EXCEPTION_SCRIPT", DISPOSAL_EXCEPTION_SCRIPT).replace(
+                    "PASSWORD_CONSTRUCTION", probe.WINDOWS_PASSWORD_CONSTRUCTION).replace(
                     "PASSWORD_CLEANUP", probe.WINDOWS_PASSWORD_CLEANUP)
-                self.run_static_check(script)
+                result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                        capture_output=True, text=True)
+                try:
+                    record = parse_disposal_diagnostic(result.stdout)
+                except (ValueError, TypeError, KeyError):
+                    (self.evidence / ("disposal-" + phase + ".json")).write_text('{"diagnostic_status":"ParserRejected"}\n')
+                    self.fail("native disposal diagnostic was rejected")
+                (self.evidence / ("disposal-" + phase + ".json")).write_text(json.dumps(record, sort_keys=True) + "\n")
+                if result.returncode != 0:
+                    print(json.dumps(record, sort_keys=True))
+                self.assertTrue(result.returncode == 0, "native SecureString check failed")
+                self.assertTrue(not result.stderr.strip(), "native SecureString check emitted stderr")
+                self.assertTrue(record["status"] == "Passed", "native disposal assertion failed")
 
 
 if __name__ == "__main__":
