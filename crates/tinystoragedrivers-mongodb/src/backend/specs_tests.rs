@@ -1,9 +1,12 @@
+//! Live regressions for concurrent collection declaration and index publication.
+
 use super::*;
 use crate::MongoStorage;
 use tinystoragedrivers_core::{Precondition, Scope, StorageBackend};
 
 #[tokio::test]
-async fn a_newer_search_declaration_retries_the_index_build_before_publication() -> Result<()> {
+async fn live_a_newer_search_declaration_retries_the_index_build_before_publication() -> Result<()>
+{
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return Ok(());
     };
