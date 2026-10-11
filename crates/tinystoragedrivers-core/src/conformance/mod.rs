@@ -21,6 +21,7 @@ mod documents;
 mod fencing;
 mod isolation;
 mod purge;
+mod purge_history;
 mod streams;
 mod validated;
 
@@ -61,6 +62,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         isolation::run(backend).await;
         validated::isolation(backend).await;
         purge::run(backend).await;
+        purge_history::run(backend).await;
     }
     isolation::databases(backend).await;
     fencing::run(backend, single_scope).await;

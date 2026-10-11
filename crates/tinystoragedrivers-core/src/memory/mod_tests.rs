@@ -560,3 +560,85 @@ fn reset_port_debug_identifies_scope_and_generation_without_clock() {
     assert!(rendered.contains("local"));
     assert!(rendered.contains("ScopeGeneration(3)"));
 }
+
+#[tokio::test]
+async fn retrying_a_completed_reset_after_another_reset_preserves_replacement_data() {
+    let backend = MemoryStorage::new();
+    let scope = Scope::new("historical_reset").unwrap();
+    let first = crate::PurgeRequest {
+        operation_id: "first_reset".into(),
+        mode: crate::PurgeMode::Atomic,
+    };
+    let original = backend.for_scope(&scope).unwrap();
+    let first_receipt = original.purge(&first).await.unwrap();
+    let next = backend
+        .for_scope_generation(&scope, first_receipt.generation)
+        .unwrap();
+    let second_receipt = next
+        .purge(&crate::PurgeRequest {
+            operation_id: "second_reset".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let current = backend
+        .for_scope_generation(&scope, second_receipt.generation)
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "replacement",
+            json!({"keep":true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    current
+        .streams()
+        .append("events", json!({"keep":true}))
+        .await
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![7], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        current.purge_status(&first.operation_id).await.unwrap(),
+        Some(first_receipt.clone()),
+        "completed receipts remain durable across later resets"
+    );
+    let retried = current.purge(&first).await.unwrap();
+    assert_eq!(
+        retried, first_receipt,
+        "retry must return its original receipt"
+    );
+    assert!(
+        current
+            .documents()
+            .get("records", "replacement")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        current
+            .streams()
+            .read_window("events", 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![7]
+    );
+}

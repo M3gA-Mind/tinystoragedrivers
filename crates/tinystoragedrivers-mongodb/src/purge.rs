@@ -79,6 +79,7 @@ use tinystoragedrivers_core::{
 };
 
 const MANIFEST: &str = "_tsd_purge_blobs";
+const RECEIPTS: &str = "_tsd_purge_receipts";
 
 #[derive(Debug)]
 pub(crate) struct MongoPurge {
@@ -125,16 +126,58 @@ fn owns_records(prefix: &str, physical: &str) -> bool {
         return false;
     };
     !name.contains(':')
-        && ![META, ADMISSIONS, MANIFEST].contains(&name)
+        && ![META, ADMISSIONS, MANIFEST, RECEIPTS].contains(&name)
         && !name.starts_with(&format!("{BLOBS}."))
         && !name.starts_with("system.")
 }
 
 impl MongoPurge {
+    async fn archive_complete(&self, record: &Document, session: &mut ClientSession) -> Result<()> {
+        let receipt = decode(record)?;
+        if receipt.status != PurgeStatus::Complete {
+            return Err(StorageError::conflict("cannot archive an incomplete reset"));
+        }
+        let mut fields = record.clone();
+        fields.remove("_id");
+        self.shared
+            .raw(RECEIPTS)
+            .update_one(
+                doc! {"_id": {"s": self.scope.as_str(), "o": &receipt.operation_id}},
+                doc! {"$setOnInsert": fields},
+            )
+            .upsert(true)
+            .session(session)
+            .await
+            .map_err(errors::failed("persist completed reset receipt"))?;
+        Ok(())
+    }
+
     async fn begin(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         self.shared.prepare_validation(Some(&self.scope)).await?;
+        // Initialize the internal collection before a transaction could need
+        // to create it. This is trusted native reset metadata, never tenant data.
+        let initialized = self
+            .shared
+            .raw(RECEIPTS)
+            .update_one(
+                doc! {"_id": "metadata"},
+                doc! {"$setOnInsert": {"version": 1_i64}},
+            )
+            .upsert(true)
+            .await;
+        if let Err(error) = initialized {
+            let error = errors::map(error, "initialize reset receipt metadata");
+            if error.kind() != tinystoragedrivers_core::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
         in_write!(&self.shared, None, session => {
             self.shared.hold_validation(Some(&self.scope), &mut *session).await?;
+            if let Some(record) = self.shared.raw(RECEIPTS).find_one(
+                doc! {"_id": {"s": self.scope.as_str(), "o": &request.operation_id}}
+            ).session(&mut *session).await.map_err(errors::failed("read completed reset receipt"))? {
+                return decode(&record);
+            }
             let metadata = self.shared.raw(ADMISSIONS);
             let record = metadata.find_one(doc! {"_id": scope_key(&self.scope)})
                 .session(&mut *session).await.map_err(errors::failed("read reset authority"))?
@@ -146,6 +189,11 @@ impl MongoPurge {
                 return Err(StorageError::conflict("another scope reset remains pending"));
             }
             verify(Some(&record), self.generation)?;
+            // Backfill the latest completed receipt from an earlier driver
+            // before replacing its admission record with the next operation.
+            if record.contains_key("operation") {
+                self.archive_complete(&record, &mut *session).await?;
+            }
             let next = self.generation.0.checked_add(1)
                 .and_then(|v| i64::try_from(v).ok())
                 .ok_or_else(|| StorageError::backend("scope generation space is exhausted"))?;
@@ -186,15 +234,32 @@ impl MongoPurge {
         stage: &str,
         session: &mut ClientSession,
     ) -> Result<()> {
-        self.shared
+        let updated = self
+            .shared
             .raw(ADMISSIONS)
             .update_one(
                 doc! {"_id": scope_key(&self.scope), "operation": operation, "pending": true},
                 doc! {"$set": {"stage": stage, "pending": stage != "complete"}},
             )
-            .session(session)
+            .session(&mut *session)
             .await
             .map_err(errors::failed("advance reset stage"))?;
+        if updated.matched_count != 1 {
+            return Err(StorageError::conflict(
+                "reset operation is no longer pending",
+            ));
+        }
+        if stage == "complete" {
+            let completed = self
+                .shared
+                .raw(ADMISSIONS)
+                .find_one(doc! {"_id": scope_key(&self.scope)})
+                .session(&mut *session)
+                .await
+                .map_err(errors::failed("read completed reset authority"))?
+                .ok_or_else(|| StorageError::unavailable("reset authority is missing"))?;
+            self.archive_complete(&completed, session).await?;
+        }
         Ok(())
     }
 
@@ -379,6 +444,15 @@ impl ScopePurge for MongoPurge {
                 Capability::Fencing,
                 "fenced GridFS reset is unsupported",
             ));
+        }
+        if let Some(record) = self
+            .shared
+            .raw(RECEIPTS)
+            .find_one(doc! {"_id": {"s": self.scope.as_str(), "o": operation}})
+            .await
+            .map_err(errors::failed("read completed reset receipt"))?
+        {
+            return decode(&record).map(Some);
         }
         self.shared
             .raw(ADMISSIONS)

@@ -49,6 +49,8 @@ pub(super) struct DbState {
     pub(super) specs: BTreeMap<String, CollectionSpec>,
     /// Reset authority survives tenant erasure.
     pub(super) admissions: BTreeMap<String, (crate::ScopeGeneration, String)>,
+    /// Completed operation receipts survive later resets of the same scope.
+    pub(super) purge_receipts: BTreeMap<ScopedKey, crate::ScopeGeneration>,
     pub(super) docs: BTreeMap<ScopedKey, BTreeMap<String, StoredDoc>>,
     pub(super) streams: BTreeMap<ScopedKey, StoredStream>,
     pub(super) blobs: BTreeMap<ScopedKey, (BlobMeta, Vec<u8>)>,

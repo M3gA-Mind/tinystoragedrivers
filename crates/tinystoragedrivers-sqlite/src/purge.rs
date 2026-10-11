@@ -40,6 +40,32 @@ fn admission(
     .transpose()
 }
 
+fn completed_receipt(
+    conn: &Connection,
+    tables: &Tables,
+    scope: &str,
+    operation: &str,
+) -> Result<Option<ScopeGeneration>> {
+    let generation: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT generation FROM {} WHERE scope = ?1 AND operation = ?2",
+                ident(&tables.purge_receipts)
+            ),
+            params![scope, operation],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(during("read completed reset receipt"))?;
+    generation
+        .map(|generation| {
+            u64::try_from(generation)
+                .map(ScopeGeneration)
+                .map_err(|_| StorageError::serialization("invalid receipt generation"))
+        })
+        .transpose()
+}
+
 /// Must run inside the same immediate transaction as every mutation.
 pub(crate) fn check(
     conn: &Connection,
@@ -91,9 +117,8 @@ impl ScopePurge for SqlitePurge {
         let fencing = self.fencing.clone();
         let request = request.clone();
         self.db.run(move |conn| fence::write(conn, fencing.as_deref(), &tables, |tx| {
-            if let Some((generation, operation)) = admission(tx, &tables, scope.as_str())?
-                && operation == request.operation_id {
-                    return Ok(PurgeReceipt { operation_id: operation, generation, status: PurgeStatus::Complete, stage: tinystoragedrivers_core::PurgeStage::Complete });
+            if let Some(generation) = completed_receipt(tx, &tables, scope.as_str(), &request.operation_id)? {
+                    return Ok(PurgeReceipt { operation_id: request.operation_id.clone(), generation, status: PurgeStatus::Complete, stage: tinystoragedrivers_core::PurgeStage::Complete });
             }
             check(tx, &tables, scope.as_str(), expected)?;
             let generation = expected.0.checked_add(1).and_then(|next| i64::try_from(next).ok())
@@ -105,6 +130,8 @@ impl ScopePurge for SqlitePurge {
             tx.execute(&format!("INSERT INTO {} (scope, generation, operation) VALUES (?1, ?2, ?3)
                 ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation, operation=excluded.operation", ident(&tables.admissions)),
                 params![scope.as_str(), generation, request.operation_id]).map_err(during("issue scope generation"))?;
+            tx.execute(&format!("INSERT INTO {} (scope, operation, generation) VALUES (?1, ?2, ?3)", ident(&tables.purge_receipts)),
+                params![scope.as_str(), request.operation_id, generation]).map_err(during("persist completed reset receipt"))?;
             Ok(PurgeReceipt { operation_id: request.operation_id.clone(), generation: ScopeGeneration(u64::try_from(generation).unwrap_or(0)), status: PurgeStatus::Complete, stage: tinystoragedrivers_core::PurgeStage::Complete })
         })).await
     }
@@ -116,14 +143,16 @@ impl ScopePurge for SqlitePurge {
         self.db
             .run(move |conn| {
                 fence::write(conn, fencing.as_deref(), &tables, |tx| {
-                    Ok(admission(tx, &tables, scope.as_str())?
-                        .filter(|(_, operation)| operation == &operation_id)
-                        .map(|(generation, operation)| PurgeReceipt {
-                            operation_id: operation,
-                            generation,
-                            status: PurgeStatus::Complete,
-                            stage: tinystoragedrivers_core::PurgeStage::Complete,
-                        }))
+                    Ok(
+                        completed_receipt(tx, &tables, scope.as_str(), &operation_id)?.map(
+                            |generation| PurgeReceipt {
+                                operation_id: operation_id.clone(),
+                                generation,
+                                status: PurgeStatus::Complete,
+                                stage: tinystoragedrivers_core::PurgeStage::Complete,
+                            },
+                        ),
+                    )
                 })
             })
             .await

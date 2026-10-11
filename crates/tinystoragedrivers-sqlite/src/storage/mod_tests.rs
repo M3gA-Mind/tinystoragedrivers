@@ -438,6 +438,13 @@ async fn failed_scope_purge_rolls_back_data_and_generation() {
     assert!(target.purge(&request).await.is_err());
     assert!(
         target
+            .purge_status(&request.operation_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        target
             .documents()
             .get("records", "one")
             .await
@@ -460,6 +467,216 @@ async fn failed_scope_purge_rolls_back_data_and_generation() {
     assert_eq!(
         target.purge(&request).await.unwrap().generation,
         ScopeGeneration(1)
+    );
+}
+
+#[tokio::test]
+async fn historical_reset_receipts_survive_reopen_in_each_database_layout() {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest, ScopeGeneration};
+    for filename in ["directory", "single.db"] {
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().join(filename);
+        let scope = Scope::new("reset_history").unwrap();
+        let first = PurgeRequest {
+            operation_id: "first".into(),
+            mode: PurgeMode::Atomic,
+        };
+        let second = PurgeRequest {
+            operation_id: "second".into(),
+            mode: PurgeMode::Atomic,
+        };
+        let original_receipts = {
+            let storage = SqliteStorage::open(&location).unwrap();
+            let mut receipts = Vec::new();
+            for backend in [
+                Arc::new(storage.clone()) as Arc<dyn StorageBackend>,
+                storage.database("sessions").unwrap(),
+            ] {
+                let original = backend.for_scope(&scope).unwrap();
+                let receipt = original.purge(&first).await.unwrap();
+                let next = backend
+                    .for_scope_generation(&scope, receipt.generation)
+                    .unwrap();
+                let current_receipt = next.purge(&second).await.unwrap();
+                let current = backend
+                    .for_scope_generation(&scope, current_receipt.generation)
+                    .unwrap();
+                current
+                    .documents()
+                    .put(
+                        "records",
+                        "replacement",
+                        json!({"keep":true}),
+                        Precondition::Absent,
+                    )
+                    .await
+                    .unwrap();
+                current
+                    .streams()
+                    .append("events", json!({"keep":true}))
+                    .await
+                    .unwrap();
+                current
+                    .blobs()
+                    .put("replacement", vec![7], None)
+                    .await
+                    .unwrap();
+                receipts.push(receipt);
+            }
+            receipts
+        };
+        let reopened = SqliteStorage::open(&location).unwrap();
+        for (backend, receipt) in [
+            Arc::new(reopened.clone()) as Arc<dyn StorageBackend>,
+            reopened.database("sessions").unwrap(),
+        ]
+        .into_iter()
+        .zip(original_receipts)
+        {
+            let current = backend
+                .for_scope_generation(&scope, ScopeGeneration(2))
+                .unwrap();
+            assert_eq!(
+                current.purge_status(&first.operation_id).await.unwrap(),
+                Some(receipt.clone())
+            );
+            assert_eq!(current.purge(&first).await.unwrap(), receipt);
+            assert!(
+                current
+                    .documents()
+                    .get("records", "replacement")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(current.streams().len("events").await.unwrap(), 1);
+            assert_eq!(
+                current
+                    .blobs()
+                    .get("replacement")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .bytes,
+                vec![7]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn upgrading_receipt_schema_preserves_the_last_completed_reset() {
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let location = dir.path().join("state.db");
+    let scope = Scope::new("migrated_reset").unwrap();
+    let request = PurgeRequest {
+        operation_id: "existing_reset".into(),
+        mode: PurgeMode::Atomic,
+    };
+    let receipt = {
+        let storage = SqliteStorage::open(&location).unwrap();
+        let receipt = storage
+            .for_scope(&scope)
+            .unwrap()
+            .purge(&request)
+            .await
+            .unwrap();
+        let drop_receipts = format!(
+            "DROP TABLE {}",
+            crate::sql::ident(&storage.tables.purge_receipts)
+        );
+        storage
+            .db
+            .run_now(|conn| {
+                conn.execute_batch(&drop_receipts).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        receipt
+    };
+    let reopened = SqliteStorage::open(&location).unwrap();
+    let current = reopened
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![9], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        current.purge_status(&request.operation_id).await.unwrap(),
+        Some(receipt.clone())
+    );
+    assert_eq!(current.purge(&request).await.unwrap(), receipt);
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![9]
+    );
+}
+
+#[tokio::test]
+async fn corrupt_historical_receipt_refuses_retry_without_erasing_replacements() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("corrupt_history").unwrap();
+    let request = PurgeRequest {
+        operation_id: "completed_reset".into(),
+        mode: PurgeMode::Atomic,
+    };
+    let receipt = storage
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&request)
+        .await
+        .unwrap();
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![3], None)
+        .await
+        .unwrap();
+    let corrupt = format!(
+        "UPDATE {} SET generation = -1 WHERE scope = ?1",
+        crate::sql::ident(&storage.tables.purge_receipts)
+    );
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(&corrupt, [scope.as_str()]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        current
+            .purge_status(&request.operation_id)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Serialization
+    );
+    assert_eq!(
+        current.purge(&request).await.unwrap_err().kind(),
+        ErrorKind::Serialization
+    );
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![3]
     );
 }
 

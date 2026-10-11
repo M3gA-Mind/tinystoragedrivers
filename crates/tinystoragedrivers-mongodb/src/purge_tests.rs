@@ -8,16 +8,20 @@ async fn live(label: &str) -> Option<(MongoStorage, Scope)> {
     let Ok(url) = std::env::var("TSD_MONGO_URL") else {
         return None;
     };
+    let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+    let path = rest.split_once('/').map_or("", |(_, path)| path);
+    let database = path
+        .split(['?', '/'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("tsd_test");
     let scope = Scope::new(format!(
         "purge_{label}_{}_{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ))
     .unwrap();
-    Some((
-        MongoStorage::connect(&url, "tsd_test").await.unwrap(),
-        scope,
-    ))
+    Some((MongoStorage::connect(&url, database).await.unwrap(), scope))
 }
 
 fn port(backend: &MongoStorage, scope: &Scope) -> MongoPurge {
@@ -218,6 +222,7 @@ fn namespace_ownership_excludes_metadata_and_sibling_databases() {
         META,
         ADMISSIONS,
         MANIFEST,
+        RECEIPTS,
         "_tsd_blobs.files",
         "_tsd_blobs.chunks",
         "system.views",
@@ -228,6 +233,94 @@ fn namespace_ownership_excludes_metadata_and_sibling_databases() {
     assert!(owns_records("named:", "named:records"));
     assert!(!owns_records("named:", "records"));
     assert!(!owns_records("named:", "sibling:records"));
+}
+
+#[tokio::test]
+async fn historical_receipts_backfill_and_survive_an_independent_reconnection() {
+    let Some((backend, scope)) = live("history_restart").await else {
+        return;
+    };
+    let name = format!("history_{}", scope.as_str());
+    let target = backend.fixture_named(&name).unwrap();
+    let first = PurgeRequest {
+        operation_id: "first".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let second = PurgeRequest {
+        operation_id: "second".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let original = target.for_scope(&scope).unwrap();
+    let receipt = original.purge(&first).await.unwrap();
+    // Simulate a completed reset written before the historical receipt schema.
+    target
+        .shared
+        .raw(RECEIPTS)
+        .delete_one(doc! {"_id": {"s": scope.as_str(), "o": &first.operation_id}})
+        .await
+        .unwrap();
+    let next = target
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    let second_receipt = next.purge(&second).await.unwrap();
+    let current = target
+        .for_scope_generation(&scope, second_receipt.generation)
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "replacement",
+            json!({"keep":true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    current
+        .streams()
+        .append("events", json!({"keep":true}))
+        .await
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![7], None)
+        .await
+        .unwrap();
+    drop((original, next, current, target, backend));
+
+    let reconnected = live("history_reconnect")
+        .await
+        .unwrap()
+        .0
+        .fixture_named(&name)
+        .unwrap();
+    let current = reconnected
+        .for_scope_generation(&scope, second_receipt.generation)
+        .unwrap();
+    assert_eq!(
+        current.purge_status(&first.operation_id).await.unwrap(),
+        Some(receipt.clone())
+    );
+    assert_eq!(current.purge(&first).await.unwrap(), receipt);
+    assert!(
+        current
+            .documents()
+            .get("records", "replacement")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(current.streams().len("events").await.unwrap(), 1);
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        vec![7]
+    );
 }
 
 #[tokio::test]

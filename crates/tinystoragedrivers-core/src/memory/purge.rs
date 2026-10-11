@@ -39,11 +39,10 @@ impl ScopePurge for MemoryPurge {
             0
         };
         self.db.guard(&state, self.fence.as_deref(), now)?;
-        if let Some((generation, operation)) = state.admissions.get(self.scope.as_str())
-            && operation == &request.operation_id
-        {
+        let receipt_key = (self.scope.as_str().to_owned(), request.operation_id.clone());
+        if let Some(generation) = state.purge_receipts.get(&receipt_key) {
             return Ok(PurgeReceipt {
-                operation_id: operation.clone(),
+                operation_id: request.operation_id.clone(),
                 generation: *generation,
                 status: PurgeStatus::Complete,
                 stage: crate::PurgeStage::Complete,
@@ -65,6 +64,7 @@ impl ScopePurge for MemoryPurge {
             self.scope.as_str().to_owned(),
             (generation, request.operation_id.clone()),
         );
+        state.purge_receipts.insert(receipt_key, generation);
         Ok(PurgeReceipt {
             operation_id: request.operation_id.clone(),
             generation,
@@ -81,11 +81,10 @@ impl ScopePurge for MemoryPurge {
         };
         self.db.guard(&state, self.fence.as_deref(), now)?;
         Ok(state
-            .admissions
-            .get(self.scope.as_str())
-            .filter(|(_, operation)| operation == operation_id)
-            .map(|(generation, operation)| PurgeReceipt {
-                operation_id: operation.clone(),
+            .purge_receipts
+            .get(&(self.scope.as_str().to_owned(), operation_id.to_owned()))
+            .map(|generation| PurgeReceipt {
+                operation_id: operation_id.to_owned(),
                 generation: *generation,
                 status: PurgeStatus::Complete,
                 stage: crate::PurgeStage::Complete,
