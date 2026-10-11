@@ -69,7 +69,10 @@ jobs:
         run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests -- --nocapture
       - name: Exercise the actual Windows finite diagnostic launcher
         if: ${{ runner.os == 'Windows' }}
-        run: python .github/scripts/check-native-user-denial.py --check-windows-diagnostic-launcher
+        run: |
+          python .github/scripts/native_user_denial_tests.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/check-native-user-denial.py --check-windows-diagnostic-launcher
       - name: Actual separate standard user cannot read key data or either lock
         run: python .github/scripts/check-native-user-denial.py
       - name: Native strict secrets lint

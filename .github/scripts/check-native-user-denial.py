@@ -53,9 +53,16 @@ function Classify($sid,$owner) {
  return 'Other'
 }
 $stage='Paths'
-$paths=@(ConvertFrom-Json -InputObject $env:TSD_ACL_DIAGNOSTIC_PATHS)
+# Direct assignment keeps Windows PowerShell's root array, without collecting
+# it into a second array. Invalid input must fail before any literal-path read.
+try { $paths=ConvertFrom-Json -InputObject $env:TSD_ACL_DIAGNOSTIC_PATHS }
+catch { $paths=$null }
 $roles=@('Volume','Outer','Private')
-if($paths.Count -ne 3){
+$validPaths=($paths -is [array] -and $paths.Count -eq 3)
+foreach($path in $paths) {
+ if($path -isnot [string] -or $path.Length -eq 0){$validPaths=$false}
+}
+if(-not $validPaths -or $paths.Count -ne 3){
  ConvertTo-Json -Compress -InputObject @{status='ScriptFailed';stage='Paths';category='InvalidArgument'}
  exit 21
 }

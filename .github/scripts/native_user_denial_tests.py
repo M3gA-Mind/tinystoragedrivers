@@ -1,6 +1,7 @@
 """Finite diagnostic parsing and isolation; these are not native ACL proofs."""
 import importlib.util
 import json
+import os
 from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
@@ -264,6 +265,66 @@ class FiniteAclDiagnostics(unittest.TestCase):
         isolated = importlib.util.module_from_spec(spec)
         with patch.object(subprocess, "run", side_effect=AssertionError("import executed a subprocess")):
             spec.loader.exec_module(isolated)
+
+
+@unittest.skipUnless(os.name == "nt", "requires the actual native Windows PowerShell launcher")
+class NativeWindowsPathDecoder(unittest.TestCase):
+    def capture_paths(self, paths, outer, private, evidence):
+        """Replace only environment data, leaving the real helper launcher intact."""
+        run = probe.subprocess.run
+
+        def native_run(args, **kwargs):
+            self.assertTrue(args == ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                     probe.ACL_DIAGNOSTIC_SCRIPT], "native launcher changed")
+            self.assertTrue(kwargs["timeout"] == 30, "native launcher timeout changed")
+            kwargs["env"] = {**kwargs["env"], "TSD_ACL_DIAGNOSTIC_PATHS": paths}
+            result = run(args, **kwargs)
+            # Assertions expose only fixed messages, never the captured streams.
+            self.assertTrue(not result.stderr.strip(), "native decoder emitted unexpected stderr")
+            self.assertTrue("TSD_PRIVATE_SENTINEL" not in result.stdout,
+                            "native decoder disclosed input data")
+            self.assertTrue("S-1-" not in result.stdout, "native decoder disclosed an identity")
+            return result
+
+        with patch.object(probe.subprocess, "run", side_effect=native_run):
+            record = probe.capture_windows_setup_diagnostics(outer, private, "", evidence)
+        saved = (evidence / "fixture-acl-diagnostics.json").read_text()
+        self.assertTrue("TSD_PRIVATE_SENTINEL" not in saved, "saved diagnostic disclosed input data")
+        probe.validate_diagnostic_record(record)
+        return record
+
+    def test_three_strings_preserve_literal_paths_and_ordinal_order(self):
+        with tempfile.TemporaryDirectory(prefix="tsd-decoder-") as name:
+            outer = Path(name)
+            private = outer / "TSD_PRIVATE_SENTINEL ' [literal] $(Write-Output LEAK)"
+            private.mkdir()
+            file = private / "file ' [literal] $(Write-Output LEAK)"
+            file.write_text("public decoder fixture\n")
+            missing = private / "absent ' [literal] $(Write-Output LEAK)"
+            record = self.capture_paths(json.dumps([str(file), str(missing), str(private)]),
+                                        outer, private, outer)
+            self.assertEqual(record["diagnostic_status"], "Observed")
+            segments = record["segments"]
+            self.assertEqual([segment["status"] for segment in segments],
+                             ["Observed", "Missing", "Observed"])
+            self.assertFalse(segments[0]["directory"])
+            self.assertTrue(segments[2]["directory"])
+
+    def test_nonflat_nonstring_wrong_count_and_malformed_json_fail_before_acl_reads(self):
+        sentinel = "TSD_PRIVATE_SENTINEL ' [literal] $(Write-Output LEAK)"
+        values = [None, sentinel, {"path": sentinel}, [], [sentinel], [sentinel] * 2,
+                  [sentinel] * 4, [[sentinel] * 3], [[sentinel], sentinel, sentinel],
+                  [1, sentinel, sentinel], [None, sentinel, sentinel],
+                  [{"path": sentinel}, sentinel, sentinel], ["", sentinel, sentinel]]
+        texts = [json.dumps(value) for value in values] + ['["TSD_PRIVATE_SENTINEL",', "not json"]
+        with tempfile.TemporaryDirectory(prefix="tsd-decoder-") as name:
+            outer = Path(name)
+            for case, paths in enumerate(texts):
+                with self.subTest(case=case):
+                    record = self.capture_paths(paths, outer, outer / "private", outer)
+                    self.assertEqual(record, {"source_phase": "OtherSetupFailure", "diagnostic_version": 1,
+                                              "executable_resolution": "Resolved", "diagnostic_status": "ProcessFailed",
+                                              "return_code": 21, "failure_stage": "Paths", "error_category": "InvalidArgument"})
 
 
 if __name__ == "__main__":
