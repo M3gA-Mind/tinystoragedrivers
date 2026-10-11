@@ -293,6 +293,64 @@ fn named_source_replacement_after_read_is_rejected() {
     assert_eq!(inventory(&dir), ["registered"]);
 }
 
+#[test]
+fn same_byte_named_substitution_preserves_both_objects_and_fails_identity_check() {
+    use std::error::Error;
+    let (_root, dir) = directory();
+    let path = dir.join("registered");
+    let replacement = dir.join("replacement");
+    let preserved = dir.join("preserved-original");
+    fixture(&path, &encoded());
+    fixture(&replacement, &encoded());
+    let original_file = File::open(&path).unwrap();
+    let replacement_file = File::open(&replacement).unwrap();
+    let original_id = secure::identity(&original_file).unwrap();
+    let replacement_id = secure::identity(&replacement_file).unwrap();
+    assert_ne!(original_id, replacement_id);
+
+    let error = read_checked(&path, &mut |checkpoint| {
+        if matches!(checkpoint, Checkpoint::Read) {
+            std::fs::rename(&path, &preserved).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert_eq!(error.message(), "protected key source identity changed");
+    assert!(error.source().is_none());
+    let diagnostics = format!("{error} {error:?}");
+    for sensitive in ["registered", "preserved-original", "AbAb"] {
+        assert!(!diagnostics.contains(sensitive));
+    }
+    for file in [&original_file, &replacement_file] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(file.metadata().unwrap().nlink(), 1);
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            winapi_util::file::information(file)
+                .unwrap()
+                .number_of_links(),
+            1
+        );
+    }
+    assert_eq!(secure::identity(&original_file).unwrap(), original_id);
+    assert_eq!(secure::identity(&replacement_file).unwrap(), replacement_id);
+    assert_eq!(
+        secure::identity(&File::open(&preserved).unwrap()).unwrap(),
+        original_id
+    );
+    assert_eq!(
+        secure::identity(&File::open(&path).unwrap()).unwrap(),
+        replacement_id
+    );
+    assert_eq!(std::fs::read(&preserved).unwrap(), encoded().as_slice());
+    assert_eq!(std::fs::read(&path).unwrap(), encoded().as_slice());
+    assert_eq!(inventory(&dir), ["preserved-original", "registered"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn unsafe_modes_and_symlink_sources_are_rejected_without_repair() {
@@ -470,6 +528,31 @@ fn native_owner(file: &File) -> String {
 }
 
 #[cfg(windows)]
+fn native_effective_user() -> String {
+    let token = match winsafe::HTHREAD::GetCurrentThread()
+        .OpenThreadToken(winsafe::co::TOKEN::QUERY, true)
+    {
+        Ok(token) => token,
+        Err(error) => {
+            assert!(
+                error == winsafe::co::ERROR::NO_TOKEN,
+                "cannot inspect effective fixture identity"
+            );
+            winsafe::HPROCESS::GetCurrentProcess()
+                .OpenProcessToken(winsafe::co::TOKEN::QUERY)
+                .unwrap()
+        }
+    };
+    let winsafe::TokenInfo::User(user) = token
+        .GetTokenInformation(winsafe::co::TOKEN_INFORMATION_CLASS::User)
+        .unwrap()
+    else {
+        panic!("native token did not return its user");
+    };
+    winsafe::ConvertSidToStringSid(user.User.Sid().unwrap()).unwrap()
+}
+
+#[cfg(windows)]
 fn native_acl(path: &Path, sddl: &str) {
     use windows_permissions::{
         LocalBox, SecurityDescriptor,
@@ -592,8 +675,8 @@ fn native_junction_ancestor_is_rejected_without_source_mutation() {
 #[test]
 fn native_owner_only_inherited_dacl_is_admitted_without_repair() {
     use std::io::Write;
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_permissions::constants::AceFlags;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_permissions::constants::{AceFlags, AceType};
     let (_root, dir) = directory();
     let directory = std::fs::OpenOptions::new()
         .read(true)
@@ -612,6 +695,31 @@ fn native_owner_only_inherited_dacl_is_admitted_without_repair() {
     file.write_all(&encoded()).unwrap();
     let descriptor = native_descriptor(&file);
     let acl = descriptor.dacl().unwrap();
+    let effective_user = native_effective_user();
+    let ace = acl.get_ace(0);
+    let ace_user = ace
+        .and_then(|ace| ace.sid())
+        .and_then(|sid| windows_permissions::wrappers::ConvertSidToStringSid(sid).ok())
+        .and_then(|sid| sid.into_string().ok());
+    let metadata = file.metadata().unwrap();
+    eprintln!(
+        "NATIVE_INHERITED_FIXTURE owner_current_user_match={} regular={} no_reparse={} single_link={} acl_count_one={} ace_allowed={} ace_inherited={} ace_not_inherit_only={} ace_full_mask={} ace_current_user_match={} direct_file_floor_accepted={} namespace_accepted={}",
+        native_owner(&file) == effective_user,
+        metadata.is_file(),
+        metadata.file_attributes() & 0x400 == 0,
+        winapi_util::file::information(&file)
+            .unwrap()
+            .number_of_links()
+            == 1,
+        acl.len() == 1,
+        ace.is_some_and(|ace| ace.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE),
+        ace.is_some_and(|ace| ace.flags().contains(AceFlags::Inherited)),
+        ace.is_some_and(|ace| !ace.flags().contains(AceFlags::InheritOnly)),
+        ace.is_some_and(|ace| ace.mask().bits() == 0x001f_01ff),
+        ace_user.as_deref() == Some(effective_user.as_str()),
+        super::super::windows::verify_file(&file).is_ok(),
+        super::super::windows::Namespace::open(&dir, false).is_ok(),
+    );
     assert_eq!(acl.len(), 1);
     assert!(
         acl.get_ace(0)
