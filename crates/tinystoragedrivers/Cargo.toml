@@ -54,6 +54,8 @@ file = ["dep:tinystoragedrivers-file"]
 secrets = ["dep:tinystoragedrivers-secrets"]
 # `secrets::KeyringSecrets`, over the native OS credential stores.
 keyring = ["secrets", "tinystoragedrivers-secrets/keyring"]
+# Opt-in explicit Linux Secret Service provider.
+keyring-secret-service = ["keyring", "tinystoragedrivers-secrets/keyring-secret-service"]
 # `mongodb://…/<db>` and `mongodb+srv://…/<db>` URLs: the multi-tenant MongoDB
 # driver.
 mongodb = ["dep:tinystoragedrivers-mongodb"]

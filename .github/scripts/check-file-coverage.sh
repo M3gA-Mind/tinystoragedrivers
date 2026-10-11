@@ -21,6 +21,7 @@ cargo llvm-cov \
 # this full-workspace report, just as the dedicated native secrets lane does.
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
+python3 .github/scripts/check-native-secret-service.py --coverage
 cargo llvm-cov report --json --output-path "$report"
 
 covered_files="$(jq --arg source_root "$source_root" '

@@ -48,6 +48,7 @@
 //! # Features
 //!
 //! - `keyring`: `KeyringSecrets`, over the `keyring` crate's native stores.
+//! - `keyring-secret-service`: explicit Linux Secret Service with encrypted D-Bus sessions.
 //! - `kms-aws`: `AwsKms`, AWS KMS with `SigV4` and refreshable credentials.
 //! - `kms-gcp`: `GcpKms`, Google Cloud KMS with scope AAD and refreshable tokens.
 //! - `testkit`: `testkit::secrets_conformance`, the suite every driver runs.
