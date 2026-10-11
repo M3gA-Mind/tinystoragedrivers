@@ -152,7 +152,8 @@ fn read_checked(
             "protected key source identity changed",
         ));
     }
-    if read_bounded(&mut reopened)? != bytes {
+    let readback = read_bounded(&mut reopened)?;
+    if readback != bytes {
         return Err(StorageError::backend("protected key source bytes changed"));
     }
     verify_file(&file)?;
@@ -176,16 +177,33 @@ fn verify_file(file: &File) -> Result<()> {
 }
 
 fn read_bounded(reader: &mut impl Read) -> Result<Zeroizing<Vec<u8>>> {
-    let mut bytes = Zeroizing::new(Vec::new());
-    reader
-        .take(MAX_HEX_KEY_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(native_error)?;
-    if bytes.len() > MAX_HEX_KEY_FILE_BYTES {
+    let limit = MAX_HEX_KEY_FILE_BYTES + 1;
+    // Allocate and initialize before any plaintext arrives. Direct slice reads
+    // avoid read_to_end's stack probe and Vec growth with retired key copies.
+    let mut bytes = Zeroizing::new(vec![0; limit]);
+    let mut used = 0;
+    while used < limit {
+        match reader.read(&mut bytes[used..limit]) {
+            Ok(0) => break,
+            Ok(count) => {
+                if count > limit - used {
+                    return Err(StorageError::backend(
+                        "protected key source reader exceeded destination",
+                    ));
+                }
+                used += count;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(native_error(error)),
+        }
+    }
+    if used > MAX_HEX_KEY_FILE_BYTES {
         return Err(StorageError::invalid_input(
             "protected key source exceeds size bound",
         ));
     }
+    // Truncation changes only the logical length; it never reallocates.
+    bytes.truncate(used);
     Ok(bytes)
 }
 

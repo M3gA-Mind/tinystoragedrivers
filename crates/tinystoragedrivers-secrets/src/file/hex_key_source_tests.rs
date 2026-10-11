@@ -643,3 +643,153 @@ fn native_unsupported_unc_namespace_is_error_without_network_discovery() {
     assert!(error.source().is_none());
     assert!(!format!("{error:?}").contains("synthetic-invalid"));
 }
+
+struct ObservedReader {
+    bytes: Zeroizing<Vec<u8>>,
+    used: usize,
+    spans: Vec<(usize, usize, usize)>,
+    chunk: usize,
+    interrupted: bool,
+}
+
+impl ObservedReader {
+    fn new(length: usize, chunk: usize) -> Self {
+        let mut bytes = Zeroizing::new(vec![b' '; length]);
+        if length >= 64 {
+            bytes[..64].copy_from_slice(&encoded());
+        }
+        Self {
+            bytes,
+            used: 0,
+            spans: Vec::new(),
+            chunk,
+            interrupted: false,
+        }
+    }
+}
+
+impl Read for ObservedReader {
+    fn read(&mut self, destination: &mut [u8]) -> std::io::Result<usize> {
+        self.spans
+            .push((destination.as_ptr() as usize, destination.len(), self.used));
+        if self.interrupted {
+            self.interrupted = false;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let count = destination
+            .len()
+            .min(self.chunk)
+            .min(self.bytes.len() - self.used);
+        destination[..count].copy_from_slice(&self.bytes[self.used..self.used + count]);
+        self.used += count;
+        Ok(count)
+    }
+}
+
+#[test]
+fn encoded_reads_use_one_full_zeroizing_allocation_from_the_first_read() {
+    // Exercise the production helper used by both initial read and readback.
+    // Only compare addresses recorded during live reads; never dereference them.
+    for length in [64, MAX_HEX_KEY_FILE_BYTES] {
+        for _pass in 0..2 {
+            let mut reader = ObservedReader::new(length, 17);
+            reader.interrupted = true;
+            let bytes = read_bounded(&mut reader).unwrap();
+            assert!(bytes.as_slice() == reader.bytes.as_slice());
+            validate(&bytes).unwrap();
+            let limit = MAX_HEX_KEY_FILE_BYTES + 1;
+            assert!(
+                reader.spans[0].1 == limit,
+                "first read must receive the full bounded allocation"
+            );
+            let base = bytes.as_ptr() as usize;
+            assert!(
+                reader
+                    .spans
+                    .iter()
+                    .all(|&(address, span, used)| address == base + used && span == limit - used),
+                "every read must stay inside the original allocation"
+            );
+            assert!(bytes.capacity() >= limit);
+            assert!(reader.used == length);
+        }
+    }
+}
+
+#[test]
+fn bounded_short_reads_stop_at_eof_or_the_single_overflow_byte() {
+    for length in [
+        0,
+        64,
+        MAX_HEX_KEY_FILE_BYTES,
+        MAX_HEX_KEY_FILE_BYTES + 1,
+        MAX_HEX_KEY_FILE_BYTES * 2,
+    ] {
+        let mut reader = ObservedReader::new(length, 13);
+        let result = read_bounded(&mut reader);
+        assert!(reader.used == length.min(MAX_HEX_KEY_FILE_BYTES + 1));
+        if length <= MAX_HEX_KEY_FILE_BYTES {
+            assert!(result.unwrap().as_slice() == reader.bytes.as_slice());
+        } else {
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+        }
+    }
+}
+
+struct ErroredRead {
+    first: bool,
+    panic_after_read: bool,
+}
+
+impl Read for ErroredRead {
+    fn read(&mut self, destination: &mut [u8]) -> std::io::Result<usize> {
+        if self.first {
+            self.first = false;
+            let count = destination.len().min(64);
+            destination[..count].copy_from_slice(&encoded()[..count]);
+            return Ok(count);
+        }
+        assert!(!self.panic_after_read, "synthetic reader panic");
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "synthetic-private-payload",
+        ))
+    }
+}
+
+#[test]
+fn reader_errors_after_partial_key_are_content_free_and_panic_unwinds() {
+    use std::error::Error;
+    // Error and unwind paths drop the helper's owned Zeroizing allocation;
+    // inspecting freed storage would be invalid and is deliberately avoided.
+    let mut reader = ErroredRead {
+        first: true,
+        panic_after_read: false,
+    };
+    let error = read_bounded(&mut reader).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(error.source().is_none());
+    assert!(!format!("{error} {error:?}").contains("synthetic-private-payload"));
+    let mut reader = ErroredRead {
+        first: true,
+        panic_after_read: true,
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_bounded(&mut reader)))
+            .is_err()
+    );
+}
+
+#[test]
+fn reader_reporting_more_than_its_destination_is_rejected() {
+    struct InvalidCount;
+    impl Read for InvalidCount {
+        fn read(&mut self, destination: &mut [u8]) -> std::io::Result<usize> {
+            Ok(destination.len() + 1)
+        }
+    }
+    assert_eq!(
+        read_bounded(&mut InvalidCount).unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
