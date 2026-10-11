@@ -24,6 +24,7 @@ mod purge;
 mod purge_history;
 mod streams;
 mod validated;
+mod watch;
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -50,6 +51,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         .expect("for_scope(local) must succeed");
     documents::run(&local).await;
     validated::run(&local).await;
+    watch::run(&local).await;
     streams::run(&local).await;
     blobs::run(&local).await;
     if single_scope {

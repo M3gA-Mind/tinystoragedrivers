@@ -63,12 +63,10 @@ async fn fenced_composite_blobs_allow_reads_but_refuse_every_mutation() {
 }
 
 #[derive(Debug)]
-struct FullCapabilitiesBlobs(BackendBlobs);
-impl BlobBackend for FullCapabilitiesBlobs {
+struct OverclaimingBlobs(BackendBlobs);
+impl BlobBackend for OverclaimingBlobs {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
-            .with(Capability::ScopePurge)
-            .with(Capability::AtomicScopePurge)
+        Capabilities::all()
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         self.0.for_scope(scope)
@@ -78,6 +76,49 @@ impl BlobBackend for FullCapabilitiesBlobs {
     }
 }
 
+#[derive(Debug)]
+struct MaskedRecords(MemoryStorage);
+impl StorageBackend for MaskedRecords {
+    fn driver(&self) -> &'static str {
+        "masked-memory"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
+        self.0.database(name)
+    }
+}
+
+#[test]
+fn blob_backend_cannot_invent_document_watch_or_transaction_capabilities() {
+    let records = Arc::new(MaskedRecords(MemoryStorage::new()));
+    let blobs = Arc::new(OverclaimingBlobs(BackendBlobs::new(Arc::new(
+        MemoryStorage::new(),
+    ))));
+    let composite = CompositeStorage::new(records.clone(), blobs);
+    for cap in [
+        Capability::Watch,
+        Capability::FullText,
+        Capability::ValidatedBatch,
+        Capability::Fencing,
+    ] {
+        assert_eq!(
+            composite.capabilities().contains(cap),
+            records.capabilities().contains(cap)
+        );
+    }
+    assert!(
+        composite
+            .capabilities()
+            .contains(Capability::StreamingBlobs)
+    );
+    assert!(composite.capabilities().contains(Capability::PresignedUrls));
+}
+
 #[tokio::test]
 async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
     use crate::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};
@@ -85,7 +126,7 @@ async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
     let blobs = Arc::new(MemoryStorage::new());
     let backend = CompositeStorage::new(
         records.clone(),
-        Arc::new(FullCapabilitiesBlobs(BackendBlobs::new(blobs.clone()))),
+        Arc::new(OverclaimingBlobs(BackendBlobs::new(blobs.clone()))),
     );
     let scope = Scope::local();
     let bound = backend.for_scope(&scope).unwrap();

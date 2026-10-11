@@ -38,6 +38,7 @@ fn all_holds_every_capability() {
             Capability::ValidatedBatch,
             Capability::ScopePurge,
             Capability::AtomicScopePurge,
+            Capability::Watch,
         ]
     );
 }
@@ -79,6 +80,7 @@ fn renders_names() {
         (Capability::CollectionValidation, "collection_validation"),
         (Capability::ScopePurge, "scope_purge"),
         (Capability::AtomicScopePurge, "atomic_scope_purge"),
+        (Capability::Watch, "watch"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }
@@ -86,4 +88,13 @@ fn renders_names() {
         format!("{:?}", Capabilities::none().with(Capability::Ttl)),
         "{Ttl}"
     );
+}
+
+#[test]
+fn each_capability_is_independent_of_every_other_capability() {
+    for capability in Capabilities::all().iter() {
+        let singleton = Capabilities::none().with(capability);
+        assert_eq!(singleton.iter().collect::<Vec<_>>(), vec![capability]);
+        assert_eq!(singleton.without(capability), Capabilities::none());
+    }
 }
