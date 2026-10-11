@@ -79,9 +79,12 @@ pub(super) async fn run(storage: &ScopedStorage) {
 
 /// Build a key of exactly the announced byte limit with small path segments,
 /// so local filesystems do not reject one overly long filename component.
-fn boundary_key(limit: usize, utf8: bool) -> String {
-    let mut key = String::new();
-    let mut segment = 0;
+pub(super) fn boundary_key(limit: usize, utf8: bool) -> String {
+    // Boundary checks share a blob namespace when conformance runs overlap.
+    // Keep their writes and cleanup independent, just like ordinary blob keys.
+    let mut key = unique("boundary");
+    key.truncate(limit);
+    let mut segment = key.len();
     while key.len() < limit {
         let remaining = limit - key.len();
         if segment >= 60 && remaining > 1 {
