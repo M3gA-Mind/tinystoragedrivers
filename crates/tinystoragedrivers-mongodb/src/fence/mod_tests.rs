@@ -393,3 +393,286 @@ async fn live_cross_database_guard_snapshot_cannot_survive_a_takeover() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn live_changed_dependency_prevents_checked_batch_claim() {
+    let Some(backend) = live("live_changed_dependency_prevents_checked_batch_claim").await else {
+        return;
+    };
+    if !backend.capabilities().contains(Capability::Transactions) {
+        return;
+    }
+    let scope = backend.for_scope(&Scope::local()).unwrap();
+    let docs = scope.documents();
+    let collection = unique("checked_dependency");
+    let version = docs
+        .put(
+            &collection,
+            "dep",
+            json!({"done":true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    docs.put(
+        &collection,
+        "dep",
+        json!({"done":false}),
+        Precondition::None,
+    )
+    .await
+    .unwrap();
+    let error = docs
+        .atomic_batch_checked(
+            vec![tinystoragedrivers_core::ReadCheck {
+                collection: collection.clone(),
+                id: "dep".into(),
+                expected: tinystoragedrivers_core::ExpectedDocument::Version(version),
+            }],
+            vec![tinystoragedrivers_core::WriteOp::Put {
+                collection: collection.clone(),
+                id: "claim".into(),
+                doc: json!({}),
+                precondition: Precondition::Absent,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert!(docs.get(&collection, "claim").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn live_forced_off_writer_conflicts_with_a_checked_dependency_snapshot() {
+    let Some(backend) =
+        live("live_forced_off_writer_conflicts_with_a_checked_dependency_snapshot").await
+    else {
+        return;
+    };
+    if !backend.capabilities().contains(Capability::ValidatedBatch) {
+        return;
+    }
+    let collection = unique("checked_snapshot");
+    let scope = Scope::local();
+    let docs = backend.for_scope(&scope).unwrap();
+    let version = docs
+        .documents()
+        .put(
+            &collection,
+            "dep",
+            json!({"done":true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let mut session = backend.shared.client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // Pin the dependency snapshot, then pause before its metadata lock.
+    let stored = backend
+        .shared
+        .raw(&collection)
+        .find_one(doc! {"_id": document_id(&scope, "dep")})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(Stored::decode(&stored).unwrap().version, version);
+    let forced_off = live("independent forced-off writer")
+        .await
+        .unwrap()
+        .without_transactions();
+    assert!(
+        !forced_off
+            .capabilities()
+            .contains(Capability::ValidatedBatch)
+    );
+    forced_off
+        .for_scope(&scope)
+        .unwrap()
+        .documents()
+        .put(
+            &collection,
+            "dep",
+            json!({"done":false}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    // Even the forced-off handle must have moved the shared metadata lock:
+    // this stale snapshot cannot acquire it and commit a dependent claim.
+    let outcome =
+        crate::documents::MongoDocuments::new(Arc::clone(&backend.shared), scope.clone(), None)
+            .hold_validation(&mut session)
+            .await;
+    session.abort_transaction().await.unwrap();
+    let error = outcome.unwrap_err();
+    assert!(error.is_retryable(), "{error}");
+    let result = docs
+        .documents()
+        .atomic_batch_checked(
+            vec![tinystoragedrivers_core::ReadCheck {
+                collection: collection.clone(),
+                id: "dep".into(),
+                expected: tinystoragedrivers_core::ExpectedDocument::Version(version),
+            }],
+            vec![tinystoragedrivers_core::WriteOp::Put {
+                collection: collection.clone(),
+                id: "claim".into(),
+                doc: json!({}),
+                precondition: Precondition::Absent,
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(result.kind(), ErrorKind::Conflict);
+    assert!(
+        docs.documents()
+            .get(&collection, "claim")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn live_unrelated_scope_does_not_invalidate_dependency_snapshot() {
+    let Some(backend) = live("live_unrelated_scope_does_not_invalidate_dependency_snapshot").await
+    else {
+        return;
+    };
+    if !backend.capabilities().contains(Capability::ValidatedBatch) {
+        return;
+    }
+    let collection = unique("scope_validation");
+    let a = Scope::new(unique("scope_a")).unwrap();
+    let b = Scope::new(unique("scope_b")).unwrap();
+    let first = backend.for_scope(&a).unwrap();
+    let second = backend.for_scope(&b).unwrap();
+    first
+        .documents()
+        .put(&collection, "dep", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    second
+        .documents()
+        .put(&collection, "dep", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    let mut session = backend.shared.client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    backend
+        .shared
+        .raw(&collection)
+        .find_one(doc! {"_id": document_id(&a, "dep")})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    second
+        .documents()
+        .put(
+            &collection,
+            "dep",
+            json!({"changed":true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    backend
+        .shared
+        .hold_validation(Some(&a), &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_every_document_mutator_invalidates_a_dependency_snapshot() {
+    use tinystoragedrivers_core::{CollectionSpec, Filter, IndexSpec};
+    let Some(backend) = live("live_every_document_mutator_invalidates_a_dependency_snapshot").await
+    else {
+        return;
+    };
+    if !backend.capabilities().contains(Capability::ValidatedBatch) {
+        return;
+    }
+    let scope = Scope::new(unique("mutation_scope")).unwrap();
+    let ports = backend.for_scope(&scope).unwrap();
+    let docs = ports.documents();
+    for action in [
+        "delete",
+        "delete_where",
+        "drop",
+        "claim",
+        "sweep",
+        "schema",
+        "retire",
+    ] {
+        let collection = unique(action);
+        docs.ensure_collection(&CollectionSpec::new(&collection).ttl("exp"))
+            .await
+            .unwrap();
+        docs.put(
+            &collection,
+            "dep",
+            json!({"exp":1,"done":false}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+        let mut session = backend.shared.client.start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        backend
+            .shared
+            .raw("_tsd_validated_batch")
+            .find_one(doc! {"_id": format!("scope:{}", scope.as_str())})
+            .session(&mut session)
+            .await
+            .unwrap()
+            .unwrap();
+        match action {
+            "delete" => {
+                docs.delete(&collection, "other", Precondition::None)
+                    .await
+                    .unwrap();
+            }
+            "delete_where" => {
+                docs.delete_where(&collection, &Filter::All).await.unwrap();
+            }
+            "drop" => {
+                docs.drop_collection(&collection).await.unwrap();
+            }
+            "claim" => {
+                docs.claim(&collection, &Filter::All, &[], &json!({"claimed":true}))
+                    .await
+                    .unwrap();
+            }
+            "sweep" => {
+                backend.sweep_expired(&scope, &collection).await.unwrap();
+            }
+            "schema" => {
+                docs.ensure_collection(
+                    &CollectionSpec::new(&collection).index(IndexSpec::new("done", ["done"])),
+                )
+                .await
+                .unwrap();
+            }
+            "retire" => {
+                docs.ensure_collection(
+                    &CollectionSpec::new(&collection)
+                        .index(IndexSpec::new("done", ["done"]).unique()),
+                )
+                .await
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let outcome = backend
+            .shared
+            .hold_validation(Some(&scope), &mut session)
+            .await;
+        session.abort_transaction().await.unwrap();
+        let error = outcome.unwrap_err();
+        assert!(error.is_retryable(), "{action}: {error}");
+    }
+}

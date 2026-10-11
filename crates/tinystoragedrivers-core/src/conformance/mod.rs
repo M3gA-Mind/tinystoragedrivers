@@ -21,6 +21,7 @@ mod documents;
 mod fencing;
 mod isolation;
 mod streams;
+mod validated;
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -46,6 +47,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
     documents::run(&local).await;
+    validated::run(&local).await;
     streams::run(&local).await;
     blobs::run(&local).await;
     if single_scope {
@@ -56,6 +58,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         );
     } else {
         isolation::run(backend).await;
+        validated::isolation(backend).await;
     }
     isolation::databases(backend).await;
     fencing::run(backend, single_scope).await;
