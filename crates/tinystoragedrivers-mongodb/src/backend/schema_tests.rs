@@ -29,7 +29,10 @@ fn default_fixture(fixture: &MongoStorage) -> MongoStorage {
     MongoStorage {
         shared: Arc::new(Shared::new(
             fixture.shared.client.clone(),
-            fixture.shared.db.clone(),
+            fixture.shared.client.database(&format!(
+                "tsd_schema_default_{}",
+                mongodb::bson::oid::ObjectId::new().to_hex()
+            )),
             String::new(),
             Arc::new(|| 0),
             fixture.shared.transactions,
@@ -40,6 +43,10 @@ fn default_fixture(fixture: &MongoStorage) -> MongoStorage {
 }
 
 async fn cleanup_fixture(storage: &MongoStorage, prefix: &str) {
+    if storage.shared.db.name().starts_with("tsd_schema_default_") {
+        storage.shared.db.drop().await.unwrap();
+        return;
+    }
     for name in storage.shared.db.list_collection_names().await.unwrap() {
         if name.starts_with(&format!("{prefix}:")) || name.starts_with(&format!("{prefix}_")) {
             storage
@@ -929,5 +936,89 @@ async fn live_existing_schema_purge_uses_prepared_internal_collections() {
     assert_eq!(
         outcome.unwrap().status,
         tinystoragedrivers_core::PurgeStatus::Complete
+    );
+}
+
+#[tokio::test]
+async fn live_existing_schema_watch_requires_persisted_collection_declaration() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let scope = Scope::local();
+    storage
+        .for_scope(&scope)
+        .unwrap()
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&scope)
+        .unwrap();
+    let options = tinystoragedrivers_core::WatchOptions::default();
+    let prepared = actor
+        .documents()
+        .watch("notes", &Filter::All, &options)
+        .await;
+    assert!(
+        prepared.is_ok(),
+        "prepared declarations permit restricted watches"
+    );
+    drop(prepared);
+    storage
+        .shared
+        .raw(crate::naming::META)
+        .delete_one(doc! {"_id": "notes"})
+        .await
+        .unwrap();
+    let before = storage.shared.db.list_collection_names().await.unwrap();
+    let mut outcomes = Vec::new();
+    for collection in ["notes", "never_declared"] {
+        let opened = actor
+            .documents()
+            .watch(collection, &Filter::All, &options)
+            .await;
+        outcomes.push(
+            opened
+                .as_ref()
+                .err()
+                .map(tinystoragedrivers_core::StorageError::kind),
+        );
+        drop(opened);
+    }
+    let mut before: Vec<_> = before
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    let mut after: Vec<_> = storage
+        .shared
+        .db
+        .list_collection_names()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    before.sort();
+    after.sort();
+    let metadata = storage
+        .shared
+        .raw(crate::naming::META)
+        .find_one(doc! {"_id": "notes"})
+        .await
+        .unwrap();
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcomes, vec![Some(ErrorKind::NotFound); 2]);
+    assert_eq!(
+        after, before,
+        "watch admission must not create native collections"
+    );
+    assert!(
+        metadata.is_none(),
+        "watch admission must not redeclare a collection"
     );
 }
