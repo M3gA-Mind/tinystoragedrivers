@@ -244,6 +244,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        validate_collection(collection)?;
         filter.validate()?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
@@ -270,6 +271,7 @@ impl DocumentStore for MemoryDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
+        validate_collection(collection)?;
         validate_doc(patch)?;
         Query {
             filter: filter.clone(),

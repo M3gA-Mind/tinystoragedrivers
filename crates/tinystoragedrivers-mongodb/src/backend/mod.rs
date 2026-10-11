@@ -440,17 +440,12 @@ impl StorageBackend for MongoStorage {
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation);
         if self.shared.transactions {
-            let fenced = base
-                .with(Capability::Transactions)
+            base.with(Capability::Transactions)
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
-                .with(Capability::CrossDatabaseFencing);
-            if self.shared.existing {
-                fenced
-            } else {
-                fenced.with(Capability::ScopePurge)
-            }
+                .with(Capability::CrossDatabaseFencing)
+                .with(Capability::ScopePurge)
         } else {
             base
         }
@@ -481,6 +476,8 @@ impl StorageBackend for MongoStorage {
         }
         for name in [
             "_tsd_validated_batch".to_owned(),
+            crate::purge::RECEIPTS.to_owned(),
+            crate::purge::MANIFEST.to_owned(),
             STREAMS.to_owned(),
             STREAM_HEADS.to_owned(),
             format!("{BLOBS}.files"),
@@ -601,14 +598,17 @@ impl StorageBackend for MongoStorage {
         self.for_scope_fenced_in_database(scope, fence, locator)?;
         let shared = match locator {
             GuardDatabase::Current => Arc::clone(&self.shared),
-            GuardDatabase::Default => Arc::new(Shared::new(
-                self.shared.client.clone(),
-                self.shared.db.clone(),
-                String::new(),
-                Arc::clone(&self.shared.clock),
-                true,
-                self.shared.physical_transactions,
-            )),
+            GuardDatabase::Default => Arc::new(
+                Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.db.clone(),
+                    String::new(),
+                    Arc::clone(&self.shared.clock),
+                    true,
+                    self.shared.physical_transactions,
+                )
+                .with_existing(self.shared.existing),
+            ),
             GuardDatabase::Named(name) => self.named(name)?,
         };
         Ok(self.handles_generation(

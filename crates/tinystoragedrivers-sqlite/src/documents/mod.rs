@@ -21,7 +21,7 @@ use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
     Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
-    WriteResult, async_trait, validate_doc, value,
+    WriteResult, async_trait, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::connection::Db;
@@ -210,6 +210,8 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        validate_collection(collection)?;
+        validate_id(id)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -228,6 +230,9 @@ impl DocumentStore for SqliteDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        validate_collection(collection)?;
+        validate_id(id)?;
+        validate_doc(&doc)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -240,6 +245,8 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        validate_collection(collection)?;
+        validate_id(id)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -252,12 +259,13 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
+        validate_collection(collection)?;
+        query.validate()?;
+        let start = parse_cursor(collection, query)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
         }
-        query.validate()?;
-        let start = parse_cursor(collection, query)?;
         let fingerprint = fingerprint(collection, query)?;
         let (collection, query) = (collection.to_owned(), query.clone());
         self.with(Access::Read, move |conn, ctx| {
@@ -274,6 +282,8 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        validate_collection(collection)?;
+        filter.validate()?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -286,6 +296,8 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        validate_collection(collection)?;
+        filter.validate()?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -304,11 +316,16 @@ impl DocumentStore for SqliteDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
+        validate_collection(collection)?;
+        filter.validate()?;
+        for order in sort {
+            Filter::exists(order.field.clone(), true).validate()?;
+        }
+        validate_doc(patch)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
         }
-        validate_doc(patch)?;
         let (collection, filter, sort, patch) = (
             collection.to_owned(),
             filter.clone(),
@@ -350,6 +367,27 @@ impl DocumentStore for SqliteDocuments {
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
+        for check in &checks {
+            check.validate()?;
+        }
+        for op in &ops {
+            match op {
+                WriteOp::Put {
+                    collection,
+                    id,
+                    doc,
+                    ..
+                } => {
+                    validate_collection(collection)?;
+                    validate_id(id)?;
+                    validate_doc(doc)?;
+                }
+                WriteOp::Delete { collection, id, .. } => {
+                    validate_collection(collection)?;
+                    validate_id(id)?;
+                }
+            }
+        }
         if self.existing {
             for check in &checks {
                 self.validate_collection_spec(&CollectionSpec::new(&check.collection))
@@ -393,6 +431,7 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        validate_collection(collection)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
@@ -410,6 +449,7 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
+        validate_collection(collection)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;

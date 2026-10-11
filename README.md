@@ -110,7 +110,7 @@ The design and its guarantees are in
 [`docs/specs/storage-ports.md`](docs/specs/storage-ports.md). The order in which
 drivers land and consumers migrate is in
 [`docs/plans/storage-rollout.md`](docs/plans/storage-rollout.md). Native restricted handles and trusted schema bootstrap are described in
-[`docs/specs/existing-schema.md`](docs/specs/existing-schema.md).
+[`docs/specs/existing-schema.md`](docs/specs/existing-schema.md). Restricted Mongo reset uses trusted prepared metadata; missing reset collections refuse before initialization or data erasure rather than being created by the restricted handle.
 
 ## Releases
 

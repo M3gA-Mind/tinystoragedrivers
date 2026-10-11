@@ -99,8 +99,8 @@ use tinystoragedrivers_core::{
     async_trait,
 };
 
-const MANIFEST: &str = "_tsd_purge_blobs";
-const RECEIPTS: &str = "_tsd_purge_receipts";
+pub(crate) const MANIFEST: &str = "_tsd_purge_blobs";
+pub(crate) const RECEIPTS: &str = "_tsd_purge_receipts";
 
 #[derive(Debug)]
 pub(crate) struct MongoPurge {
@@ -174,6 +174,11 @@ impl MongoPurge {
     }
 
     async fn begin(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
+        if self.shared.existing {
+            for collection in [RECEIPTS, MANIFEST] {
+                self.shared.require_collection(collection).await?;
+            }
+        }
         self.shared.prepare_validation(Some(&self.scope)).await?;
         // Initialize the internal collection before a transaction could need
         // to create it. This is trusted native reset metadata, never tenant data.
@@ -441,12 +446,6 @@ impl MongoPurge {
 impl ScopePurge for MongoPurge {
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
-        if self.shared.existing {
-            return Err(StorageError::unsupported(
-                Capability::ScopePurge,
-                "existing-schema handles cannot initialize reset metadata",
-            ));
-        }
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
                 Capability::ScopePurge,

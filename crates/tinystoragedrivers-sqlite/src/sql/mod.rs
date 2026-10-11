@@ -93,8 +93,6 @@ impl Tables {
                  generation INTEGER NOT NULL,
                  PRIMARY KEY (scope, operation)
              ) WITHOUT ROWID;
-             INSERT OR IGNORE INTO {purge_receipts} (scope, operation, generation)
-                 SELECT scope, operation, generation FROM {admissions};
              CREATE TABLE IF NOT EXISTS {docs} (
                  scope TEXT NOT NULL,
                  coll TEXT NOT NULL,
@@ -153,7 +151,11 @@ impl Tables {
 
     pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(&self.declaration_sql())
-            .map_err(during("create tables"))
+            .map_err(during("create tables"))?;
+        conn.execute_batch(&format!(
+            "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
+            ident(&self.purge_receipts), ident(&self.admissions),
+        )).map_err(during("migrate purge receipts"))
     }
     /// Inspect the exact driver layout without creating or migrating tables.
     pub(crate) fn validate(&self, conn: &Connection) -> Result<()> {
