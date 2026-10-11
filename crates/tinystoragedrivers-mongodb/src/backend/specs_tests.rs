@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::MongoStorage;
-use tinystoragedrivers_core::{Precondition, Scope, StorageBackend};
+use tinystoragedrivers_core::{Capability, Precondition, Scope, StorageBackend};
 
 #[tokio::test]
 async fn live_a_newer_search_declaration_retries_the_index_build_before_publication() -> Result<()>
@@ -21,6 +21,12 @@ async fn live_a_newer_search_declaration_retries_the_index_build_before_publicat
         .unwrap()
         .fixture_named(&fixture)
         .unwrap();
+    if !backend.capabilities().contains(Capability::Transactions) {
+        eprintln!(
+            "skipped transaction-dependent search declaration regression: standalone MongoDB"
+        );
+        return Ok(());
+    }
     assert_eq!(backend.shared.db.name(), configured);
     assert_eq!(backend.shared.prefix, format!("{fixture}:"));
     let name = "search_union";

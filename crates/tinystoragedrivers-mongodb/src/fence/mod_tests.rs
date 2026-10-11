@@ -710,6 +710,10 @@ async fn live_checked_dependencies_share_one_expiry_instant() {
     let Some(backend) = live("live_checked_dependencies_share_one_expiry_instant").await else {
         return;
     };
+    if !backend.capabilities().contains(Capability::Transactions) {
+        eprintln!("skipped transaction-dependent checked expiry regression: standalone MongoDB");
+        return;
+    }
     let calls = Arc::new(AtomicUsize::new(0));
     let clock = Arc::clone(&calls);
     let backend = backend.with_clock(Arc::new(move || {
