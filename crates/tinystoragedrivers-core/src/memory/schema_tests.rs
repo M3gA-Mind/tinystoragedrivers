@@ -5,6 +5,21 @@ use crate::{Capability, CollectionSpec, ErrorKind, Filter, GuardDatabase, Precon
 use serde_json::json;
 
 #[tokio::test]
+async fn existing_schema_rejects_malformed_collection_before_missing_declaration() {
+    let storage = MemoryStorage::new().existing_schema().unwrap();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    assert_eq!(
+        scoped
+            .documents()
+            .get("bad name", "n")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
 async fn existing_schema_reuses_declared_database_and_refuses_declaration() {
     let storage = MemoryStorage::new();
     storage.prepare_schema().await.unwrap();

@@ -80,6 +80,14 @@ pub(crate) fn file_index() -> IndexModel {
         .build()
 }
 
+/// GridFS requires one chunk per file ordinal, enforced by a unique index.
+pub(crate) fn chunk_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {"files_id": 1, "n": 1})
+        .options(IndexOptions::builder().unique(true).build())
+        .build()
+}
+
 /// MongoDB blobs bound to one scope.
 #[derive(Debug)]
 pub(crate) struct MongoBlobs {
@@ -110,7 +118,7 @@ impl MongoBlobs {
     async fn bucket(&self) -> Result<GridFsBucket> {
         if self.shared.existing {
             self.shared
-                .require_collection(&format!("{BLOBS}.chunks"))
+                .prepare(&format!("{BLOBS}.chunks"), vec![chunk_index()])
                 .await?;
         }
         let name = format!("{}{BLOBS}", self.shared.prefix);

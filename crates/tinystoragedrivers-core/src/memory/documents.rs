@@ -58,6 +58,7 @@ impl MemoryDocuments {
     }
 
     fn check_schema(&self, collection: &str) -> Result<()> {
+        validate_collection(collection)?;
         if self.existing && !self.db.lock()?.specs.contains_key(collection) {
             return Err(StorageError::not_found(
                 "collection has no persisted declaration",

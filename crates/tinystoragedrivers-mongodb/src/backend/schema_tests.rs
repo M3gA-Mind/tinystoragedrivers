@@ -54,6 +54,119 @@ async fn cleanup_fixture(storage: &MongoStorage, prefix: &str) {
 }
 
 #[tokio::test]
+async fn live_standalone_existing_schema_drop_requires_persisted_declaration() {
+    let Ok(url) = std::env::var("TSD_MONGO_STANDALONE_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    assert!(!storage.shared.physical_transactions);
+    storage.prepare_schema().await.unwrap();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped
+        .documents()
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    scoped
+        .documents()
+        .put("notes", "n", json!({"body": "keep"}), Precondition::None)
+        .await
+        .unwrap();
+    storage
+        .shared
+        .raw("_tsd_meta")
+        .delete_one(doc! {"_id": "notes"})
+        .await
+        .unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    let outcome = actor.documents().drop_collection("notes").await;
+    let retained = storage
+        .shared
+        .raw("notes")
+        .find_one(doc! {"_key": "n"})
+        .await
+        .unwrap()
+        .unwrap();
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.unwrap_err().kind(), ErrorKind::NotFound);
+    assert_ne!(retained.get_bool(crate::naming::DELETED), Ok(true));
+    assert_eq!(
+        retained.get_document(crate::naming::BODY).unwrap(),
+        &doc! {"body": "keep"}
+    );
+}
+
+#[tokio::test]
+async fn live_trusted_preparation_creates_unique_gridfs_chunk_ordinals() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let indexes: Vec<_> = storage
+        .shared
+        .raw(&format!("{BLOBS}.chunks"))
+        .list_indexes()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let index = indexes
+        .iter()
+        .find(|index| index.keys == doc! {"files_id": 1, "n": 1})
+        .unwrap();
+    let unique = index.options.as_ref().and_then(|options| options.unique);
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(unique, Some(true));
+}
+
+#[tokio::test]
+async fn live_existing_schema_blob_read_refuses_nonunique_chunk_index() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let chunks = storage.shared.raw(&format!("{BLOBS}.chunks"));
+    let indexes: Vec<_> = chunks
+        .list_indexes()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let index = indexes
+        .iter()
+        .find(|index| index.keys == doc! {"files_id": 1, "n": 1})
+        .unwrap();
+    chunks
+        .drop_index(index.options.as_ref().unwrap().name.as_ref().unwrap())
+        .await
+        .unwrap();
+    chunks
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"files_id": 1, "n": 1})
+                .build(),
+        )
+        .await
+        .unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    let outcome = actor.blobs().get("missing").await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.unwrap_err().kind(), ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
 async fn existing_schema_refuses_declaration_before_backend_network() {
     let client = Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=10")
         .await

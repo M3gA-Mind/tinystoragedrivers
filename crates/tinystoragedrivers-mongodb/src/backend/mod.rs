@@ -459,11 +459,7 @@ impl StorageBackend for MongoStorage {
         self.shared
             .prepare(
                 &format!("{BLOBS}.chunks"),
-                vec![
-                    mongodb::IndexModel::builder()
-                        .keys(doc! {"files_id": 1, "n": 1})
-                        .build(),
-                ],
+                vec![crate::blobs::chunk_index()],
             )
             .await
     }

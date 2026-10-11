@@ -47,3 +47,20 @@ historical evidence only. Constructor and native-port acceptance
 here do not prove OpenHuman ProfileHost binding. That host composition, the
 TinyAgents restricted initialization mode, and migration/import authority remain
 separate integrations; no local-file fallback is introduced by this contract.
+
+## PR21 review regressions
+
+Four additional behavioral tests reproduced the review findings before the fix:
+standalone deletion accepted missing persisted metadata, trusted GridFS preparation
+created a non-unique chunk index, restricted blob reads accepted that non-unique
+index, and malformed Memory names returned NotFound. The fixes retain scoped data
+deletion while validating its admitted schema, share the required unique chunk
+index between preparation and read-only validation, and validate names first.
+
+Fresh validation after these fixes passed 551 Rust tests plus 27 doctests with
+both actual Mongo servers enabled under normal parallel scheduling, and 514 Rust
+tests plus 25 doctests in the default workspace run. Full coverage and every
+native supplement passed again; all 75 executable production files remain above
+90% (minimum 90.1515%). Strict Clippy, build, warnings-denied rustdoc, formatting
+and diff checks passed. This evidence supersedes the earlier test counts for the
+reviewed production source.

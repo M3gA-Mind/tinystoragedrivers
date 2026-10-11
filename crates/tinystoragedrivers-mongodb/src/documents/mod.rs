@@ -422,6 +422,9 @@ impl DocumentStore for MongoDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
+        if self.shared.existing {
+            self.shared.spec(collection).await?;
+        }
         if !self.shared.physical_transactions {
             let pairs = self.matching_pairs(collection, &Filter::All).await?;
             self.remove(collection, &pairs, None).await?;
