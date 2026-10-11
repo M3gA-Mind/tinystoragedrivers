@@ -94,6 +94,25 @@ Append-only logs of JSON values.
 - Offsets are dense, start at 0, and are never reused.
 - `truncate_before` discards old records but leaves `len` unchanged.
 
+Optional ConditionalStreamAppend provides append_batch_if_offset(stream,
+expected_next_offset, values). Compare the persistent next offset and append
+the entire batch in the same atomic step; return its first offset. A missing
+stream has next offset 0. An empty batch still checks the expected offset and
+any native fence.
+
+A mismatched offset returns Conflict without appending. Validation errors and
+aborted operations append nothing. Native fence validation participates in the
+same lock/transaction. Scope and named database isolation match other stream
+operations. Unsupported adapters return Unsupported(ConditionalStreamAppend).
+MongoDB advertises the capability only when transactions are available; file
+atomicity remains within its documented process boundary.
+
+A transport failure during MongoDB commit can leave the outcome unknown,
+reported explicitly as a backend error. Read before retrying; repeating the
+same expected offset cannot duplicate a committed batch. delete_stream resets
+next offset to 0; truncate_before never does. A caller retaining a cursor across
+deletion must separately track identity.
+
 ### `BlobStore`
 
 Bytes by `/`-separated key, without empty, `.` or `..` segments, and with no

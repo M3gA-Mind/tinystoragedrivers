@@ -39,6 +39,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::Transactions)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
+        .with(Capability::ConditionalStreamAppend)
         .with(Capability::CollectionEnumeration)
 }
 

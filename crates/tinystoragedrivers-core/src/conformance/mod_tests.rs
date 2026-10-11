@@ -117,6 +117,33 @@ mod baseline {
         }
     }
 
+    #[derive(Debug)]
+    struct NarrowStreams(Arc<dyn crate::StreamStore>);
+    #[async_trait::async_trait]
+    impl crate::StreamStore for NarrowStreams {
+        async fn append(&self, s: &str, v: Value) -> Result<u64> {
+            self.0.append(s, v).await
+        }
+        async fn append_batch(&self, s: &str, v: Vec<Value>) -> Result<u64> {
+            self.0.append_batch(s, v).await
+        }
+        async fn read_window(&self, s: &str, f: u64, l: usize) -> Result<Vec<crate::StreamEntry>> {
+            self.0.read_window(s, f, l).await
+        }
+        async fn len(&self, s: &str) -> Result<u64> {
+            self.0.len(s).await
+        }
+        async fn truncate_before(&self, s: &str, o: u64) -> Result<u64> {
+            self.0.truncate_before(s, o).await
+        }
+        async fn delete_stream(&self, s: &str) -> Result<bool> {
+            self.0.delete_stream(s).await
+        }
+        async fn streams(&self, p: &str) -> Result<Vec<String>> {
+            self.0.streams(p).await
+        }
+    }
+
     impl StorageBackend for Narrow {
         fn driver(&self) -> &'static str {
             "narrow"
@@ -130,7 +157,7 @@ mod baseline {
                 scope.clone(),
                 self.driver(),
                 Arc::new(NarrowDocs(Arc::clone(inner.documents()), self.1)),
-                Arc::clone(inner.streams()),
+                Arc::new(NarrowStreams(Arc::clone(inner.streams()))),
                 Arc::clone(inner.blobs()),
             ))
         }

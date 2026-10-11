@@ -122,6 +122,7 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::Transactions)
             .with(Capability::Ttl)
             .with(Capability::Fencing)
+            .with(Capability::ConditionalStreamAppend)
             .with(Capability::CollectionEnumeration)
     }
 

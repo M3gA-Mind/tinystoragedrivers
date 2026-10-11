@@ -38,6 +38,28 @@ pub trait StreamStore: Send + Sync + std::fmt::Debug {
     /// An invalid stream name, or a backend error, with nothing appended.
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64>;
 
+    /// Atomically append only when the persistent next offset equals
+    /// `expected_next_offset`. Returns that offset, including for an empty
+    /// batch. Truncation does not reset the comparison offset.
+    ///
+    /// # Errors
+    ///
+    /// `Conflict` when the offset differs (nothing appended), `Fenced` for a
+    /// stale fence, or `Unsupported(ConditionalStreamAppend)` when absent.
+    /// Validation and aborted writes append nothing.
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        let _ = (stream, expected_next_offset, values);
+        Err(StorageError::unsupported(
+            crate::Capability::ConditionalStreamAppend,
+            "this driver cannot conditionally append a stream",
+        ))
+    }
+
     /// Up to `limit` records starting at offset `from`, in offset order.
     /// Offsets below the truncation point are skipped.
     ///

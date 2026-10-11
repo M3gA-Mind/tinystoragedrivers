@@ -203,6 +203,7 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
         } else {
             base

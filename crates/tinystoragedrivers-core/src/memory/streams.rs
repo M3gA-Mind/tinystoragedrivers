@@ -60,16 +60,21 @@ impl MemoryStreams {
     }
 }
 
-#[async_trait]
-impl StreamStore for MemoryStreams {
-    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
-        self.append_batch(stream, vec![value]).await
-    }
-
-    async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
+impl MemoryStreams {
+    fn append_inner(&self, stream: &str, expected: Option<u64>, values: Vec<Value>) -> Result<u64> {
         validate_stream(stream)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
+        let first = state
+            .streams
+            .get(&self.key(stream))
+            .map_or(0, super::state::StoredStream::len);
+        if expected.is_some_and(|offset| offset != first) {
+            return Err(crate::StorageError::conflict("stream next offset changed"));
+        }
+        first
+            .checked_add(values.len() as u64)
+            .ok_or_else(|| crate::StorageError::backend("stream offset space is exhausted"))?;
         if values.is_empty() {
             return Ok(state
                 .streams
@@ -80,6 +85,26 @@ impl StreamStore for MemoryStreams {
         let first = entry.len();
         entry.entries.extend(values);
         Ok(first)
+    }
+}
+
+#[async_trait]
+impl StreamStore for MemoryStreams {
+    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
+        self.append_batch(stream, vec![value]).await
+    }
+
+    async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
+        self.append_inner(stream, None, values)
+    }
+
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        self.append_inner(stream, Some(expected_next_offset), values)
     }
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {

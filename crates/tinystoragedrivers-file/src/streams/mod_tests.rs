@@ -247,3 +247,34 @@ async fn reads_and_truncation_refuse_a_symlinked_data_file() {
         assert_eq!(error.kind(), ErrorKind::Backend);
     }
 }
+
+#[tokio::test]
+async fn conditional_offset_survives_reopen_and_full_truncation() {
+    let (dir, _, streams) = open();
+    streams
+        .append_batch_if_offset("s", 0, vec![json!(0), json!(1)])
+        .await
+        .unwrap();
+    streams.truncate_before("s", 2).await.unwrap();
+    let reopened = FileStorage::open(dir.path()).unwrap();
+    let scope = reopened.for_scope(&Scope::local()).unwrap();
+    assert_eq!(scope.streams().len("s").await.unwrap(), 2);
+    assert_eq!(
+        scope
+            .streams()
+            .append_batch_if_offset("s", 0, vec![json!(9)])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        scope
+            .streams()
+            .append_batch_if_offset("s", 2, vec![json!(2)])
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(streams.len("s").await.unwrap(), 3);
+}
