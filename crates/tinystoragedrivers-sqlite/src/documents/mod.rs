@@ -16,7 +16,7 @@ mod pushdown;
 use std::fmt;
 use std::sync::Arc;
 
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::Connection;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
@@ -25,7 +25,6 @@ use tinystoragedrivers_core::{
 };
 
 use crate::connection::Db;
-use crate::error::during;
 use crate::fence::{self, Fencing};
 use crate::sql::Tables;
 use crate::storage::Clock;
@@ -39,6 +38,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::Transactions)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
+        .with(Capability::CrossDatabaseFencing)
         .with(Capability::ConditionalStreamAppend)
         .with(Capability::CollectionEnumeration)
 }
@@ -114,15 +114,12 @@ impl SqliteDocuments {
                 if access == Access::Read {
                     return f(conn, ctx);
                 }
-                let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(during("begin"))?;
-                if access == Access::Write {
-                    fence::guard(fencing.as_deref(), &tx, &tables)?;
-                }
-                let out = f(&tx, ctx)?;
-                tx.commit().map_err(during("commit"))?;
-                Ok(out)
+                let fencing = if access == Access::Write {
+                    fencing.as_deref()
+                } else {
+                    None
+                };
+                fence::write(conn, fencing, &tables, |tx| f(tx, ctx))
             })
             .await
     }

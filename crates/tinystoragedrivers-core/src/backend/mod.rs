@@ -73,6 +73,31 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         ))
     }
 
+    /// Bind native fenced handles with an explicit guard database address.
+    /// The guard check and every supported mutation share one native lock or
+    /// transaction across the target and guard databases. Existing adapters
+    /// support `Current` through their existing fencing method.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported(CrossDatabaseFencing)` when explicit default/named guard
+    /// addressing is unavailable; `InvalidInput` for invalid addresses.
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        guard_database: &crate::GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        guard_database.validate()?;
+        match guard_database {
+            crate::GuardDatabase::Current => self.for_scope_fenced(scope, fence),
+            _ => Err(StorageError::unsupported(
+                Capability::CrossDatabaseFencing,
+                "this driver cannot fence writes across databases",
+            )),
+        }
+    }
+
     /// The named database `name` on this backend. The same name always
     /// addresses the same data.
     ///

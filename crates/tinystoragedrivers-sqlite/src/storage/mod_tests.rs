@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use tinystoragedrivers_core::{CollectionSpec, Precondition};
+use tinystoragedrivers_core::{CollectionSpec, GuardDatabase, Precondition};
 
 use super::*;
 
@@ -136,4 +136,89 @@ fn rejects_invalid_database_names() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
     assert!(storage.database("Bad Name").is_err());
+}
+
+#[tokio::test]
+async fn reopened_named_target_observes_default_guard_takeover() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let guard_scope = Scope::new("cluster").unwrap();
+    let guard = root.for_scope(&guard_scope).unwrap();
+    guard
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 1}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let target = SqliteStorage::open(dir.path())
+        .unwrap()
+        .database("target")
+        .unwrap();
+    let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
+    let held = target
+        .for_scope_fenced_in_database(&scope, &fence, &GuardDatabase::Default)
+        .unwrap();
+    held.documents()
+        .put(
+            "docs",
+            "d",
+            serde_json::json!({"value": 1}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    drop(guard);
+    let takeover = SqliteStorage::open(dir.path())
+        .unwrap()
+        .for_scope(&guard_scope)
+        .unwrap();
+    takeover
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 2}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "docs",
+                "d",
+                serde_json::json!({"value": 2}),
+                tinystoragedrivers_core::Precondition::None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_core::ErrorKind::Fenced
+    );
+    let plain = target.for_scope(&scope).unwrap();
+    assert_eq!(
+        plain
+            .documents()
+            .get("docs", "d")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"value": 1})
+    );
+    assert!(
+        target
+            .for_scope(&Scope::new("bob").unwrap())
+            .unwrap()
+            .documents()
+            .get("docs", "d")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

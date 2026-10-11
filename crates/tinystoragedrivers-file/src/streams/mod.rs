@@ -17,6 +17,8 @@
 //! until [`delete_stream`](StreamStore::delete_stream), even when truncated
 //! empty, like the memory driver's.
 
+use crate::storage::Fencing;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -26,7 +28,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
 use crate::documents::guard;
@@ -64,7 +66,7 @@ pub struct FileStreams {
     db: Arc<Db>,
     scope: Scope,
     /// Checked under the database lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<Fencing>>,
 }
 
 /// The paths of one stream.
@@ -74,7 +76,7 @@ struct Paths {
 }
 
 impl FileStreams {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
         Self { db, scope, fence }
     }
 
@@ -114,10 +116,13 @@ impl FileStreams {
         validate_stream(name)?;
         let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
         self.db
-            .run(move |db| {
-                guard(db, fence.as_deref())?;
-                work(&Self::paths(db, &scope, &name))
-            })
+            .run_with_guard(
+                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
+                move |db| {
+                    guard(db, fence.as_deref())?;
+                    work(&Self::paths(db, &scope, &name))
+                },
+            )
             .await
     }
 }

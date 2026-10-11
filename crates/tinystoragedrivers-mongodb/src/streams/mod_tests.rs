@@ -80,6 +80,28 @@ async fn live_conditional_append_rejects_a_generation_deleted_after_its_snapshot
     let name = format!("generation_{}", std::process::id());
     streams.delete_stream(&name).await.unwrap();
     streams.append(&name, json!(1)).await.unwrap();
+    // Verify explicit public-capability refusal on every deployment, then
+    // run the transaction snapshot race only where transactions are native.
+    let disabled = backend.clone().without_transactions();
+    let disabled_streams = MongoStreams::new(Arc::clone(&disabled.shared), Scope::local(), None);
+    let error = disabled_streams
+        .append_batch_if_offset(&name, 1, vec![json!(2)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::ConditionalStreamAppend)
+    );
+    assert_eq!(streams.len(&name).await.unwrap(), 1);
+    assert_eq!(
+        streams.read_window(&name, 0, 10).await.unwrap()[0].value,
+        json!(1)
+    );
+    if !tinystoragedrivers_core::StorageBackend::capabilities(&backend)
+        .contains(Capability::ConditionalStreamAppend)
+    {
+        return;
+    }
     let handle = streams.segments().await.unwrap();
     let mut session = backend.shared.client.start_session().await.unwrap();
     session.start_transaction().await.unwrap();

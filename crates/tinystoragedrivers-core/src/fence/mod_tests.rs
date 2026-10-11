@@ -88,3 +88,21 @@ fn validation_rejects_bad_addresses_and_filters() {
         ErrorKind::InvalidInput
     );
 }
+
+#[test]
+fn guard_database_addresses_validate() {
+    for address in [
+        GuardDatabase::Current,
+        GuardDatabase::Default,
+        GuardDatabase::Named("leases".into()),
+    ] {
+        address.validate().unwrap();
+    }
+    assert_eq!(
+        GuardDatabase::Named("Bad Name".into())
+            .validate()
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+}

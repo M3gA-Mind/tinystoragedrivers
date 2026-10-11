@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use super::MemoryFence;
 use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::capabilities::{Capabilities, Capability};
@@ -15,7 +16,6 @@ use crate::document::{
     Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
 };
 use crate::error::{Result, StorageError};
-use crate::fence::Fence;
 use crate::filter::{Filter, Sort, sort_documents};
 use crate::scope::Scope;
 use crate::value;
@@ -27,7 +27,7 @@ pub struct MemoryDocuments {
     scope: Scope,
     clock: Clock,
     /// Checked under the lock before every write, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<MemoryFence>>,
 }
 
 impl std::fmt::Debug for MemoryDocuments {
@@ -44,7 +44,7 @@ impl MemoryDocuments {
         db: Arc<MemoryDb>,
         scope: Scope,
         clock: Clock,
-        fence: Option<Arc<Fence>>,
+        fence: Option<Arc<MemoryFence>>,
     ) -> Self {
         Self {
             db,
@@ -60,7 +60,7 @@ impl MemoryDocuments {
 
     /// Refuse a write unless this handle's fence (if any) holds.
     fn guard(&self, state: &DbState, now_ms: u64) -> Result<()> {
-        state.guard(self.fence.as_deref(), now_ms)
+        self.db.guard(state, self.fence.as_deref(), now_ms)
     }
 
     fn matching(
@@ -122,6 +122,7 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::Transactions)
             .with(Capability::Ttl)
             .with(Capability::Fencing)
+            .with(Capability::CrossDatabaseFencing)
             .with(Capability::ConditionalStreamAppend)
             .with(Capability::CollectionEnumeration)
     }

@@ -20,15 +20,17 @@ mod read;
 pub(crate) mod stored;
 mod write;
 
+use crate::fence::Fencing;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use mongodb::ClientSession;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Fence, Filter, Page,
-    Precondition, Query, RESERVED_PREFIX, Result, Scope, SearchHit, Sort, StorageError, Version,
-    Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
+    Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Filter, Page, Precondition,
+    Query, RESERVED_PREFIX, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
+    WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
@@ -74,7 +76,7 @@ pub(crate) struct MongoDocuments {
     shared: Arc<Shared>,
     scope: Scope,
     /// Every write runs in a transaction that holds this fence, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<Fencing>>,
 }
 
 impl std::fmt::Debug for MongoDocuments {
@@ -87,7 +89,7 @@ impl std::fmt::Debug for MongoDocuments {
 }
 
 impl MongoDocuments {
-    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
         Self {
             shared,
             scope,
@@ -205,6 +207,7 @@ impl DocumentStore for MongoDocuments {
             base.with(Capability::Transactions)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
+                .with(Capability::CrossDatabaseFencing)
         } else {
             base
         }

@@ -28,6 +28,8 @@
 //! delete, never interleaved with the new stream, so the new stream still
 //! starts at offset 0 with no gap. The next delete removes such leftovers.
 
+use crate::fence::Fencing;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -37,7 +39,7 @@ use mongodb::options::{FindOptions, IndexOptions};
 use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capability, Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Capability, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
 use crate::backend::Shared;
@@ -172,11 +174,11 @@ pub(crate) struct MongoStreams {
     shared: Arc<Shared>,
     scope: Scope,
     /// Every write runs in a transaction that holds this fence, when set.
-    fence: Option<Arc<Fence>>,
+    fence: Option<Arc<Fencing>>,
 }
 
 impl MongoStreams {
-    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
         Self {
             shared,
             scope,

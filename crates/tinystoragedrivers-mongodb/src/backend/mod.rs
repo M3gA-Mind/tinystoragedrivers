@@ -16,13 +16,14 @@ use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, Database};
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
-    StorageError, validate_collection, validate_database,
+    Capabilities, Capability, Clock, Fence, GuardDatabase, Result, Scope, ScopedStorage,
+    StorageBackend, StorageError, validate_collection, validate_database,
 };
 
 use crate::blobs::MongoBlobs;
 use crate::documents::MongoDocuments;
 use crate::errors;
+use crate::fence::Fencing;
 use crate::naming::{database_prefix, validate_mongo_database};
 use crate::scoped::ScopedCollection;
 use crate::streams::MongoStreams;
@@ -212,7 +213,7 @@ impl MongoStorage {
 }
 
 impl MongoStorage {
-    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
@@ -257,6 +258,7 @@ impl StorageBackend for MongoStorage {
             base.with(Capability::Transactions)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
+                .with(Capability::CrossDatabaseFencing)
         } else {
             base
         }
@@ -274,28 +276,78 @@ impl StorageBackend for MongoStorage {
             ));
         }
         fence.validate()?;
-        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                shared: Arc::clone(&self.shared),
+            })),
+        ))
+    }
+
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        locator: &GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        locator.validate()?;
+        if *locator == GuardDatabase::Current {
+            return self.for_scope_fenced(scope, fence);
+        }
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::CrossDatabaseFencing,
+                "cross-database fencing needs transactions",
+            ));
+        }
+        let guard = match locator {
+            GuardDatabase::Default => Arc::new(Shared::new(
+                self.shared.client.clone(),
+                self.shared.db.clone(),
+                String::new(),
+                Arc::clone(&self.shared.clock),
+                true,
+            )),
+            GuardDatabase::Named(name) => self.named(name)?,
+            GuardDatabase::Current => unreachable!(),
+        };
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(Fencing {
+                fence: fence.clone(),
+                shared: guard,
+            })),
+        ))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
+        Ok(Arc::new(Self {
+            shared: self.named(name)?,
+            databases: Arc::clone(&self.databases),
+        }))
+    }
+}
+
+impl MongoStorage {
+    fn named(&self, name: &str) -> Result<Arc<Shared>> {
         validate_database(name)?;
         let mut databases = self
             .databases
             .lock()
             .map_err(|_| StorageError::backend("mongodb database registry lock poisoned"))?;
-        let shared = databases.entry(name.to_owned()).or_insert_with(|| {
-            Arc::new(Shared::new(
-                self.shared.client.clone(),
-                self.shared.db.clone(),
-                database_prefix(name),
-                Arc::clone(&self.shared.clock),
-                self.shared.transactions,
-            ))
-        });
-        Ok(Arc::new(Self {
-            shared: Arc::clone(shared),
-            databases: Arc::clone(&self.databases),
-        }))
+        Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
+            || {
+                Arc::new(Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.db.clone(),
+                    database_prefix(name),
+                    Arc::clone(&self.shared.clock),
+                    self.shared.transactions,
+                ))
+            },
+        )))
     }
 }
 

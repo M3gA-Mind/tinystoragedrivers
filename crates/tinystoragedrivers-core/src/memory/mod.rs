@@ -46,14 +46,58 @@ fn system_clock() -> u64 {
 #[derive(Debug, Default)]
 pub(crate) struct MemoryDb {
     state: Mutex<DbState>,
+    gate: Arc<Mutex<()>>,
 }
 
 impl MemoryDb {
-    fn lock(&self) -> Result<MutexGuard<'_, DbState>> {
-        self.state
+    fn lock(&self) -> Result<MemoryGuard<'_>> {
+        let gate = self
+            .gate
             .lock()
-            .map_err(|_| StorageError::backend("memory storage lock poisoned by a panicked writer"))
+            .map_err(|_| StorageError::backend("memory root lock poisoned"))?;
+        let state = self.state.lock().map_err(|_| {
+            StorageError::backend("memory storage lock poisoned by a panicked writer")
+        })?;
+        Ok(MemoryGuard { state, _gate: gate })
     }
+    fn guard(&self, state: &DbState, fence: Option<&MemoryFence>, now: u64) -> Result<()> {
+        match fence {
+            None => Ok(()),
+            Some(binding) if std::ptr::eq(self, binding.db.as_ref()) => {
+                state.guard(Some(&binding.fence), now)
+            }
+            Some(binding) => {
+                let guard_state = binding
+                    .db
+                    .state
+                    .lock()
+                    .map_err(|_| StorageError::backend("memory guard lock poisoned"))?;
+                guard_state.guard(Some(&binding.fence), now)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MemoryGuard<'a> {
+    state: MutexGuard<'a, DbState>,
+    _gate: MutexGuard<'a, ()>,
+}
+impl std::ops::Deref for MemoryGuard<'_> {
+    type Target = DbState;
+    fn deref(&self) -> &DbState {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for MemoryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut DbState {
+        &mut self.state
+    }
+}
+#[derive(Debug)]
+pub(super) struct MemoryFence {
+    fence: Fence,
+    db: Arc<MemoryDb>,
 }
 
 /// An in-memory [`StorageBackend`].
@@ -69,6 +113,7 @@ impl MemoryDb {
 #[derive(Clone)]
 pub struct MemoryStorage {
     db: Arc<MemoryDb>,
+    root: Arc<MemoryDb>,
     databases: Arc<Mutex<BTreeMap<String, Arc<MemoryDb>>>>,
     clock: Clock,
 }
@@ -83,14 +128,16 @@ impl MemoryStorage {
     /// An empty backend reading time from `clock`.
     #[must_use]
     pub fn with_clock(clock: Clock) -> Self {
+        let root = Arc::new(MemoryDb::default());
         Self {
-            db: Arc::default(),
+            db: Arc::clone(&root),
+            root,
             databases: Arc::default(),
             clock,
         }
     }
 
-    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<MemoryFence>>) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
@@ -145,21 +192,63 @@ impl StorageBackend for MemoryStorage {
 
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         fence.validate()?;
-        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(MemoryFence {
+                fence: fence.clone(),
+                db: Arc::clone(&self.db),
+            })),
+        ))
+    }
+
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        guard_database: &crate::GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        guard_database.validate()?;
+        let db = match guard_database {
+            crate::GuardDatabase::Current => Arc::clone(&self.db),
+            crate::GuardDatabase::Default => Arc::clone(&self.root),
+            crate::GuardDatabase::Named(name) => self.named(name)?,
+        };
+        Ok(self.handles(
+            scope,
+            Some(&Arc::new(MemoryFence {
+                fence: fence.clone(),
+                db,
+            })),
+        ))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
         validate_database(name)?;
+        let db = self.named(name)?;
+        Ok(Arc::new(Self {
+            db,
+            root: Arc::clone(&self.root),
+            databases: Arc::clone(&self.databases),
+            clock: Arc::clone(&self.clock),
+        }))
+    }
+}
+
+impl MemoryStorage {
+    fn named(&self, name: &str) -> Result<Arc<MemoryDb>> {
         let mut databases = self
             .databases
             .lock()
             .map_err(|_| StorageError::backend("memory database registry lock poisoned"))?;
-        let db = Arc::clone(databases.entry(name.to_owned()).or_default());
-        Ok(Arc::new(Self {
-            db,
-            databases: Arc::clone(&self.databases),
-            clock: Arc::clone(&self.clock),
-        }))
+        Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
+            || {
+                Arc::new(MemoryDb {
+                    state: Mutex::default(),
+                    gate: Arc::clone(&self.root.gate),
+                })
+            },
+        )))
     }
 }
 

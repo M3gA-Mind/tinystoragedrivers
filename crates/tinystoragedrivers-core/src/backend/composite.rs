@@ -112,6 +112,19 @@ impl StorageBackend for CompositeStorage {
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         self.combine(&self.records.for_scope_fenced(scope, fence)?, true)
     }
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        database: &crate::GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        self.combine(
+            &self
+                .records
+                .for_scope_fenced_in_database(scope, fence, database)?,
+            true,
+        )
+    }
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
         Ok(Arc::new(Self::new(
             self.records.database(name)?,

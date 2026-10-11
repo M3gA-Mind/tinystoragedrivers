@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
     Blob, BlobMeta, BlobStore, Result, Scope, async_trait, clamp_range, validate_blob_key,
 };
@@ -63,13 +63,7 @@ impl SqliteBlobs {
                 let Some(fencing) = fencing else {
                     return f(conn);
                 };
-                let tx = conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(during("begin"))?;
-                fence::guard(Some(&fencing), &tx, &tables)?;
-                let out = f(&tx)?;
-                tx.commit().map_err(during("commit"))?;
-                Ok(out)
+                fence::write(conn, Some(&fencing), &tables, f)
             })
             .await
     }

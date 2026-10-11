@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tinystoragedrivers_core::{
-    Capabilities, Fence, Result, Scope, ScopedStorage, StorageBackend, validate_database,
+    Capabilities, Fence, GuardDatabase, Result, Scope, ScopedStorage, StorageBackend,
+    validate_database,
 };
 
 use crate::blobs::SqliteBlobs;
@@ -179,6 +180,43 @@ impl StorageBackend for SqliteStorage {
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         fence.validate()?;
         let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
+        Ok(self.handles(scope, Some(&fencing)))
+    }
+
+    fn for_scope_fenced_in_database(
+        &self,
+        scope: &Scope,
+        fence: &Fence,
+        locator: &GuardDatabase,
+    ) -> Result<ScopedStorage> {
+        fence.validate()?;
+        locator.validate()?;
+        if *locator == GuardDatabase::Current {
+            return self.for_scope_fenced(scope, fence);
+        }
+        let (file, prefix) = match (&self.layout, locator) {
+            (Layout::Directory(dir), GuardDatabase::Default) => {
+                (dir.join(ROOT_FILE), String::new())
+            }
+            (Layout::Directory(dir), GuardDatabase::Named(name)) => {
+                (dir.join(format!("{name}.db")), String::new())
+            }
+            (Layout::File(file), GuardDatabase::Default) => (file.clone(), String::new()),
+            (Layout::File(file), GuardDatabase::Named(name)) => (file.clone(), format!("{name}__")),
+            (_, GuardDatabase::Current) => unreachable!(),
+        };
+        let guard = Self::assemble(self.layout.clone(), &file, &prefix, Arc::clone(&self.clock))?;
+        let attached = if guard.db.path() == self.db.path() {
+            None
+        } else {
+            Some(guard.db.path().to_path_buf())
+        };
+        let fencing = Arc::new(Fencing::in_database(
+            fence.clone(),
+            Arc::clone(&self.clock),
+            attached,
+            guard.tables,
+        ));
         Ok(self.handles(scope, Some(&fencing)))
     }
 

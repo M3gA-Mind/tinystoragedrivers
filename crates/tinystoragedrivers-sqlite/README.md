@@ -36,10 +36,14 @@ use immediate transactions. Other processes are serialized by WAL plus a
 5-second busy timeout. Contention that outlasts the timeout returns a retryable
 `Unavailable` error.
 
-A fenced handle (`for_scope_fenced`) reads its guard document inside the
-write's immediate transaction, so the fence holds across processes sharing the
-file. The guard must live in the same file: in directory mode each named
-database is its own file.
+A fenced handle (`for_scope_fenced`) checks a guard in its current database.
+`for_scope_fenced_in_database` also accepts `GuardDatabase::Default` or
+`GuardDatabase::Named` to select another database owned by the same backend.
+The guard check and target document, stream or blob mutation run in one
+immediate transaction. In file mode the transaction uses the selected table
+prefix. In directory mode the guard file is attached before `BEGIN IMMEDIATE`,
+which locks both target and guard files before validation. The fence therefore
+holds across reopened handles and independent connections.
 
 ## Native access
 
