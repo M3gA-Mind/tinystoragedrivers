@@ -12,7 +12,7 @@ from pathlib import Path
 
 import sys
 sys.dont_write_bytecode = True
-from native_provenance import capture_provenance
+from native_provenance import capture_provenance, profile_directory
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST = "file::tests::a_key_reader_waits_for_an_in_progress_no_clobber_publication"
@@ -37,11 +37,7 @@ def main():
             profile_env = subprocess.check_output(["cargo", "llvm-cov", "show-env"], cwd=ROOT, text=True)
             profile = next(shlex.split(line.split("=", 1)[1])[0] for line in profile_env.splitlines()
                            if line.startswith("LLVM_PROFILE_FILE="))
-            directories = {Path(name).parent for name in
-                           (ROOT / "target/llvm-cov-target/tinystoragedrivers-profraw-list").read_text().splitlines() if name}
-            if len(directories) != 1:
-                raise RuntimeError("native profile directory is ambiguous")
-            env["LLVM_PROFILE_FILE"] = str(directories.pop() / Path(profile).name)
+            env["LLVM_PROFILE_FILE"] = str(profile_directory(ROOT) / Path(profile).name)
         capture_provenance(ROOT, evidence, binary)
         command = [str(binary.resolve()), TEST, "--exact", "--nocapture"]
         writer_trace = evidence / "writer.trace"
