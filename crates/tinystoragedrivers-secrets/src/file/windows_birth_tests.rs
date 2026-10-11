@@ -224,7 +224,7 @@ fn a_hardlinked_key_is_rejected_without_minting_another_key() {
 }
 
 #[test]
-fn a_native_sharing_violation_retains_the_previous_publication() {
+fn a_native_no_delete_handle_retains_the_previous_publication() {
     use std::os::windows::fs::OpenOptionsExt;
     let root = tempfile::tempdir().unwrap();
     let private = root.path().join("private");
@@ -241,8 +241,13 @@ fn a_native_sharing_violation_retains_the_previous_publication() {
     let native = std::error::Error::source(&error)
         .and_then(|source| source.downcast_ref::<std::io::Error>())
         .unwrap();
-    assert_eq!(native.raw_os_error(), Some(32));
-    eprintln!("OBSERVED_NATIVE_SHARING_VIOLATION=32");
+    assert_eq!(native.raw_os_error(), Some(5));
+    assert!(
+        error
+            .to_string()
+            .starts_with("could not publish the secrets file")
+    );
+    eprintln!("OBSERVED_NATIVE_REPLACEMENT_DENIAL=5");
     assert_eq!(fs::read(&path).unwrap(), b"fixture-old");
     assert_eq!(fs::read_dir(&private).unwrap().count(), 1);
     drop(held);
@@ -279,10 +284,54 @@ fn native_reserved_and_alternate_stream_names_never_mint_keys() {
 fn unsupported_namespace_prefixes_fail_before_remote_or_device_access() {
     for name in [
         r"\\fixture.invalid\share",
-        r"\\?\C:\fixture",
+        r"\\?\UNC\fixture.invalid\share",
         r"\\.\fixture",
         r"C:relative",
     ] {
         assert!(super::super::windows::Namespace::open(Path::new(name), false).is_err());
+    }
+}
+
+#[test]
+fn canonical_local_verbatim_paths_retain_native_namespace_and_file_identity() {
+    use std::path::{Component, Prefix};
+    let root = tempfile::tempdir().unwrap();
+    let private = root.path().join("private");
+    clack_private_fs::create_dir(&private).unwrap();
+    let ordinary = private.clone();
+    assert!(
+        matches!(ordinary.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+    );
+    let canonical = private.canonicalize().unwrap();
+    assert!(
+        matches!(canonical.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_)))
+    );
+    let other = super::super::windows::Namespace::open(&ordinary, false).unwrap();
+    let admitted = super::super::windows::Namespace::open(&canonical, false).unwrap();
+    assert_eq!(admitted.identity().unwrap(), other.identity().unwrap());
+    let store = EncryptedFileSecrets::with_key_file(&canonical).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            store.set("canonical", b"value").await.unwrap();
+            let reopened = EncryptedFileSecrets::with_key_file(&ordinary).unwrap();
+            assert_eq!(
+                reopened.get("canonical").await.unwrap().unwrap().as_slice(),
+                b"value"
+            );
+        });
+    for name in [
+        SECRETS_FILE_NAME,
+        KEY_FILE_NAME,
+        "secrets.enc.lock",
+        ".secret_key.lock",
+    ] {
+        let canonical_file = admitted.open_file(Path::new(name), false).unwrap();
+        let ordinary_file = other.open_file(Path::new(name), false).unwrap();
+        assert_eq!(
+            super::super::secure::identity(&canonical_file).unwrap(),
+            super::super::secure::identity(&ordinary_file).unwrap()
+        );
     }
 }

@@ -50,6 +50,18 @@ jobs:
       - name: Windows public key data and lock fixture
         if: ${{ always() && runner.os == 'Windows' }}
         run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::published_key_data_and_lock_have_protected_owner_dacl_in_admitted_namespace -- --exact --nocapture
+      - name: Record Stage3 native toolchain versions
+        if: always()
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo clippy --version
+      - name: Windows canonical local path identity regression
+        if: ${{ always() && runner.os == 'Windows' }}
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::canonical_local_verbatim_paths_retain_native_namespace_and_file_identity -- --exact --nocapture
+      - name: Native reserved object case alias regression
+        if: ${{ always() && runner.os != 'Linux' }}
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::migration::tests::native_case_aliases_of_all_reserved_objects_never_publish_or_delete -- --exact --nocapture
       # Keep native key/file compatibility evidence even when birth is RED.
       # MongoDB and Bash service setup remain in the existing Linux lanes.
       - name: Native existing file and key tests

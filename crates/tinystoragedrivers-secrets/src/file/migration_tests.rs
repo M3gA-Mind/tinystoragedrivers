@@ -762,3 +762,328 @@ async fn subprocess_restart_recovers_authenticated_backup_without_deleting_a_fre
     );
     assert_eq!(std::fs::read(&path).unwrap(), b"fresh replacement fixture");
 }
+
+#[tokio::test]
+async fn a_fresh_source_handle_cannot_recreate_live_cleanup_authority() {
+    let (_root, path, store, source) = setup();
+    store
+        .prepare_file_import("live-authority", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let fresh = FileImportSource::open(&path).unwrap();
+    assert!(
+        store
+            .prepare_file_import("live-authority", "fixture", b"value", &fresh)
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(path).unwrap(), source.bytes());
+    assert_eq!(
+        store
+            .recover_file_import_source("live-authority", "fixture")
+            .await
+            .unwrap()
+            .as_slice(),
+        source.bytes()
+    );
+}
+
+#[tokio::test]
+async fn subprocess_restart_cannot_recreate_authority_from_unchanged_or_same_byte_source() {
+    const NAME: &str = "file::migration::tests::subprocess_restart_cannot_recreate_authority_from_unchanged_or_same_byte_source";
+    if let Some(directory) = std::env::var_os("TSD_LIVE_AUTHORITY_DIR") {
+        let directory = PathBuf::from(directory);
+        let store = EncryptedFileSecrets::new(&directory, crate::crypto::tests::fixture_key());
+        assert_eq!(
+            store
+                .recover_file_import_source("restart-authority", "fixture")
+                .await
+                .unwrap()
+                .as_slice(),
+            b"disposable legacy fixture"
+        );
+        let path = directory.join("legacy");
+        let fresh = FileImportSource::open(&path).unwrap();
+        assert!(
+            store
+                .prepare_file_import("restart-authority", "fixture", b"value", &fresh)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"disposable legacy fixture");
+        println!("BACKUP_RECOVERED_WITHOUT_LIVE_AUTHORITY");
+        return;
+    }
+    let (_root, path, store, source) = setup();
+    store
+        .prepare_file_import("restart-authority", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let mut results = Vec::new();
+    for replace in [false, true] {
+        if replace {
+            std::fs::rename(&path, path.with_file_name("retained-original")).unwrap();
+            let mut fresh = source.0.namespace.create_file(Path::new("legacy")).unwrap();
+            fresh.write_all(source.bytes()).unwrap();
+            fresh.sync_all().unwrap();
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--nocapture"])
+            .env("TSD_LIVE_AUTHORITY_DIR", path.parent().unwrap())
+            .output()
+            .unwrap();
+        results.push((replace, child));
+        assert_eq!(std::fs::read(&path).unwrap(), source.bytes());
+    }
+    for (replace, child) in &results {
+        println!(
+            "RESTART_AUTHORITY_CHILD replacement={replace} success={}",
+            child.status.success()
+        );
+    }
+    for (replace, child) in results {
+        assert!(
+            child.status.success(),
+            "fresh subprocess recreated authority (replacement={replace}): {}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout)
+                .contains("BACKUP_RECOVERED_WITHOUT_LIVE_AUTHORITY")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn absent_cleanup_names_do_not_acknowledge_a_still_linked_captured_object() {
+    let (_root, path, store, source) = setup();
+    let receipt = store
+        .prepare_file_import("moved-capture", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let quarantine = PathBuf::from(format!(
+        ".import-cleanup-{}",
+        digest(receipt.intent.operation.as_bytes())
+    ));
+    // Reproduce the persisted pre-unlink state, without claiming unlink occurred.
+    capture_source(&receipt.source, Path::new("legacy"), &quarantine).unwrap();
+    let lock = store.inner.lock().unwrap();
+    let mut ledger = read_ledger(&store.inner, &lock.namespace).unwrap();
+    let mut pending = get_intent(&ledger, "fixture").unwrap().unwrap();
+    pending.removing = true;
+    record_intent(&mut ledger, &pending).unwrap();
+    write_ledger(&store.inner, &lock.namespace, &ledger).unwrap();
+    drop(lock);
+    let moved = path.with_file_name("still-linked-capture");
+    std::fs::rename(path.parent().unwrap().join(quarantine), &moved).unwrap();
+    assert!(!path.exists());
+    assert!(store.cleanup_file_import(&receipt).await.is_err());
+    assert_eq!(std::fs::read(moved).unwrap(), source.bytes());
+    assert_eq!(
+        store
+            .recover_file_import_source("moved-capture", "fixture")
+            .await
+            .unwrap()
+            .as_slice(),
+        source.bytes()
+    );
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn native_case_aliases_of_all_reserved_objects_never_publish_or_delete() {
+    #[cfg(target_os = "macos")]
+    let (_root, path, store, source) = setup();
+    #[cfg(windows)]
+    let (_root, path, store, source) = {
+        // Ordinary local spelling isolates alias admission from VerbatimDisk.
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        clack_private_fs::create_dir(&directory).unwrap();
+        let path = directory.join("legacy");
+        let mut file = clack_private_fs::create_new_file(&path).unwrap();
+        file.write_all(b"disposable legacy fixture").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let source = FileImportSource::open(&path).unwrap();
+        let store = EncryptedFileSecrets::new(&directory, crate::crypto::tests::fixture_key());
+        (root, path, store, source)
+    };
+    let directory = path.parent().unwrap();
+    let key_path = directory.join(KEY_FILE_NAME);
+    super::super::load_or_create_key_file(&key_path).unwrap();
+    store
+        .prepare_file_import("seed-aliases", "seed", b"seed", &source)
+        .await
+        .unwrap();
+    for name in [
+        "secrets.enc",
+        ".secret_key",
+        "secrets.enc.imports",
+        "secrets.enc.lock",
+        ".secret_key.lock",
+    ] {
+        let original = directory.join(name);
+        let alias = directory.join(name.to_uppercase());
+        let original_file = std::fs::File::open(&original).unwrap();
+        let alias_file = std::fs::File::open(&alias)
+            .expect("native fixture requires a case-insensitive filesystem");
+        assert_eq!(
+            secure::identity(&original_file).unwrap(),
+            secure::identity(&alias_file).unwrap()
+        );
+        let before = std::fs::read(store.path()).unwrap();
+        let ledger_before = std::fs::read(ledger_path(&store.inner)).unwrap();
+        let key_before = std::fs::read(&key_path).unwrap();
+        let aliased = FileImportSource::open(&alias).unwrap();
+        assert!(
+            store
+                .prepare_file_import("reserved-alias", "alias-value", b"value", &aliased)
+                .await
+                .is_err(),
+            "reserved native object was accepted: {name}"
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(ledger_path(&store.inner)).unwrap(),
+            ledger_before
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
+        assert!(alias.exists());
+    }
+}
+
+#[cfg(unix)]
+thread_local! {
+    static AFTER_REMOVING_LEDGER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(unix)]
+struct LedgerPause;
+
+#[cfg(unix)]
+impl LedgerPause {
+    fn install(callback: impl FnOnce() + 'static) -> Self {
+        AFTER_REMOVING_LEDGER.with(|slot| {
+            assert!(slot.borrow_mut().replace(Box::new(callback)).is_none());
+        });
+        Self
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LedgerPause {
+    fn drop(&mut self) {
+        AFTER_REMOVING_LEDGER.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn after_removing_ledger() {
+    let callback = AFTER_REMOVING_LEDGER.with(|slot| slot.borrow_mut().take());
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn writable_source_mutation_at_the_ledger_boundary_retains_changed_material() {
+    let (_root, path, store, source) = setup();
+    // Producer's writable descriptor predates capture and remains open through
+    // the callback; a namespace lock cannot serialize this writer.
+    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let receipt = store
+        .prepare_file_import("ledger-writer", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let quarantine = path.with_file_name(format!(
+        ".import-cleanup-{}",
+        digest(receipt.intent.operation.as_bytes())
+    ));
+    let _pause = LedgerPause::install(move || {
+        writer.set_len(0).unwrap();
+        writer.write_all(b"producer changed after capture").unwrap();
+        writer.sync_all().unwrap();
+    });
+    let result = cleanup_with_barrier(
+        &receipt.inner,
+        &receipt.source,
+        &receipt.intent,
+        receipt.destination,
+        receipt.namespace,
+        &mut secure::Namespace::sync,
+    );
+    assert!(
+        result.is_err(),
+        "changed source received removal acknowledgment: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(quarantine).unwrap(),
+        b"producer changed after capture"
+    );
+    assert_eq!(
+        store
+            .recover_file_import_source("ledger-writer", "fixture")
+            .await
+            .unwrap()
+            .as_slice(),
+        source.bytes()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn quarantine_replacement_at_the_ledger_boundary_retains_both_objects() {
+    let (_root, path, store, source) = setup();
+    let receipt = store
+        .prepare_file_import("ledger-replacement", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let quarantine = path.with_file_name(format!(
+        ".import-cleanup-{}",
+        digest(receipt.intent.operation.as_bytes())
+    ));
+    let retained = path.with_file_name("retained-captured-original");
+    let q = quarantine.clone();
+    let original = retained.clone();
+    let _pause = LedgerPause::install(move || {
+        std::fs::rename(&q, &original).unwrap();
+        let mut substitute = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&q)
+            .unwrap();
+        substitute.write_all(b"substituted after capture").unwrap();
+        substitute.sync_all().unwrap();
+    });
+    let result = cleanup_with_barrier(
+        &receipt.inner,
+        &receipt.source,
+        &receipt.intent,
+        receipt.destination,
+        receipt.namespace,
+        &mut secure::Namespace::sync,
+    );
+    assert!(
+        result.is_err(),
+        "replacement received removal acknowledgment: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(quarantine).unwrap(),
+        b"substituted after capture"
+    );
+    assert_eq!(std::fs::read(retained).unwrap(), source.bytes());
+    assert_eq!(
+        store
+            .recover_file_import_source("ledger-replacement", "fixture")
+            .await
+            .unwrap()
+            .as_slice(),
+        source.bytes()
+    );
+}

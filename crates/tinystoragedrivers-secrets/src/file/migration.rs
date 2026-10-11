@@ -584,6 +584,8 @@ fn cleanup_with_barrier(
     pending.removing = true;
     record_intent(&mut ledger, &pending)?;
     write_ledger(inner, &lock.namespace, &ledger)?;
+    #[cfg(test)]
+    tests::after_removing_ledger();
     lock.verify()
         .map_err(|e| io_error("verify the committed cleanup lock", e))?;
     verify_destination(inner, &lock.namespace, receipt, Some(destination))?;

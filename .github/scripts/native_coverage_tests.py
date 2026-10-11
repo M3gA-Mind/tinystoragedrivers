@@ -40,11 +40,14 @@ class NativeCoverageGate(unittest.TestCase):
         (deps / "tinystoragedrivers_secrets-fixture.d").write_text("fixture: " + self.module + "\n")
         self.report = target / "secrets-native-coverage.json"
         self.lcov = target / "secrets-native-coverage.lcov"
-        self.entry = {"filename": str(source), "summary": {"lines": {"count": 1, "covered": 1}}}
+        self.entry = {"filename": str(source), "summary": {"lines": {"count": 1, "covered": 1}},
+                      "segments": [[1, 1, 1, True, True, False], [1, 20, 0, False, False, False]]}
         self.report.write_text(json.dumps({"data": [{"files": [self.entry]}]}))
         self.lcov.write_text("SF:" + str(source) + "\nDA:1,1\nend_of_record\n")
 
     def git(self, *args):
+        if args[0] == "diff" and hasattr(self, "diff"):
+            return self.diff
         if args[0] == "status":
             return ""
         if args[:2] == ("rev-parse", "HEAD"):
@@ -104,6 +107,56 @@ class NativeCoverageGate(unittest.TestCase):
         dep.write_text("fixture: " + gate.SOURCE + "lib.rs\n")
         with self.assertRaisesRegex(RuntimeError, "native platform module missing"):
             self.run_gate()
+
+    def write_report(self):
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry]}]}))
+
+    def configure_hundred_line_report(self):
+        self.entry["summary"]["lines"] = {"count": 100, "covered": 90}
+        self.entry["segments"] = []
+        for line in range(1, 101):
+            count = int(line != 2 and line <= 91)
+            self.entry["segments"].extend([[line, 1, count, True, True, False],
+                                            [line, 20, 0, False, False, False]])
+        self.write_report()
+        self.diff = "+++ b/" + self.module + "\n@@ -0,0 +1,2 @@\n+first executable\n+second executable\n"
+
+    def test_partial_lcov_cannot_omit_an_uncovered_changed_coordinate(self):
+        self.configure_hundred_line_report()
+        # JSON independently includes uncovered line 2; partial LCOV must not
+        # shrink changed coverage to the surviving covered line 1.
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_reports_with_mismatched_executable_coordinates_fail(self):
+        self.entry["summary"]["lines"] = {"count": 2, "covered": 2}
+        self.entry["segments"].extend([[2, 1, 1, True, True, False], [2, 20, 0, False, False, False]])
+        self.write_report()
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,1\nDA:3,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_duplicate_lcov_coordinates_fail_even_when_counts_match(self):
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,1\nDA:1,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_conflicting_lcov_coordinates_cannot_choose_the_covered_count(self):
+        self.lcov.write_text("SF:" + self.entry["filename"] + "\nDA:1,0\nDA:1,1\nend_of_record\n")
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_duplicate_json_source_entries_fail(self):
+        self.report.write_text(json.dumps({"data": [{"files": [self.entry, self.entry]}]}))
+        with self.assertRaises(RuntimeError):
+            self.run_gate()
+
+    def test_generic_instantiation_summary_can_exceed_unique_coordinates(self):
+        self.entry["summary"]["lines"] = {"count": 2, "covered": 2}
+        self.write_report()
+        self.run_gate()
+        receipt = json.loads((self.root / "target/secrets-native-coverage-receipt.json").read_text())
+        self.assertEqual(receipt["changed_lines"], 1)
 
 
 if __name__ == "__main__":

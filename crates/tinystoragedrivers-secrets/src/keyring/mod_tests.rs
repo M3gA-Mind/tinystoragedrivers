@@ -244,8 +244,9 @@ async fn concurrent_key_creation_agrees_on_one_key() {
 }
 
 #[tokio::test]
-async fn a_creation_lock_file_serializes_across_processes() {
-    let dir = std::env::temp_dir().join(format!("tsd-keyring-lock-{}", std::process::id()));
+async fn a_creation_lock_file_is_reused_and_rejects_a_non_directory_parent() {
+    let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let dir = root.path().to_path_buf();
     let (secrets, _) = fake(Fault::None);
     let secrets = secrets.with_key_creation_lock(dir.join("keyring.lock"));
     let key = secrets.load_or_create_key("app:locked").await.unwrap();
@@ -270,7 +271,6 @@ async fn a_creation_lock_file_serializes_across_processes() {
         ErrorKind::Backend
     );
     assert!(store.lock().unwrap().is_empty());
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]

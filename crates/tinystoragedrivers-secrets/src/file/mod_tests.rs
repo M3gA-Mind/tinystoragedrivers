@@ -317,7 +317,38 @@ fn a_key_that_cannot_be_published_is_a_backend_error() {
 
 #[test]
 fn a_bare_file_name_has_no_parent_to_create() {
-    create_parent(Path::new("secrets.enc")).unwrap();
+    if std::env::var_os("TSD_PRIVATE_CWD_CHILD").is_some() {
+        create_parent(Path::new("secrets.enc")).unwrap();
+        assert_eq!(fs::read_dir(".").unwrap().count(), 0);
+        let store = EncryptedFileSecrets::with_key_file(".").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                store.set("relative", b"value").await.unwrap();
+                assert_eq!(
+                    store.get("relative").await.unwrap().unwrap().as_slice(),
+                    b"value"
+                );
+            });
+        return;
+    }
+    let directory = TempDir::new("private-cwd");
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "file::tests::a_bare_file_name_has_no_parent_to_create",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("TSD_PRIVATE_CWD_CHILD", "1")
+        .current_dir(&directory.0)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "private CWD child failed: {}",
+        String::from_utf8_lossy(&child.stdout)
+    );
 }
 
 #[tokio::test]
@@ -534,7 +565,7 @@ fn native_key_publication_faults_preserve_an_uncertain_winner() {
                 let before = fs::read(&path).unwrap();
                 let files = fs::read_dir(&dir.0).unwrap().count();
                 assert!(load_or_create_key_file(&path).is_err());
-                assert!(fs::read(&path).unwrap() == before);
+                assert_eq!(fs::read(&path).unwrap(), before);
                 assert_eq!(fs::read_dir(&dir.0).unwrap().count(), files);
             } else if kind == "link" {
                 assert!(!path.exists());
@@ -542,7 +573,7 @@ fn native_key_publication_faults_preserve_an_uncertain_winner() {
             } else {
                 let before = fs::read(&path).unwrap();
                 assert!(load_or_create_key_file(&path).is_ok());
-                assert!(fs::read(&path).unwrap() == before);
+                assert_eq!(fs::read(&path).unwrap(), before);
             }
         }
         None => {
@@ -574,4 +605,59 @@ async fn published_objects_are_ready_for_a_separate_user_access_probe() {
         .await
         .unwrap();
     eprintln!("PRIVATE_PUBLIC_OBJECTS_CREATED");
+}
+
+#[test]
+fn a_missing_master_with_existing_store_objects_never_mints_a_new_key() {
+    for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
+        let directory = TempDir::new("missing-master");
+        let path = directory.0.join(name);
+        fixture_write(&path, b"existing material").unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(
+            EncryptedFileSecrets::with_key_file(&directory.0).is_err(),
+            "existing {name} admitted without its master"
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+        assert!(!directory.0.join(KEY_FILE_NAME).exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_existing_data_lock_and_ledger_fail_before_master_creation() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
+        for kind in ["broad", "symlink", "hardlink"] {
+            let directory = TempDir::new("unsafe-before-master");
+            let path = directory.0.join(name);
+            let other = directory.0.join("preserved-object");
+            match kind {
+                "broad" => {
+                    fixture_write(&path, b"existing material").unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+                "symlink" => {
+                    fixture_write(&other, b"existing material").unwrap();
+                    symlink(&other, &path).unwrap();
+                }
+                "hardlink" => {
+                    fixture_write(&other, b"existing material").unwrap();
+                    fs::hard_link(&other, &path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(
+                EncryptedFileSecrets::with_key_file(&directory.0).is_err(),
+                "unsafe {name} ({kind}) admitted before key creation"
+            );
+            assert!(!directory.0.join(KEY_FILE_NAME).exists());
+            assert_eq!(fs::read(&path).unwrap(), b"existing material");
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap().permissions().mode(),
+                metadata.permissions().mode()
+            );
+        }
+    }
 }
