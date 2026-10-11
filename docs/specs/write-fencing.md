@@ -94,7 +94,7 @@ filter) is `InvalidInput` from `for_scope_fenced`.
 | --- | --- | --- | --- |
 | memory | yes | Checked under a shared native gate covering the guard and target states. | One process, by nature. |
 | SQLite | yes | The guard is read inside the target write transaction. Directory-mode guards in other files are attached before BEGIN IMMEDIATE, locking both files; file-mode named guards use prefixed tables. | Holds across independent connections and processes. Only the target file is mutated. Guard attachments are removed after the operation. |
-| file | yes | Guard check and target mutation share one process-wide native gate, including independently reopened directories. | **Single process only**, like every other guarantee of this driver. |
+| file | yes | Guard check and target mutation hold both canonical directory locks in stable path order, including independently reopened directories; unrelated directories remain independent. | **Single process only**, like every other guarantee of this driver. |
 | MongoDB | with transactions | Each fenced write runs in one multi-document transaction across guard and target collection prefixes that reads the guard and increments a hidden `_fence` counter on it, so a concurrent takeover write conflicts with the transaction. | Needs a replica set or sharded cluster. Fenced writes through one fence serialize on the guard document, and contention is retried (64 attempts) and then reported as `Unavailable`. Blob writes are refused with `Unsupported(Fencing)` because GridFS cannot join a transaction. |
 
 ## Invariants

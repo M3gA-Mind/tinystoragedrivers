@@ -91,16 +91,19 @@ impl FileBlobs {
         validate_blob_key(key)?;
         let (scope, key) = (self.scope.clone(), key.to_owned());
         self.db
-            .run(move |db| {
-                guard(db, fence.as_deref())?;
-                let dir = Self::dir(db, &scope);
-                let stem = file_stem(&key);
-                let paths = Paths {
-                    data: dir.join(&stem),
-                    meta: dir.join(format!("{stem}{META_SUFFIX}")),
-                };
-                work(&paths, &key)
-            })
+            .run_with_guard(
+                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
+                move |db| {
+                    guard(db, fence.as_deref())?;
+                    let dir = Self::dir(db, &scope);
+                    let stem = file_stem(&key);
+                    let paths = Paths {
+                        data: dir.join(&stem),
+                        meta: dir.join(format!("{stem}{META_SUFFIX}")),
+                    };
+                    work(&paths, &key)
+                },
+            )
             .await
     }
 }

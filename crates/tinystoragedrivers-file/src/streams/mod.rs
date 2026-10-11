@@ -116,10 +116,13 @@ impl FileStreams {
         validate_stream(name)?;
         let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
         self.db
-            .run(move |db| {
-                guard(db, fence.as_deref())?;
-                work(&Self::paths(db, &scope, &name))
-            })
+            .run_with_guard(
+                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
+                move |db| {
+                    guard(db, fence.as_deref())?;
+                    work(&Self::paths(db, &scope, &name))
+                },
+            )
             .await
     }
 }

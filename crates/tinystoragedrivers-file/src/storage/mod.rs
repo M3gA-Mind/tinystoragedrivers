@@ -21,14 +21,16 @@
 //!
 //! # Concurrency
 //!
-//! Every operation runs under one native mutex shared by all file-driver
-//! handles in the process, so guard and target operations are
-//! serialized exactly like the memory driver's and `claim` is atomic. The file
+//! Every directory has one native mutex shared by independently reopened
+//! handles. Cross-database fenced operations take the target and guard locks
+//! in canonical-path order, so `claim` and guard validation are atomic while
+//! unrelated directories retain independent IO. The file
 //! IO runs on tokio's blocking pool when a runtime is present. Several
 //! *processes* writing the same directory are not coordinated: each file
 //! replacement is atomic, but a compare-and-swap, claim or fenced write can
 //! race another process.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -66,12 +68,14 @@ fn system_clock() -> u64 {
         })
 }
 
-/// One native gate coordinates target and guard directories, including handles
-/// independently opened on a named directory. This driver promises process-local
-/// atomicity only.
-fn lock_for(_dir: &Path) -> Arc<Mutex<()>> {
-    static LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
-    Arc::clone(LOCK.get_or_init(|| Arc::new(Mutex::new(()))))
+/// One native lock per canonical database directory in this process.
+fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(dir.to_path_buf()).or_default())
 }
 
 /// A validated guard address bound by the host when creating a handle.
@@ -136,8 +140,35 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&Db) -> Result<T> + Send + 'static,
     {
+        self.run_with_guard(None, work).await
+    }
+
+    /// Hold target and optional guard directories in canonical order for the
+    /// entire native operation; aliases share a lock and are acquired once.
+    pub(crate) async fn run_with_guard<T, F>(
+        self: &Arc<Self>,
+        guard: Option<Arc<Db>>,
+        work: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Db) -> Result<T> + Send + 'static,
+    {
         let db = Arc::clone(self);
         let job = move || {
+            if let Some(guard) = guard
+                .as_ref()
+                .filter(|guard| !Arc::ptr_eq(&db.lock, &guard.lock))
+            {
+                let (first, second) = if db.dir < guard.dir {
+                    (db.as_ref(), guard.as_ref())
+                } else {
+                    (guard.as_ref(), db.as_ref())
+                };
+                let _first = first.lock();
+                let _second = second.lock();
+                return work(&db);
+            }
             let _guard = db.lock();
             work(&db)
         };

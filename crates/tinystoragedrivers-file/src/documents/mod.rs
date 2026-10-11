@@ -87,15 +87,18 @@ impl FileDocuments {
     {
         let scope = self.scope.clone();
         self.db
-            .run(move |db| {
-                guard(db, fence.as_deref())?;
-                let docs = Docs {
-                    db,
-                    scope: &scope,
-                    now: db.now(),
-                };
-                work(&docs)
-            })
+            .run_with_guard(
+                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
+                move |db| {
+                    guard(db, fence.as_deref())?;
+                    let docs = Docs {
+                        db,
+                        scope: &scope,
+                        now: db.now(),
+                    };
+                    work(&docs)
+                },
+            )
             .await
     }
 }
