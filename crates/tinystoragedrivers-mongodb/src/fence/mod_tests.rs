@@ -54,17 +54,21 @@ async fn live(test: &str) -> Option<MongoStorage> {
         eprintln!("{test}: TSD_MONGO_URL is not set; skipping");
         return None;
     };
-    let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
-    let path = rest.split_once('/').map_or("", |(_, path)| path);
-    let name = path
-        .split(['?', '/'])
-        .next()
-        .filter(|name| !name.is_empty());
+    // Schema changes touch every validation scope in a physical database.
+    // Each test owns its database, even when collections/scopes are already unique.
     Some(
-        MongoStorage::connect(&url, name.unwrap_or("tsd_test"))
+        MongoStorage::connect(&url, &unique("fixture"))
             .await
             .unwrap(),
     )
+}
+
+async fn live_peer(backend: &MongoStorage) -> MongoStorage {
+    let url = std::env::var("TSD_MONGO_URL").unwrap();
+    // Independent clients in one test must still share its physical metadata.
+    MongoStorage::connect(&url, backend.shared.db.name())
+        .await
+        .unwrap()
 }
 
 fn unique(label: &str) -> String {
@@ -275,7 +279,7 @@ async fn live_named_target_holds_default_guard_across_independent_clients() {
     let guard = guards.documents().get(&leases, "l").await.unwrap().unwrap();
     assert_eq!(guard.doc, json!({"epoch": 1}));
     assert_eq!(guard.version.0, 1);
-    let independent = live("independent cross target client").await.unwrap();
+    let independent = live_peer(&backend).await;
     independent
         .for_scope(&cluster)
         .unwrap()
@@ -352,7 +356,7 @@ async fn live_cross_database_guard_snapshot_cannot_survive_a_takeover() {
         .await
         .unwrap()
         .unwrap();
-    let independent = live("independent snapshot takeover client").await.unwrap();
+    let independent = live_peer(&backend).await;
     independent
         .for_scope(&cluster)
         .unwrap()
@@ -477,10 +481,7 @@ async fn live_forced_off_writer_conflicts_with_a_checked_dependency_snapshot() {
         .unwrap()
         .unwrap();
     assert_eq!(Stored::decode(&stored).unwrap().version, version);
-    let forced_off = live("independent forced-off writer")
-        .await
-        .unwrap()
-        .without_transactions();
+    let forced_off = live_peer(&backend).await.without_transactions();
     assert!(
         !forced_off
             .capabilities()
@@ -675,4 +676,68 @@ async fn live_every_document_mutator_invalidates_a_dependency_snapshot() {
         let error = outcome.unwrap_err();
         assert!(error.is_retryable(), "{action}: {error}");
     }
+}
+
+#[tokio::test]
+async fn live_distinct_test_fixtures_keep_schema_mutation_out_of_dependency_snapshot() {
+    use tinystoragedrivers_core::{CollectionSpec, IndexSpec};
+    let Some(first) =
+        live("live_distinct_test_fixtures_keep_schema_mutation_out_of_dependency_snapshot").await
+    else {
+        return;
+    };
+    let Some(other) = live("independent schema fixture").await else {
+        return;
+    };
+    if !first.capabilities().contains(Capability::ValidatedBatch) {
+        return;
+    }
+    let scope = Scope::new(unique("fixture_scope")).unwrap();
+    let collection = unique("fixture_dependency");
+    first
+        .for_scope(&scope)
+        .unwrap()
+        .documents()
+        .put(&collection, "dep", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    let mut session = first.shared.client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    first
+        .shared
+        .raw(&collection)
+        .find_one(doc! {"_id": document_id(&scope, "dep")})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    // A second test changes a schema while the first test's snapshot is pinned.
+    // Its collection-wide metadata update must stay in its own fixture database.
+    other
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .ensure_collection(
+            &CollectionSpec::new(unique("independent_schema"))
+                .index(IndexSpec::new("done", ["done"])),
+        )
+        .await
+        .unwrap();
+    first
+        .shared
+        .hold_validation(Some(&scope), &mut session)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    let databases_are_distinct = first.shared.db.name() != other.shared.db.name();
+    assert!(
+        databases_are_distinct,
+        "test fixtures must have separate databases"
+    );
+    let metadata_is_distinct = first.shared.raw("_tsd_validated_batch").namespace()
+        != other.shared.raw("_tsd_validated_batch").namespace();
+    assert!(
+        metadata_is_distinct,
+        "test fixtures must have separate metadata namespaces"
+    );
 }
