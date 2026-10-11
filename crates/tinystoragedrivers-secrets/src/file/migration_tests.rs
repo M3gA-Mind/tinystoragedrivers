@@ -917,6 +917,7 @@ async fn native_case_aliases_of_all_reserved_objects_never_publish_or_delete() {
         .prepare_file_import("seed-aliases", "seed", b"seed", &source)
         .await
         .unwrap();
+    let mut outcomes = Vec::new();
     for name in [
         "secrets.enc",
         ".secret_key",
@@ -937,20 +938,37 @@ async fn native_case_aliases_of_all_reserved_objects_never_publish_or_delete() {
         let ledger_before = std::fs::read(ledger_path(&store.inner)).unwrap();
         let key_before = std::fs::read(&key_path).unwrap();
         let aliased = FileImportSource::open(&alias).unwrap();
+        let denied = store
+            .prepare_file_import(
+                &format!("reserved-{name}"),
+                &format!("alias-{name}"),
+                b"value",
+                &aliased,
+            )
+            .await
+            .is_err();
+        let destination_unchanged = std::fs::read(store.path()).unwrap() == before;
+        let ledger_unchanged = std::fs::read(ledger_path(&store.inner)).unwrap() == ledger_before;
+        let key_unchanged = std::fs::read(&key_path).unwrap() == key_before;
+        let retained = alias.exists();
+        println!(
+            "NATIVE_RESERVED_ALIAS name={name} denied={denied} destination_unchanged={destination_unchanged} ledger_unchanged={ledger_unchanged} key_unchanged={key_unchanged} retained={retained}"
+        );
+        outcomes.push((
+            name,
+            denied,
+            destination_unchanged,
+            ledger_unchanged,
+            key_unchanged,
+            retained,
+        ));
+    }
+    for (name, denied, destination_unchanged, ledger_unchanged, key_unchanged, retained) in outcomes
+    {
         assert!(
-            store
-                .prepare_file_import("reserved-alias", "alias-value", b"value", &aliased)
-                .await
-                .is_err(),
-            "reserved native object was accepted: {name}"
+            denied && destination_unchanged && ledger_unchanged && key_unchanged && retained,
+            "reserved native object did not fail closed: {name}"
         );
-        assert_eq!(std::fs::read(store.path()).unwrap(), before);
-        assert_eq!(
-            std::fs::read(ledger_path(&store.inner)).unwrap(),
-            ledger_before
-        );
-        assert_eq!(std::fs::read(&key_path).unwrap(), key_before);
-        assert!(alias.exists());
     }
 }
 
@@ -1085,5 +1103,25 @@ async fn quarantine_replacement_at_the_ledger_boundary_retains_both_objects() {
             .unwrap()
             .as_slice(),
         source.bytes()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_refuses_a_source_held_by_a_cooperating_writer() {
+    let (_root, path, store, source) = setup();
+    let receipt = store
+        .prepare_file_import("coordinated-source", "fixture", b"value", &source)
+        .await
+        .unwrap();
+    let producer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    fs4::FileExt::lock(&producer).unwrap();
+    let denied = store.cleanup_file_import(&receipt).await;
+    fs4::FileExt::unlock(&producer).unwrap();
+    assert!(denied.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), source.bytes());
+    assert_eq!(
+        store.cleanup_file_import(&receipt).await.unwrap(),
+        CleanupAcknowledgment::RemovedAndDirectorySynced
     );
 }

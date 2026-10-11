@@ -609,17 +609,25 @@ async fn published_objects_are_ready_for_a_separate_user_access_probe() {
 
 #[test]
 fn a_missing_master_with_existing_store_objects_never_mints_a_new_key() {
+    let mut outcomes = Vec::new();
     for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
         let directory = TempDir::new("missing-master");
         let path = directory.0.join(name);
         fixture_write(&path, b"existing material").unwrap();
         let before = fs::read(&path).unwrap();
-        assert!(
-            EncryptedFileSecrets::with_key_file(&directory.0).is_err(),
-            "existing {name} admitted without its master"
+        let denied = EncryptedFileSecrets::with_key_file(&directory.0).is_err();
+        let unchanged = fs::read(path).unwrap() == before;
+        let no_key = !directory.0.join(KEY_FILE_NAME).exists();
+        println!(
+            "MISSING_MASTER_VARIANT name={name} denied={denied} unchanged={unchanged} no_key={no_key}"
         );
-        assert_eq!(fs::read(path).unwrap(), before);
-        assert!(!directory.0.join(KEY_FILE_NAME).exists());
+        outcomes.push((name, denied, unchanged, no_key));
+    }
+    for (name, denied, unchanged, no_key) in outcomes {
+        assert!(
+            denied && unchanged && no_key,
+            "existing {name} did not fail closed before key creation"
+        );
     }
 }
 
@@ -627,6 +635,7 @@ fn a_missing_master_with_existing_store_objects_never_mints_a_new_key() {
 #[test]
 fn unsafe_existing_data_lock_and_ledger_fail_before_master_creation() {
     use std::os::unix::fs::{PermissionsExt, symlink};
+    let mut outcomes = Vec::new();
     for name in [SECRETS_FILE_NAME, "secrets.enc.lock", "secrets.enc.imports"] {
         for kind in ["broad", "symlink", "hardlink"] {
             let directory = TempDir::new("unsafe-before-master");
@@ -648,16 +657,21 @@ fn unsafe_existing_data_lock_and_ledger_fail_before_master_creation() {
                 _ => unreachable!(),
             }
             let metadata = fs::symlink_metadata(&path).unwrap();
-            assert!(
-                EncryptedFileSecrets::with_key_file(&directory.0).is_err(),
-                "unsafe {name} ({kind}) admitted before key creation"
+            let denied = EncryptedFileSecrets::with_key_file(&directory.0).is_err();
+            let no_key = !directory.0.join(KEY_FILE_NAME).exists();
+            let unchanged = fs::read(&path).unwrap() == b"existing material"
+                && fs::symlink_metadata(&path).unwrap().permissions().mode()
+                    == metadata.permissions().mode();
+            println!(
+                "UNSAFE_MASTER_VARIANT name={name} kind={kind} denied={denied} unchanged={unchanged} no_key={no_key}"
             );
-            assert!(!directory.0.join(KEY_FILE_NAME).exists());
-            assert_eq!(fs::read(&path).unwrap(), b"existing material");
-            assert_eq!(
-                fs::symlink_metadata(&path).unwrap().permissions().mode(),
-                metadata.permissions().mode()
-            );
+            outcomes.push((name, kind, denied, unchanged, no_key));
         }
+    }
+    for (name, kind, denied, unchanged, no_key) in outcomes {
+        assert!(
+            denied && unchanged && no_key,
+            "unsafe {name} ({kind}) did not fail closed before key creation"
+        );
     }
 }
