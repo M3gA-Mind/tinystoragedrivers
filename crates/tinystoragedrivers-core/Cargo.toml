@@ -20,10 +20,12 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", "time", "test-util"] }
 
 [features]
 default = []
+# Explicit conservative invalidation; never claims native Watch history.
+polling-watch = ["tokio/time"]
 # `Blocking`: run a port's future from synchronous code on a dedicated runtime
 # thread. For consumer traits that are still synchronous.
 blocking = []

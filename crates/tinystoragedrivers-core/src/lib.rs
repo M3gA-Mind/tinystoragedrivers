@@ -61,6 +61,7 @@ mod memory;
 mod scope;
 mod stream;
 pub mod value;
+mod watch;
 
 #[cfg(any(test, feature = "blocking"))]
 mod blocking;
@@ -93,3 +94,9 @@ pub use stream::{StreamEntry, StreamStore, validate_stream};
 /// The `async_trait` attribute the port traits are declared with, re-exported
 /// so a driver implements them without naming the dependency itself.
 pub use async_trait::async_trait;
+
+#[cfg(feature = "polling-watch")]
+pub use watch::PollingWatch;
+pub use watch::{
+    DocumentWatch, MAX_WATCH_CURSOR_BYTES, WatchCursor, WatchNotice, WatchOptions, WatchReset,
+};

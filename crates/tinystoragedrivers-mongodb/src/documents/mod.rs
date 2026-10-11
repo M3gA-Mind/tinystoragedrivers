@@ -18,6 +18,7 @@
 
 mod read;
 pub(crate) mod stored;
+mod watch;
 mod write;
 
 use crate::fence::Fencing;
@@ -216,6 +217,11 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::FullText)
             .with(Capability::Ttl)
             .with(Capability::CollectionEnumeration);
+        let base = if self.shared.physical_transactions {
+            base.with(Capability::Watch)
+        } else {
+            base
+        };
         if self.shared.transactions {
             base.with(Capability::Transactions)
                 .with(Capability::ValidatedBatch)
@@ -225,6 +231,15 @@ impl DocumentStore for MongoDocuments {
         } else {
             base
         }
+    }
+
+    async fn watch(
+        &self,
+        collection: &str,
+        filter: &Filter,
+        options: &tinystoragedrivers_core::WatchOptions,
+    ) -> Result<Box<dyn tinystoragedrivers_core::DocumentWatch>> {
+        self.open_watch(collection, filter, options).await
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {

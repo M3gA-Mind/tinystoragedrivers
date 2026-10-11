@@ -182,6 +182,7 @@ impl StorageBackend for MemoryStorage {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::all()
+            .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
     }

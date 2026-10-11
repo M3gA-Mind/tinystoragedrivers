@@ -51,6 +51,7 @@ pub(crate) fn supports_transactions(hello: &Document) -> bool {
 /// What every handle of one named database shares.
 pub(crate) struct Shared {
     pub(crate) client: Client,
+    pub(crate) watch_origin: mongodb::bson::oid::ObjectId,
     pub(crate) db: Database,
     /// Prepended to every Mongo collection name: empty for the root database.
     pub(crate) prefix: String,
@@ -73,6 +74,7 @@ impl Shared {
         physical_transactions: bool,
     ) -> Self {
         Self {
+            watch_origin: mongodb::bson::oid::ObjectId::new(),
             client,
             db,
             prefix,
@@ -379,6 +381,11 @@ impl StorageBackend for MongoStorage {
             .with(Capability::FullText)
             .with(Capability::Ttl)
             .with(Capability::CollectionEnumeration);
+        let base = if self.shared.physical_transactions {
+            base.with(Capability::Watch)
+        } else {
+            base
+        };
         if self.shared.transactions {
             base.with(Capability::Transactions)
                 .with(Capability::ValidatedBatch)

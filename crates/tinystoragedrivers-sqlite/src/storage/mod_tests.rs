@@ -26,6 +26,7 @@ async fn directory_mode_gives_each_database_its_own_file() {
     assert_eq!(
         storage.capabilities(),
         Capabilities::all()
+            .without(tinystoragedrivers_core::Capability::Watch)
             .without(tinystoragedrivers_core::Capability::PresignedUrls)
             .without(tinystoragedrivers_core::Capability::StreamingBlobs)
     );

@@ -3154,7 +3154,9 @@ dependencies = [
  "async-trait",
  "futures-util",
  "mongodb",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tinystoragedrivers-core",
  "tokio",
 ]

@@ -102,6 +102,7 @@ fn reports_its_driver_and_capabilities() {
     assert_eq!(
         storage.capabilities(),
         Capabilities::all()
+            .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
     );

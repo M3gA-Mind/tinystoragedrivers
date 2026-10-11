@@ -123,3 +123,23 @@ without transactions, a differential test against the memory driver over
 documents chosen to trip MongoDB's semantics, and focused behavior tests.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
+
+## Document invalidation
+
+Replica sets and sharded deployments provide native `Capability::Watch`.
+`DocumentStore::watch` establishes a change stream before returning, so callers
+subscribe before their initial authoritative read. The pipeline scopes native
+composite keys (including deletes), projects only operation type and resume
+token, and conservatively invalidates on filter exits. Quiet interval hints also
+cover logical expiry before physical TTL sweeping. Standalone servers refuse.
+
+Opaque tokens bind the connected backend context, physical and logical database,
+scope, collection, filter and captured fence. Independent scoped handles on the
+same backend can resume; newly connected contexts must subscribe and reread.
+Tokens contain no document or filter payload and are redacted in Debug. Native
+history loss and collection destruction return terminal `ResetRequired`.
+
+Fenced subscriptions validate their captured guard before opening and delivery
+through native checked batches. Consumed hints remain pending across canceled
+validation. No application worker or unbounded queue exists; dropping the
+subscription drops the owned driver cursor, including a pending getMore.
