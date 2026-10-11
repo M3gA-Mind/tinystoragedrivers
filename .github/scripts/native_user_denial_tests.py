@@ -516,5 +516,61 @@ class NativeWindowsOuterFixture(unittest.TestCase):
             probe.shutil.rmtree(outer)
 
 
+@unittest.skipUnless(os.name == "nt", "requires the native Windows SecureString runtime")
+class NativeWindowsSecurePassword(unittest.TestCase):
+    def run_static_check(self, script):
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                capture_output=True, text=True)
+        self.assertTrue(result.returncode == 0, "native SecureString check failed")
+        self.assertTrue(not result.stderr.strip(), "native SecureString check emitted stderr")
+        self.assertTrue(result.stdout.strip() == "SECURE_PASSWORD_CHECK_PASSED",
+                        "native SecureString check emitted unexpected output")
+
+    def test_owned_constructor_is_read_only_36_characters_and_accepted_by_pscredential(self):
+        script = """$ErrorActionPreference='Stop'
+$password=[System.Security.SecureString]::new()
+$created=$false
+try {
+ PASSWORD_CONSTRUCTION
+ if($password -isnot [System.Security.SecureString]){throw 'unexpected type'}
+ if($password.Length -ne 36 -or -not $password.IsReadOnly()){throw 'unexpected password shape'}
+ $credential=[PSCredential]::new('constructor-regression',$password)
+ if($credential.Password -isnot [System.Security.SecureString]){throw 'unexpected credential type'}
+} finally { PASSWORD_CLEANUP }
+Write-Output 'SECURE_PASSWORD_CHECK_PASSED'
+""".replace("PASSWORD_CONSTRUCTION", probe.WINDOWS_PASSWORD_CONSTRUCTION).replace(
+            "PASSWORD_CLEANUP", probe.WINDOWS_PASSWORD_CLEANUP)
+        self.run_static_check(script)
+
+    def test_password_is_disposed_after_construction_probe_or_account_cleanup_failure(self):
+        # Simulated failures exercise the real PowerShell finally and real .NET
+        # disposal; no account is created and this is not ordinary-user proof.
+        for phase in ["Construction", "Probe", "Cleanup"]:
+            with self.subTest(phase=phase):
+                script = """$ErrorActionPreference='Stop'
+function Remove-LocalUser { param($Name) throw 'expected cleanup failure' }
+$password=[System.Security.SecureString]::new()
+$created=$false
+$name='disposal-regression'
+$caught=$false
+try {
+ try {
+  if('PHASE' -eq 'Construction'){throw 'expected construction failure'}
+  PASSWORD_CONSTRUCTION
+  if('PHASE' -eq 'Probe'){throw 'expected probe failure'}
+  $created=$true
+ } finally { PASSWORD_CLEANUP }
+} catch { $caught=$true }
+if(-not $caught){throw 'expected lifecycle failure was absent'}
+$disposed=$false
+try { $null=$password.Length }
+catch [System.ObjectDisposedException] { $disposed=$true }
+if(-not $disposed){throw 'password disposal failed'}
+Write-Output 'SECURE_PASSWORD_CHECK_PASSED'
+""".replace("PHASE", phase).replace("PASSWORD_CONSTRUCTION", probe.WINDOWS_PASSWORD_CONSTRUCTION).replace(
+                    "PASSWORD_CLEANUP", probe.WINDOWS_PASSWORD_CLEANUP)
+                self.run_static_check(script)
+
+
 if __name__ == "__main__":
     unittest.main()

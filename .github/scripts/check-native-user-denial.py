@@ -430,6 +430,19 @@ def configure_windows_outer(outer, evidence):
     validate_windows_outer_acl(record["segments"][1])
 
 
+# Shared by the actual account parent and account-free native regressions.
+# Never emit the generated password or convert the SecureString back to text.
+WINDOWS_PASSWORD_CONSTRUCTION = """foreach($character in ([Guid]::NewGuid().ToString('N')+'aA!7').ToCharArray()) {
+  $password.AppendChar($character)
+ }
+ $password.MakeReadOnly()"""
+WINDOWS_PASSWORD_CLEANUP = """try {
+  if($created){Remove-LocalUser -Name $name}
+ } finally {
+  $password.Dispose()
+ }"""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path)
@@ -507,17 +520,18 @@ Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'
             encoded = base64.b64encode(child.encode("utf-16le")).decode()
             script = """$ErrorActionPreference='Stop'
 $name='tsd'+[Guid]::NewGuid().ToString('N').Substring(0,12)
-$password=ConvertTo-SecureString ([Guid]::NewGuid().ToString('N')+'aA!7') -AsPlainText -Force
+$password=[System.Security.SecureString]::new()
 $created=$false
 try {
+ PASSWORD_CONSTRUCTION
  New-LocalUser -Name $name -Password $password | Out-Null; $created=$true
  Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
  $credential=[PSCredential]::new(($env:COMPUTERNAME+'\\'+$name),$password)
  $p=Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Credential $credential -ArgumentList @('-NoProfile','-EncodedCommand','ENCODED') -Wait -PassThru -RedirectStandardOutput OUT -RedirectStandardError ERR
  if($p.ExitCode -ne 0){exit $p.ExitCode}
  Get-Content OUT
-} finally {if($created){Remove-LocalUser -Name $name}}
-""".replace("ENCODED", encoded).replace("OUT", literal(str(evidence / "child.stdout"))).replace("ERR", literal(str(evidence / "child.stderr")))
+} finally { PASSWORD_CLEANUP }
+""".replace("PASSWORD_CONSTRUCTION", WINDOWS_PASSWORD_CONSTRUCTION).replace("PASSWORD_CLEANUP", WINDOWS_PASSWORD_CLEANUP).replace("ENCODED", encoded).replace("OUT", literal(str(evidence / "child.stdout"))).replace("ERR", literal(str(evidence / "child.stderr")))
             result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
         else:
             child = """import os,sys
