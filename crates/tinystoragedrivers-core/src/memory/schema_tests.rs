@@ -218,3 +218,27 @@ fn existing_schema_native_fence_refusal_survives_blocking_bridge() {
         .map_err(|error| assert_eq!(error.kind(), ErrorKind::Fenced))
         .unwrap_err();
 }
+
+#[tokio::test]
+async fn existing_schema_checked_dependencies_require_declarations() {
+    let storage = MemoryStorage::new();
+    let docs = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    let check = crate::ReadCheck {
+        collection: "missing".into(),
+        id: "n".into(),
+        expected: crate::ExpectedDocument::Absent,
+    };
+    assert_eq!(
+        docs.atomic_batch_checked(vec![check], Vec::new())
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+}

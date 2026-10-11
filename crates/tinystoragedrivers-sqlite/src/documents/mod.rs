@@ -328,6 +328,10 @@ impl DocumentStore for SqliteDocuments {
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
         if self.existing {
+            for check in &checks {
+                self.validate_collection_spec(&CollectionSpec::new(&check.collection))
+                    .await?;
+            }
             for op in &ops {
                 let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
                 self.validate_collection_spec(&CollectionSpec::new(collection))

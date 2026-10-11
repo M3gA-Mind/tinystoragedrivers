@@ -20,3 +20,13 @@ def capture_provenance(root, evidence, binary=None):
                    for path in paths},
     }
     (evidence / "execution-provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def profile_directory(root):
+    """Read the current checkout inventory, rejecting absent/ambiguous profiles."""
+    root = Path(root).resolve()
+    inventory = root / "target/llvm-cov-target" / (root.name + "-profraw-list")
+    directories = {Path(name).parent for name in inventory.read_text().splitlines() if name}
+    if len(directories) != 1:
+        raise RuntimeError("native profile directory is empty or ambiguous")
+    return directories.pop()

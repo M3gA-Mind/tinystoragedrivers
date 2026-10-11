@@ -289,6 +289,9 @@ impl DocumentStore for MemoryDocuments {
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
+        for check in &checks {
+            self.check_schema(&check.collection)?;
+        }
         for op in &ops {
             let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
             self.check_schema(collection)?;

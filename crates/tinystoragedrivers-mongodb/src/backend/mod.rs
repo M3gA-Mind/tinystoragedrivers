@@ -317,6 +317,7 @@ impl MongoStorage {
             self.shared.prefix.clone(),
             clock,
             transactions,
+            self.shared.physical_transactions,
         )
         .with_existing(self.shared.existing);
         Self {

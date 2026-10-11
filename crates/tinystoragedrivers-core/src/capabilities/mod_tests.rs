@@ -59,10 +59,25 @@ fn require_names_the_missing_capability() {
 
 #[test]
 fn renders_names() {
-    assert_eq!(Capability::FullText.to_string(), "full_text");
-    assert_eq!(Capability::Transactions.to_string(), "transactions");
-    assert_eq!(Capability::Ttl.to_string(), "ttl");
-    assert_eq!(Capability::Fencing.to_string(), "fencing");
+    for (capability, expected) in [
+        (Capability::FullText, "full_text"),
+        (Capability::Transactions, "transactions"),
+        (Capability::Ttl, "ttl"),
+        (Capability::Fencing, "fencing"),
+        (Capability::PresignedUrls, "presigned_urls"),
+        (Capability::StreamingBlobs, "streaming_blobs"),
+        (Capability::CollectionEnumeration, "collection_enumeration"),
+        (
+            Capability::ConditionalStreamAppend,
+            "conditional_stream_append",
+        ),
+        (Capability::CrossDatabaseFencing, "cross_database_fencing"),
+        (Capability::ValidatedBatch, "validated_batch"),
+        (Capability::ExistingSchema, "existing_schema"),
+        (Capability::CollectionValidation, "collection_validation"),
+    ] {
+        assert_eq!(capability.to_string(), expected);
+    }
     assert_eq!(
         format!("{:?}", Capabilities::none().with(Capability::Ttl)),
         "{Ttl}"

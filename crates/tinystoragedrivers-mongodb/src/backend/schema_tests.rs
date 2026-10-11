@@ -300,3 +300,41 @@ async fn live_existing_schema_keeps_captured_native_grant() {
     );
     storage.shared.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn live_existing_schema_missing_validation_registry_is_not_created() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let storage = MongoStorage::connect(&url, &format!("schema_registry_{}", std::process::id()))
+        .await
+        .unwrap();
+    if !storage.shared.transactions {
+        return;
+    }
+    storage
+        .shared
+        .raw("_tsd_validated_batch")
+        .drop()
+        .await
+        .unwrap();
+    let docs = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    let result = docs.atomic_batch_checked(Vec::new(), Vec::new()).await;
+    let absent = !storage
+        .shared
+        .collection_exists("_tsd_validated_batch")
+        .await
+        .unwrap();
+    storage.shared.db.drop().await.unwrap();
+    assert!(
+        absent,
+        "restricted mutation implicitly created internal schema"
+    );
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
+}

@@ -10,7 +10,7 @@ Every supported native write retains its captured fence and atomic guard check. 
 
 ## Public API and native limits
 
-StorageBackend::prepare_schema is optional trusted async bootstrap; its default refuses. It prepares internal storage only, never application document declarations. Memory and File require no extra internal schema initialization. SQLite prepares its base tables; Mongo prepares stream heads/segments and GridFS files/chunks/indexes. Existing-schema backends refuse this method, even for matching schema.
+StorageBackend::prepare_schema is optional trusted async bootstrap; its default refuses. It prepares internal storage only, never application document declarations. Memory and File require no extra internal schema initialization. SQLite prepares its base tables; Mongo prepares document-validation metadata, stream heads/segments and GridFS files/chunks/indexes. Restricted document writes require the validation collection to exist; scope-registration records remain internal data mutations. Checked batch read dependencies also require persisted declarations. Existing-schema backends refuse this method, even for matching schema.
 
 StorageBackend::existing_schema is a synchronous optional native factory with default Unsupported(ExistingSchema). DocumentStore::validate_collection_spec defaults to Unsupported(CollectionValidation). The native factory does not accept a caller-supplied preparation boolean or change a fence. Classic opening/constructors retain their behavior: the restriction starts when existing_schema is called, so this does not retroactively remove trusted initialization performed before that call.
 

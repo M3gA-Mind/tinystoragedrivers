@@ -311,3 +311,28 @@ async fn existing_schema_reports_corrupt_declaration_with_source() {
     assert_eq!(error.kind(), ErrorKind::Serialization);
     assert!(std::error::Error::source(&error).is_some());
 }
+
+#[tokio::test]
+async fn existing_schema_checked_dependencies_require_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let docs = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    let check = tinystoragedrivers_core::ReadCheck {
+        collection: "missing".into(),
+        id: "n".into(),
+        expected: tinystoragedrivers_core::ExpectedDocument::Absent,
+    };
+    assert_eq!(
+        docs.atomic_batch_checked(vec![check], Vec::new())
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+}
