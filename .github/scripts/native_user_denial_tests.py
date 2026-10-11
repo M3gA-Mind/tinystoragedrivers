@@ -586,11 +586,117 @@ class OuterFixtureReadback(unittest.TestCase):
             probe.validate_windows_outer_acl({**segment, "aces": segment["aces"][:-1]})
 
 
+class FiniteChildAndCleanupDiagnostics(unittest.TestCase):
+    def test_child_schema_rejects_payloads_unknown_stages_chains_ordinals_and_exit_mismatch(self):
+        record = {"status": "Failed", "stage": "PrivateReplace", "object_ordinal": 2,
+                  "expected_exit": 1, "error_category": "InvalidOperation",
+                  "exception_classes": ["MethodInvocation", "IOException"]}
+        self.assertEqual(probe.parse_child_diagnostic(json.dumps(record)), record)
+        for field, value in [("path", "PRIVATE_SENTINEL"), ("password", "PRIVATE_SENTINEL"),
+                             ("stage", "PRIVATE_SENTINEL"), ("object_ordinal", True),
+                             ("object_ordinal", 4), ("expected_exit", 19), ("expected_exit", 13),
+                             ("error_category", "PRIVATE_SENTINEL"),
+                             ("exception_classes", ["Other"] * 4),
+                             ("exception_classes", ["System.PRIVATE_SENTINEL"]),
+                             ("exception_classes", [False])]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                probe.parse_child_diagnostic(json.dumps({**record, field: value}))
+        for text in ["PRIVATE_SENTINEL", "[]", " " * 8193]:
+            with self.assertRaises(ValueError):
+                probe.parse_child_diagnostic(text)
+
+    def test_output_projection_keeps_only_recognized_metadata_and_original_success_marker(self):
+        record = {"status": "Failed", "stage": "NonAdmin", "object_ordinal": None,
+                  "expected_exit": 11, "error_category": "NotSpecified", "exception_classes": []}
+        self.assertEqual(probe.classify_child_output(json.dumps(record), "", 11),
+                         {"diagnostic_status": "Observed", **record})
+        self.assertEqual(probe.classify_child_output(json.dumps(record), "PRIVATE_SENTINEL", 11),
+                         {"diagnostic_status": "ParserRejected"})
+        for text, stderr, code in [("PRIVATE_SENTINEL", "PRIVATE_SENTINEL", 1),
+                                   ("ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED", "", 1)]:
+            self.assertEqual(probe.classify_child_output(text, stderr, code), {"diagnostic_status": "ParserRejected"})
+        self.assertEqual(probe.classify_child_output("ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED", "", 0),
+                         {"diagnostic_status": "SuccessMarker"})
+        startup = probe.classify_child_output("", "PRIVATE_SENTINEL RunningScriptsDisabled PSSecurityException", 1)
+        self.assertTrue(startup["running_scripts_disabled"])
+        self.assertTrue(startup["ps_security_exception"])
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(startup))
+
+    def test_cleanup_can_succeed_independently_of_child_failure_and_rejects_false_claims(self):
+        record = {"status": "Failed", "phase": "Child", "oversized_outcome": "ParameterIncorrect",
+                  "oversized_length": 3875, "short_length": 118, "short_within_bound": True,
+                  "child_exit": 1, "cleanup_complete": True, "cleanup_created": True,
+                  "removal_attempted": True, "removal_succeeded": True,
+                  "disposal_attempted": True, "disposal_succeeded": True}
+        self.assertEqual(probe.parse_launch_diagnostic(json.dumps(record)), record)
+        for field, value in [("removal_attempted", False), ("disposal_attempted", False),
+                             ("disposal_succeeded", False), ("cleanup_complete", False),
+                             ("cleanup_created", False), ("removal_succeeded", "PRIVATE_SENTINEL")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                probe.parse_launch_diagnostic(json.dumps({**record, field: value}))
+
+
+@unittest.skipUnless(os.name == "nt", "requires native finite child instrumentation, creates no account")
+class NativeWindowsChildDiagnostics(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        stamp = probe.datetime.datetime.now(probe.datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        cls.evidence = probe.ROOT / "target" / ("native-user-denial-child-diagnostics-" + stamp)
+        cls.evidence.mkdir(parents=True)
+        probe.capture_provenance(probe.ROOT, cls.evidence)
+
+    def test_explicit_exit_and_unexpected_exception_produce_only_finite_stages(self):
+        samples = [("NonAdmin", None, "exit 11", 11),
+                   ("PrivateRead", 2, "$stage='PrivateRead';$ordinal=2;exit 13", 13),
+                   ("PublicRead", None, "$stage='PublicRead';throw [IO.IOException]::new('PRIVATE_SENTINEL')", 1)]
+        for stage, ordinal, body, code in samples:
+            with self.subTest(stage=stage):
+                script = probe.instrument_windows_child("$ErrorActionPreference='Stop'\n" + body + "\n")
+                result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+                record = probe.classify_child_output(result.stdout, result.stderr, result.returncode)
+                (self.evidence / (stage + '.json')).write_text(json.dumps(record, sort_keys=True) + '\n')
+                self.assertTrue(record.get("diagnostic_status") == "Observed", "native child diagnostic rejected")
+                self.assertTrue(record.get("stage") == stage and record.get("object_ordinal") == ordinal,
+                                "native child diagnostic stage mismatch")
+                self.assertTrue(result.returncode == code, "native child diagnostic changed exit code")
+                self.assertTrue('PRIVATE_SENTINEL' not in json.dumps(record), "native child diagnostic disclosed payload")
+
+    def test_cleanup_flags_survive_primary_failure_and_removal_failure_without_accounts(self):
+        for removal_fails in [False, True]:
+            with self.subTest(removal_fails=removal_fails):
+                script = """$ErrorActionPreference='Stop'
+function Remove-LocalUser {param($Name) REMOVAL}
+$password=[System.Security.SecureString]::new();$created=$true;$name='nonsecret-fixture'
+$removeAttempted=$false;$removeSucceeded=$false;$disposeAttempted=$false;$disposeSucceeded=$false
+$caught=$false
+try {try {throw 'expected primary failure'} finally {CLEANUP}} catch {$caught=$true}
+ConvertTo-Json -Compress -InputObject @{caught=$caught;removal_attempted=$removeAttempted;
+ removal_succeeded=$removeSucceeded;disposal_attempted=$disposeAttempted;disposal_succeeded=$disposeSucceeded}
+""".replace('REMOVAL', "throw 'expected removal failure'" if removal_fails else '$null=$Name').replace(
+                    'CLEANUP', probe.diagnostic_password_cleanup())
+                result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+                try:
+                    record = json.loads(result.stdout)
+                    valid = (type(record) is dict and set(record) == {'caught','removal_attempted','removal_succeeded','disposal_attempted','disposal_succeeded'}
+                             and all(type(value) is bool for value in record.values()))
+                except (ValueError, TypeError):
+                    valid = False
+                if not valid:
+                    record = {"diagnostic_status": "ParserRejected"}
+                (self.evidence / ('cleanup-' + str(removal_fails) + '.json')).write_text(json.dumps(record, sort_keys=True) + '\n')
+                self.assertTrue(valid and result.returncode == 0 and not result.stderr.strip(), "native cleanup flags rejected")
+                self.assertTrue(record['caught'] and record['removal_attempted'] and record['disposal_attempted'] and record['disposal_succeeded'],
+                                "native cleanup observation failed")
+                self.assertTrue(record['removal_succeeded'] is not removal_fails, "native removal observation mismatch")
+
+
 class ProtectedProbeLaunch(unittest.TestCase):
     def test_controlled_launch_metadata_rejects_payloads_and_unproven_success(self):
         record = {"status": "Passed", "phase": "Complete", "oversized_outcome": "ParameterIncorrect",
                   "oversized_length": 4000, "short_length": 140, "short_within_bound": True,
-                  "child_exit": 0, "cleanup_complete": True}
+                  "child_exit": 0, "cleanup_complete": True, "cleanup_created": True,
+                  "removal_attempted": True, "removal_succeeded": True,
+                  "disposal_attempted": True, "disposal_succeeded": True}
         self.assertEqual(probe.parse_launch_diagnostic(json.dumps(record)), record)
         for field, value in [("password", "PRIVATE_SENTINEL"), ("path", "PRIVATE_SENTINEL"),
                              ("phase", "PRIVATE_SENTINEL"), ("oversized_length", True),

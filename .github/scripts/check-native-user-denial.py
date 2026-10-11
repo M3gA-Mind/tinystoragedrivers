@@ -509,27 +509,138 @@ def create_windows_probe_file(outer, child, evidence):
     return path, identity
 
 
+CHILD_STAGES = {"NonAdmin", "PublicRead", "PublicWrite", "PublicReplace", "PublicDelete",
+                "PrivateRead", "PrivateWrite", "PrivateReplace", "PrivateDelete", "Complete"}
+CHILD_EXCEPTION_CLASSES = {"ObjectDisposed", "UnauthorizedAccess", "IOException", "FileNotFound",
+                           "MethodInvocation", "GetValueInvocation", "Runtime", "Other"}
+
+
+def instrument_windows_child(child):
+    """Add finite stage diagnostics while retaining original operations/exits."""
+    prefix = r"""$ErrorActionPreference='Stop'
+$stage='NonAdmin';$ordinal=$null;$expectedExit=1;$category='NotSpecified';$classes=@()
+function ChildExceptionChain($exception) {
+ $result=@()
+ for($depth=0;$depth -lt 3 -and $null -ne $exception;$depth++) {
+  $class=switch($exception.GetType().FullName) {
+   'System.ObjectDisposedException' {'ObjectDisposed'}
+   'System.UnauthorizedAccessException' {'UnauthorizedAccess'}
+   'System.IO.IOException' {'IOException'}
+   'System.IO.FileNotFoundException' {'FileNotFound'}
+   'System.Management.Automation.MethodInvocationException' {'MethodInvocation'}
+   'System.Management.Automation.GetValueInvocationException' {'GetValueInvocation'}
+   'System.Management.Automation.RuntimeException' {'Runtime'}
+   default {'Other'}
+  }
+  $result+=$class;$exception=$exception.InnerException
+ }
+ return ,$result
+}
+try {
+"""
+    child = child.replace("$ErrorActionPreference='Stop'\n", prefix, 1)
+    child = child.replace("if([IO.File]::ReadAllText($control)", "$stage='PublicRead'\nif([IO.File]::ReadAllText($control)")
+    child = child.replace("[IO.File]::WriteAllText($control,", "$stage='PublicWrite'\n[IO.File]::WriteAllText($control,")
+    child = child.replace("$source=$control+'.replacement'", "$stage='PublicReplace'\n$source=$control+'.replacement'")
+    child = child.replace("[IO.File]::Delete($control)", "$stage='PublicDelete'\n[IO.File]::Delete($control)")
+    child = child.replace("foreach($f in @(", "$ordinal=-1\nforeach($f in @(")
+    child = child.replace(" try { $h=[IO.File]::OpenRead", " $ordinal++;$stage='PrivateRead'\n try { $h=[IO.File]::OpenRead")
+    child = child.replace(" try { $h=[IO.File]::Open($f", " $stage='PrivateWrite'\n try { $h=[IO.File]::Open($f")
+    child = child.replace(" [IO.File]::WriteAllText($source,", " $stage='PrivateReplace'\n [IO.File]::WriteAllText($source,")
+    child = child.replace(" try { [IO.File]::Delete($f)", " $stage='PrivateDelete'\n try { [IO.File]::Delete($f)")
+    child = re.sub(r"exit (1[1-8])", r"$expectedExit=\1;exit \1", child)
+    child = child.replace("Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'",
+                          "$stage='Complete';$ordinal=$null\nWrite-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'")
+    return child + r"""} catch {
+ $expectedExit=1
+ $category=[string]$_.CategoryInfo.Category
+ if($category -notin @('ParserError','InvalidArgument','ObjectNotFound','PermissionDenied','InvalidOperation','ResourceUnavailable','NotSpecified')){$category='Other'}
+ $classes=ChildExceptionChain $_.Exception
+ exit 1
+} finally {
+ if($stage -ne 'Complete') {
+  ConvertTo-Json -Depth 4 -Compress -InputObject @{status='Failed';stage=$stage;object_ordinal=$ordinal;
+   expected_exit=$expectedExit;error_category=$category;exception_classes=$classes}
+ }
+}
+"""
+
+
+def parse_child_diagnostic(text):
+    """Accept only finite operation stages, ordinals, exits and known classes."""
+    if len(text) > 8192:
+        raise ValueError("invalid finite child diagnostic")
+    record = json.loads(text)
+    fields = {"status", "stage", "object_ordinal", "expected_exit", "error_category", "exception_classes"}
+    if (type(record) is not dict or set(record) != fields or record["status"] != "Failed"
+            or record["stage"] not in CHILD_STAGES - {"Complete"}
+            or record["error_category"] not in ERROR_CATEGORIES
+            or not bounded_integer(record["expected_exit"], 1, 18)
+            or record["expected_exit"] not in {1, 11, 12, 13, 14, 15, 16, 17, 18}
+            or type(record["exception_classes"]) is not list or len(record["exception_classes"]) > 3
+            or any(type(item) is not str or item not in CHILD_EXCEPTION_CLASSES for item in record["exception_classes"])):
+        raise ValueError("invalid finite child diagnostic")
+    private = record["stage"].startswith("Private")
+    if (private and not bounded_integer(record["object_ordinal"], 0, 3)) or (not private and record["object_ordinal"] is not None):
+        raise ValueError("invalid finite child diagnostic")
+    expected_stage = {11: "NonAdmin", 12: "PublicRead", 13: "PrivateRead", 14: "PublicDelete",
+                      15: "PrivateWrite", 16: "PrivateReplace", 17: "PrivateReplace", 18: "PrivateDelete"}
+    if record["expected_exit"] != 1 and record["stage"] != expected_stage[record["expected_exit"]]:
+        raise ValueError("invalid finite child diagnostic")
+    return record
+
+
+def classify_child_output(stdout, stderr, child_exit):
+    """Project private native streams into validated finite data only."""
+    if stdout.strip() == "ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED" and child_exit == 0 and not stderr.strip():
+        return {"diagnostic_status": "SuccessMarker"}
+    try:
+        record = parse_child_diagnostic(stdout)
+        if record["expected_exit"] != child_exit or stderr.strip():
+            raise ValueError("invalid finite child diagnostic")
+        return {"diagnostic_status": "Observed", **record}
+    except (ValueError, TypeError, KeyError):
+        pass
+    markers = {
+        "running_scripts_disabled": bool(re.search(r"\bRunningScriptsDisabled\b|\brunning scripts is disabled\b", stderr, re.I)),
+        "not_digitally_signed": bool(re.search(r"\bNotDigitallySigned\b|\bnot digitally signed\b", stderr, re.I)),
+        "ps_security_exception": bool(re.search(r"\bPSSecurityException\b", stderr)),
+        "file_not_found": bool(re.search(r"\bFileNotFoundException\b", stderr)),
+        "access_denied": bool(re.search(r"\bUnauthorizedAccessException\b|\bAccessDenied\b", stderr)),
+    }
+    if (not stdout.strip() and bounded_integer(child_exit, -(2**31), 2**32-1)
+            and child_exit != 0 and any(markers.values())):
+        return {"diagnostic_status": "StartupMarkers", **markers}
+    return {"diagnostic_status": "ParserRejected"}
+
+
 def parse_launch_diagnostic(text):
     """Accept only bounded controlled-launch outcomes, never native payloads."""
     if len(text) > 8192:
         raise ValueError("invalid finite launch diagnostic")
     record = json.loads(text)
     fields = {"status", "phase", "oversized_outcome", "oversized_length", "short_length",
-              "short_within_bound", "child_exit", "cleanup_complete"}
+              "short_within_bound", "child_exit", "cleanup_complete", "cleanup_created",
+              "removal_attempted", "removal_succeeded", "disposal_attempted", "disposal_succeeded"}
     if (type(record) is not dict or set(record) != fields
             or record["status"] not in {"Passed", "Failed"}
             or record["phase"] not in {"Password", "Account", "Group", "Credential", "Oversized", "Short", "Child", "Complete"}
             or record["oversized_outcome"] not in {"NotRun", "ParameterIncorrect", "UnexpectedFailure", "UnexpectedSuccess"}
             or any(not bounded_integer(record[key], 0, 131072) for key in ["oversized_length", "short_length"])
             or type(record["short_within_bound"]) is not bool
-            or type(record["cleanup_complete"]) is not bool
+            or any(type(record[key]) is not bool for key in ["cleanup_complete", "cleanup_created", "removal_attempted", "removal_succeeded", "disposal_attempted", "disposal_succeeded"])
             or (record["child_exit"] is not None and not bounded_integer(record["child_exit"], -(2**31), 2**32-1))):
         raise ValueError("invalid finite launch diagnostic")
     if record["short_within_bound"] != (0 < record["short_length"] <= 1024):
         raise ValueError("invalid finite launch diagnostic")
+    if (record["removal_succeeded"] and not record["removal_attempted"]
+            or record["removal_attempted"] and not record["cleanup_created"]
+            or record["disposal_succeeded"] and not record["disposal_attempted"]
+            or record["cleanup_complete"] != (record["disposal_succeeded"] and (not record["cleanup_created"] or record["removal_succeeded"]))):
+        raise ValueError("invalid finite launch diagnostic")
     if record["status"] == "Passed" and (record["phase"] != "Complete" or record["oversized_outcome"] != "ParameterIncorrect"
             or record["oversized_length"] <= 1024 or not record["short_within_bound"]
-            or record["child_exit"] != 0 or not record["cleanup_complete"]):
+            or record["child_exit"] != 0 or not record["cleanup_complete"] or not record["cleanup_created"]):
         raise ValueError("invalid finite launch diagnostic")
     return record
 
@@ -545,6 +656,14 @@ WINDOWS_PASSWORD_CLEANUP = """try {
  } finally {
   $password.Dispose()
  }"""
+
+
+def diagnostic_password_cleanup():
+    """Instrument original cleanup calls without suppressing their failures."""
+    return WINDOWS_PASSWORD_CLEANUP.replace(
+        "if($created){Remove-LocalUser -Name $name}",
+        "if($created){$removeAttempted=$true;Remove-LocalUser -Name $name;$removeSucceeded=$true}").replace(
+        "$password.Dispose()", "$disposeAttempted=$true;$password.Dispose();$disposeSucceeded=$true")
 
 
 def main():
@@ -621,13 +740,16 @@ foreach($f in @(FILES)) {
 }
 Write-Output 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'
 """.replace("CONTROL", literal(str(control))).replace("FILES", ",".join(map(literal, files)))
-            script_path, script_identity = create_windows_probe_file(outer, child, evidence)
             encoded = base64.b64encode(child.encode("utf-16le")).decode()
+            child = instrument_windows_child(child)
+            script_path, script_identity = create_windows_probe_file(outer, child, evidence)
+            diagnostic_cleanup = diagnostic_password_cleanup()
             # Both launches use this same account/credential/settings. The old
             # oversized command must fail before the short-file probe is accepted.
             script = """$ErrorActionPreference='Stop'
 $status='Failed';$phase='Password';$oldOutcome='NotRun';$oldLength=0;$shortLength=0
-$within=$false;$childExit=$null;$cleanup=$false
+$within=$false;$childExit=$null;$cleanup=$false;$created=$false
+$removeAttempted=$false;$removeSucceeded=$false;$disposeAttempted=$false;$disposeSucceeded=$false
 try {
  $name='tsd'+[Guid]::NewGuid().ToString('N').Substring(0,12)
  $password=[System.Security.SecureString]::new()
@@ -668,28 +790,47 @@ try {
   if($childExit -ne 0){throw 'child probe failed'}
   if([IO.File]::ReadAllText(OUT).Trim() -ne 'ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED'){throw 'child receipt absent'}
  } finally { PASSWORD_CLEANUP }
- $cleanup=$true;$phase='Complete';$status='Passed'
+ $phase='Complete';$status='Passed'
 } catch {}
+$cleanup=($disposeSucceeded -and (-not $created -or $removeSucceeded))
 ConvertTo-Json -Compress -InputObject @{status=$status;phase=$phase;oversized_outcome=$oldOutcome;
- oversized_length=$oldLength;short_length=$shortLength;short_within_bound=$within;child_exit=$childExit;cleanup_complete=$cleanup}
+ oversized_length=$oldLength;short_length=$shortLength;short_within_bound=$within;child_exit=$childExit;cleanup_complete=$cleanup;
+ cleanup_created=$created;removal_attempted=$removeAttempted;removal_succeeded=$removeSucceeded;
+ disposal_attempted=$disposeAttempted;disposal_succeeded=$disposeSucceeded}
 if($status -ne 'Passed'){exit 1}
-""".replace("PASSWORD_CONSTRUCTION", WINDOWS_PASSWORD_CONSTRUCTION).replace("PASSWORD_CLEANUP", WINDOWS_PASSWORD_CLEANUP).replace("ENCODED", encoded).replace("SCRIPTFILE", literal('"' + str(script_path) + '"')).replace("OUT", literal(str(outer / "child.stdout"))).replace("ERR", literal(str(outer / "child.stderr")))
+""".replace("PASSWORD_CONSTRUCTION", WINDOWS_PASSWORD_CONSTRUCTION).replace("PASSWORD_CLEANUP", diagnostic_cleanup).replace("ENCODED", encoded).replace("SCRIPTFILE", literal('"' + str(script_path) + '"')).replace("OUT", literal(str(outer / "child.stdout"))).replace("ERR", literal(str(outer / "child.stderr")))
             result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
-            # Redirected native streams are private disposable fixture data, never
-            # upload artifacts. Delete them before any assertion or failure report.
-            try:
-                for raw in [outer / "child.stdout", outer / "child.stderr"]:
-                    raw.unlink(missing_ok=True)
-            except OSError:
-                raise RuntimeError("private probe stream cleanup failed") from None
+            # Read raw child streams only in memory, project finite data before
+            # deleting them, and never copy them into upload artifacts.
             try:
                 launch = parse_launch_diagnostic(result.stdout)
             except (ValueError, TypeError, KeyError):
+                launch = None
+            raw_stdout = ""
+            raw_stderr = ""
+            try:
+                if (outer / "child.stdout").exists():
+                    raw_stdout = (outer / "child.stdout").read_text(encoding="utf-8", errors="replace")
+                if (outer / "child.stderr").exists():
+                    raw_stderr = (outer / "child.stderr").read_text(encoding="utf-8", errors="replace")
+                child_record = classify_child_output(raw_stdout, raw_stderr, launch["child_exit"] if launch else None)
+            except OSError:
+                child_record = {"diagnostic_status": "ParserRejected"}
+            finally:
+                raw_stdout = raw_stderr = ""
+                try:
+                    for raw in [outer / "child.stdout", outer / "child.stderr"]:
+                        raw.unlink(missing_ok=True)
+                except OSError:
+                    raise RuntimeError("private probe stream cleanup failed") from None
+            (evidence / "child-diagnostic.json").write_text(json.dumps(child_record, indent=2) + "\n")
+            if launch is None:
                 (evidence / "controlled-launch.json").write_text('{"diagnostic_status":"ParserRejected"}\n')
                 raise RuntimeError("controlled native launch diagnostic rejected") from None
             (evidence / "controlled-launch.json").write_text(json.dumps(launch, indent=2) + "\n")
             validate_probe_file_identity(script_path, script_identity)
-            if launch["status"] != "Passed" or result.returncode != 0 or result.stderr.strip():
+            if (launch["status"] != "Passed" or result.returncode != 0 or result.stderr.strip()
+                    or child_record != {"diagnostic_status": "SuccessMarker"}):
                 raise RuntimeError("controlled separate-user probe failed")
             result = subprocess.CompletedProcess([], 0, "ACTUAL_STANDARD_USER_SIXTEEN_OPERATIONS_DENIED\n", "")
         else:
