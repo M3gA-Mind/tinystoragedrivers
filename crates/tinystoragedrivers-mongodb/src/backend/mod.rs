@@ -255,6 +255,7 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionEnumeration);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
         } else {
             base

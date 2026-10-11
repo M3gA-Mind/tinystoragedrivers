@@ -237,6 +237,18 @@ async fn refused_streams_and_blobs(fenced: &ScopedStorage, names: &Names, check:
         ErrorKind::Fenced,
         &fenced_kind("append_batch"),
     );
+    if super::has(fenced, Capability::ConditionalStreamAppend) {
+        let next = ok(streams.len(&names.stream).await, "fenced stream length");
+        for values in [vec![], vec![json!(11)]] {
+            fails(
+                streams
+                    .append_batch_if_offset(&names.stream, next, values)
+                    .await,
+                ErrorKind::Fenced,
+                &fenced_kind("conditional append"),
+            );
+        }
+    }
     fails(
         streams.truncate_before(&names.stream, u64::MAX).await,
         ErrorKind::Fenced,

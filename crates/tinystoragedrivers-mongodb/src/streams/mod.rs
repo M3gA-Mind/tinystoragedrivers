@@ -37,7 +37,7 @@ use mongodb::options::{FindOptions, IndexOptions};
 use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Capability, Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
 use crate::backend::Shared;
@@ -234,6 +234,7 @@ impl MongoStreams {
         handle: &ScopedCollection,
         stream: &str,
         values: &[Value],
+        expected: Option<u64>,
         mut session: Option<&mut ClientSession>,
     ) -> Result<Option<u64>> {
         let generation = self.generation(stream, session.as_deref_mut()).await?;
@@ -241,6 +242,9 @@ impl MongoStreams {
             .edge(handle, stream, generation, -1, session.as_deref_mut())
             .await?
             .map_or(0, |last| last.end);
+        if expected.is_some_and(|offset| offset != end) {
+            return Err(StorageError::conflict("stream next offset changed"));
+        }
         if values.is_empty() {
             return Ok(Some(end));
         }
@@ -360,7 +364,7 @@ impl StreamStore for MongoStreams {
             // A lost race aborts the transaction (a duplicate key ends it),
             // so it is retried as a transient failure.
             return in_fence!(&self.shared, fence, session => {
-                self.append_once(&handle, stream, &values, Some(session))
+                self.append_once(&handle, stream, &values, None, Some(session))
                     .await
                     .and_then(|end| {
                         end.ok_or_else(|| {
@@ -370,13 +374,91 @@ impl StreamStore for MongoStreams {
             });
         }
         for _ in 0..APPEND_ATTEMPTS {
-            if let Some(end) = self.append_once(&handle, stream, &values, None).await? {
+            if let Some(end) = self
+                .append_once(&handle, stream, &values, None, None)
+                .await?
+            {
                 return Ok(end);
             }
         }
         Err(StorageError::unavailable(
             "stream kept growing concurrently; retry",
         ))
+    }
+
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        validate_stream(stream)?;
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::ConditionalStreamAppend,
+                "conditional stream append requires MongoDB transactions",
+            ));
+        }
+        let handle = self.segments().await?;
+        if let Some(fence) = &self.fence {
+            return in_fence!(&self.shared, fence, session => {
+                self.append_once(&handle, stream, &values, Some(expected_next_offset), Some(session))
+                    .await.and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
+            });
+        }
+        let mut session = self
+            .shared
+            .client
+            .start_session()
+            .await
+            .map_err(errors::failed("start a session"))?;
+        let mut last = StorageError::unavailable("conditional append kept aborting; retry");
+        for _ in 0..APPEND_ATTEMPTS {
+            session
+                .start_transaction()
+                .await
+                .map_err(errors::failed("start a transaction"))?;
+            let outcome = self
+                .append_once(
+                    &handle,
+                    stream,
+                    &values,
+                    Some(expected_next_offset),
+                    Some(&mut session),
+                )
+                .await;
+            let first = match outcome {
+                Ok(Some(first)) => first,
+                Ok(None) => {
+                    let _ = session.abort_transaction().await;
+                    continue;
+                }
+                Err(error) => {
+                    let _ = session.abort_transaction().await;
+                    if error.is_retryable() {
+                        last = error;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            match crate::documents::MongoDocuments::commit(&mut session).await {
+                Ok(()) => return Ok(first),
+                Err(error) => match crate::documents::commit_failure(&error) {
+                    crate::documents::CommitFailure::Aborted => {
+                        last = errors::map(error, "commit conditional append");
+                    }
+                    crate::documents::CommitFailure::Unknown => return Err(StorageError::backend(
+                        "conditional append may or may not have committed; read before retrying",
+                    )
+                    .with_source(error)),
+                    crate::documents::CommitFailure::Failed => {
+                        return Err(errors::map(error, "commit conditional append"));
+                    }
+                },
+            }
+        }
+        Err(last)
     }
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {

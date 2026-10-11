@@ -35,10 +35,12 @@ pub enum Capability {
     /// `DocumentStore::collections` enumerates collections with records in
     /// the handle's scope.
     CollectionEnumeration,
+    /// Atomic stream append guarded by its persistent next offset.
+    ConditionalStreamAppend,
 }
 
 impl Capability {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::FullText,
         Self::Transactions,
         Self::Ttl,
@@ -46,6 +48,7 @@ impl Capability {
         Self::PresignedUrls,
         Self::StreamingBlobs,
         Self::CollectionEnumeration,
+        Self::ConditionalStreamAppend,
     ];
 
     const fn bit(self) -> u32 {
@@ -57,6 +60,7 @@ impl Capability {
             Self::PresignedUrls => 1 << 4,
             Self::StreamingBlobs => 1 << 5,
             Self::CollectionEnumeration => 1 << 6,
+            Self::ConditionalStreamAppend => 1 << 7,
         }
     }
 }
@@ -71,6 +75,7 @@ impl fmt::Display for Capability {
             Self::PresignedUrls => "presigned_urls",
             Self::StreamingBlobs => "streaming_blobs",
             Self::CollectionEnumeration => "collection_enumeration",
+            Self::ConditionalStreamAppend => "conditional_stream_append",
         })
     }
 }
@@ -111,7 +116,8 @@ impl Capabilities {
                 | Capability::Fencing.bit()
                 | Capability::PresignedUrls.bit()
                 | Capability::StreamingBlobs.bit()
-                | Capability::CollectionEnumeration.bit(),
+                | Capability::CollectionEnumeration.bit()
+                | Capability::ConditionalStreamAppend.bit(),
         )
     }
 

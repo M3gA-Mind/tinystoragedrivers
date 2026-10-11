@@ -227,16 +227,20 @@ fn read_lines(paths: &Paths, from: u64, limit: usize) -> Result<Vec<StreamEntry>
     Ok(out)
 }
 
-#[async_trait]
-impl StreamStore for FileStreams {
-    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
-        self.append_batch(stream, vec![value]).await
-    }
-
-    async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
+impl FileStreams {
+    async fn append_inner(
+        &self,
+        stream: &str,
+        expected: Option<u64>,
+        values: Vec<Value>,
+    ) -> Result<u64> {
         let name = stream.to_owned();
         self.write(stream, move |paths| {
             let existing = read_meta(paths, &name)?;
+            let current = existing.as_ref().map_or(Ok(0), |meta| stream_len(paths, meta))?;
+            if expected.is_some_and(|offset| offset != current) {
+                return Err(StorageError::conflict("stream next offset changed"));
+            }
             if values.is_empty() {
                 return existing.map_or(Ok(0), |meta| stream_len(paths, &meta));
             }
@@ -293,6 +297,27 @@ impl StreamStore for FileStreams {
             Ok(first)
         })
         .await
+    }
+}
+
+#[async_trait]
+impl StreamStore for FileStreams {
+    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
+        self.append_batch(stream, vec![value]).await
+    }
+
+    async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
+        self.append_inner(stream, None, values).await
+    }
+
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        self.append_inner(stream, Some(expected_next_offset), values)
+            .await
     }
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {

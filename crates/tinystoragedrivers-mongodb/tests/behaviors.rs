@@ -470,3 +470,47 @@ async fn live_deleting_a_stream_restarts_it_cleanly() {
     assert_eq!(window.len(), 1);
     assert_eq!(window[0].value, json!(3));
 }
+
+#[tokio::test]
+async fn live_conditional_append_has_one_winner_across_independent_clients() {
+    let Some(first) = connect().await else {
+        return skip("live_conditional_append_has_one_winner_across_independent_clients");
+    };
+    let second = connect().await.unwrap();
+    let scope = Scope::new("conditional-race").unwrap();
+    let a = first.for_scope(&scope).unwrap();
+    let b = second.for_scope(&scope).unwrap();
+    let stream = name("conditional");
+    let (a_result, b_result) = tokio::join!(
+        a.streams()
+            .append_batch_if_offset(&stream, 0, vec![json!(1)]),
+        b.streams()
+            .append_batch_if_offset(&stream, 0, vec![json!(2)])
+    );
+    assert_eq!(
+        usize::from(a_result.is_ok()) + usize::from(b_result.is_ok()),
+        1
+    );
+    assert_eq!(
+        a_result.err().or_else(|| b_result.err()).unwrap().kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(a.streams().len(&stream).await.unwrap(), 1);
+    let unsupported = first.without_transactions();
+    assert!(
+        !unsupported
+            .capabilities()
+            .contains(Capability::ConditionalStreamAppend)
+    );
+    let scoped = unsupported.for_scope(&scope).unwrap();
+    assert_eq!(
+        scoped
+            .streams()
+            .append_batch_if_offset(&stream, 1, vec![json!(3)])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::ConditionalStreamAppend)
+    );
+    assert_eq!(b.streams().len(&stream).await.unwrap(), 1);
+}
