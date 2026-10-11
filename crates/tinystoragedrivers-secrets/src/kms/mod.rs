@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tinystoragedrivers_core::{
@@ -74,7 +74,7 @@ pub struct KmsKeyProvider {
     initial_key_id: String,
     ttl: Duration,
     cache: Mutex<HashMap<Scope, CachedKey>>,
-    loading: tokio::sync::Mutex<()>,
+    loading: Mutex<HashMap<Scope, Weak<tokio::sync::Mutex<()>>>>,
 }
 impl fmt::Debug for KmsKeyProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -95,7 +95,7 @@ impl KmsKeyProvider {
     ) -> Result<Self> {
         let initial_key_id = key_id.into();
         if initial_key_id.is_empty() {
-            return Err(StorageError::invalid_input("KMS key id is empty"));
+            return Err(StorageError::invalid_input("kms key id is empty"));
         }
         Ok(Self {
             storage,
@@ -103,7 +103,7 @@ impl KmsKeyProvider {
             initial_key_id,
             ttl,
             cache: Mutex::new(HashMap::new()),
-            loading: tokio::sync::Mutex::new(()),
+            loading: Mutex::new(HashMap::new()),
         })
     }
     /// Drop this pod's cached key for `scope`, zeroizing its material.
@@ -116,6 +116,21 @@ impl KmsKeyProvider {
             .map_err(|_| StorageError::backend("key cache lock failed"))?
             .remove(scope);
         Ok(())
+    }
+    // Only callers working on one scope share a lock. Weak entries are pruned
+    // when a new operation starts, so idle tenant locks are not retained.
+    fn scope_lock(&self, scope: &Scope) -> Result<Arc<tokio::sync::Mutex<()>>> {
+        let mut loading = self
+            .loading
+            .lock()
+            .map_err(|_| StorageError::backend("key loading lock map failed"))?;
+        loading.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = loading.get(scope).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        loading.insert(scope.clone(), Arc::downgrade(&lock));
+        Ok(lock)
     }
     fn cached(&self, scope: &Scope, envelope: &Value) -> Result<Option<Zeroizing<[u8; 32]>>> {
         let mut cache = self
@@ -168,7 +183,7 @@ impl KmsKeyProvider {
     async fn envelope(&self, scope: &Scope, id: &str, key: &[u8; 32]) -> Result<Value> {
         let wrapped = self.kms.wrap(id, scope, key).await?;
         if wrapped.is_empty() {
-            return Err(StorageError::crypto("KMS returned an empty envelope"));
+            return Err(StorageError::crypto("kms returned an empty envelope"));
         }
         Ok(json!({ "format": 1, "scope": scope.as_str(), "key_id": id, "wrapped": wrapped }))
     }
@@ -181,9 +196,10 @@ impl KmsKeyProvider {
     /// Missing envelope, invalid key identity, KMS/storage failure or conflict.
     pub async fn rotate(&self, scope: &Scope, new_key_id: &str) -> Result<()> {
         if new_key_id.is_empty() {
-            return Err(StorageError::invalid_input("KMS key id is empty"));
+            return Err(StorageError::invalid_input("kms key id is empty"));
         }
-        let _guard = self.loading.lock().await;
+        let loading = self.scope_lock(scope)?;
+        let _guard = loading.lock().await;
         let storage = self.storage.for_scope(scope)?;
         let docs = storage.documents();
         let found = docs
@@ -207,11 +223,12 @@ impl KmsKeyProvider {
 impl KeyProvider for KmsKeyProvider {
     fn data_key(&self, _scope: &Scope) -> Result<Zeroizing<[u8; 32]>> {
         Err(StorageError::unavailable(
-            "KMS key requires async envelope validation",
+            "kms key requires async envelope validation",
         ))
     }
     async fn data_key_async(&self, scope: &Scope) -> Result<Zeroizing<[u8; 32]>> {
-        let _guard = self.loading.lock().await;
+        let loading = self.scope_lock(scope)?;
+        let _guard = loading.lock().await;
         let storage = self.storage.for_scope(scope)?;
         let docs = storage.documents();
         let (key, envelope) = if let Some(found) =

@@ -1,3 +1,4 @@
+//! Envelope sharing, rotation, cache validation and failures of the KMS provider.
 use super::*;
 use crate::{DocumentSecrets, SecretStore};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -229,4 +230,60 @@ async fn concurrent_rotations_detect_conflict_without_changing_the_data_key() {
     assert_eq!(loser.kind(), ErrorKind::Conflict);
     assert_eq!(*first.data_key_async(&scope).await.unwrap(), *before);
     assert_eq!(*second.data_key_async(&scope).await.unwrap(), *before);
+}
+
+#[derive(Debug, Default)]
+struct BlockingKms {
+    blocked: AtomicBool,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl KmsClient for BlockingKms {
+    async fn wrap(&self, _: &str, scope: &Scope, key: &[u8; 32]) -> Result<Vec<u8>> {
+        if scope.as_str() == "slow" && self.blocked.load(Ordering::SeqCst) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(key.to_vec())
+    }
+    async fn unwrap(&self, _: &str, _: &Scope, wrapped: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+        Ok(Zeroizing::new(wrapped.try_into().unwrap()))
+    }
+}
+
+#[tokio::test]
+async fn a_blocked_tenant_rotation_does_not_stall_another_tenant_key_load() {
+    use std::{future::Future, task::Poll};
+    let kms = Arc::new(BlockingKms::default());
+    let provider = Arc::new(
+        KmsKeyProvider::new(
+            Arc::new(MemoryStorage::new()),
+            kms.clone(),
+            "key",
+            Duration::from_secs(60),
+        )
+        .unwrap(),
+    );
+    let slow = Scope::new("slow").unwrap();
+    provider.data_key_async(&slow).await.unwrap();
+    kms.blocked.store(true, Ordering::SeqCst);
+    let rotate = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.rotate(&slow, "new-key").await })
+    };
+    kms.started.notified().await;
+    let other = Scope::new("other").unwrap();
+    let mut load = Box::pin(provider.data_key_async(&other));
+    // The fake backend and other scope KMS work complete immediately. Poll once
+    // to prove this work can finish while the slow scope is still blocked.
+    let independent =
+        std::future::poll_fn(|cx| Poll::Ready(load.as_mut().poll(cx).is_ready())).await;
+    kms.release.notify_one();
+    rotate.await.unwrap().unwrap();
+    assert!(
+        independent,
+        "another tenant must not wait for the blocked rotation"
+    );
 }

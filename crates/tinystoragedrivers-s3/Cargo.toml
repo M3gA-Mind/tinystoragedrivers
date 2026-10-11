@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 tinystoragedrivers-core = { workspace = true }
 # S3 protocol, multipart uploads and SigV4 presigning without the AWS SDK.
-object_store = { version = "0.12", default-features = false, features = ["aws"] }
+object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
 # Object-store payloads and streaming responses.
 bytes = "1"
 futures-util = "0.3"

@@ -2,8 +2,9 @@
 
 use serde_json::json;
 
-use super::{empty, fails, ok, unique};
+use super::{empty, fails, has, ok, unique};
 use crate::backend::{ScopedStorage, StorageBackend};
+use crate::capabilities::Capability;
 use crate::document::Precondition;
 use crate::error::ErrorKind;
 use crate::filter::Filter;
@@ -90,6 +91,18 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
 }
 
 async fn collection_listing(a: &ScopedStorage, b: &ScopedStorage) {
+    if !has(a, Capability::CollectionEnumeration) || !has(b, Capability::CollectionEnumeration) {
+        for storage in [a, b] {
+            if !has(storage, Capability::CollectionEnumeration) {
+                fails(
+                    storage.documents().collections("").await,
+                    ErrorKind::Unsupported(Capability::CollectionEnumeration),
+                    "scope collections without the capability",
+                );
+            }
+        }
+        return;
+    }
     let only_a = unique("iso_only_a");
     let only_b = unique("iso_only_b");
     ok(
@@ -105,18 +118,12 @@ async fn collection_listing(a: &ScopedStorage, b: &ScopedStorage) {
         "b put in a B-only collection",
     );
     assert_eq!(
-        ok(
-            a.documents().collections("iso_only_b").await,
-            "a list B-only"
-        ),
+        ok(a.documents().collections(&only_b).await, "a list B-only"),
         Vec::<String>::new(),
         "A cannot enumerate B-only collections"
     );
     assert_eq!(
-        ok(
-            b.documents().collections("iso_only_a").await,
-            "b list A-only"
-        ),
+        ok(b.documents().collections(&only_a).await, "b list A-only"),
         Vec::<String>::new(),
         "B cannot enumerate A-only collections"
     );

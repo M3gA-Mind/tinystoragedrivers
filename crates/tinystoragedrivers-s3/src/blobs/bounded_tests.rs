@@ -45,6 +45,7 @@ impl MultipartUpload for Upload {
         Ok(PutResult {
             e_tag: None,
             version: None,
+            extensions: http::Extensions::default(),
         })
     }
     async fn abort(&mut self) -> object_store::Result<()> {
@@ -76,8 +77,11 @@ impl ObjectStore for Recorder {
     ) -> object_store::Result<object_store::GetResult> {
         self.inner.get_opts(path, options).await
     }
-    async fn delete(&self, path: &Path) -> object_store::Result<()> {
-        self.inner.delete(path).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
     }
     fn list(
         &self,
@@ -91,11 +95,13 @@ impl ObjectStore for Recorder {
     ) -> object_store::Result<object_store::ListResult> {
         self.inner.list_with_delimiter(prefix).await
     }
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }
 

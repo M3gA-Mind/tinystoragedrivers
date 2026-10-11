@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http::Method;
 use object_store::{
-    Attribute, Attributes, ObjectStore, PutMultipartOptions, PutOptions, aws::AmazonS3Builder,
-    path::Path, signer::Signer,
+    Attribute, Attributes, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
+    aws::AmazonS3Builder, path::Path, signer::Signer,
 };
 use tinystoragedrivers_core::{
     Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
@@ -313,10 +313,45 @@ fn map_error(error: object_store::Error) -> StorageError {
         object_store::Error::Precondition { .. } => ErrorKind::Conflict,
         _ => ErrorKind::Backend,
     };
-    // The original transport message can contain credential-bearing URLs.
-    // Do not include it in diagnostics.
+    // Transport messages and paths can contain credentials and signed URLs.
+    // Retain the error category through a source with no unsanitized chain.
+    let category = match &error {
+        object_store::Error::Generic { .. } => "object store backend failure",
+        object_store::Error::NotFound { .. } => "object store object not found",
+        object_store::Error::AlreadyExists { .. } => "object store object already exists",
+        object_store::Error::Precondition { .. } => "object store precondition failed",
+        object_store::Error::PermissionDenied { .. } => "object store permission denied",
+        object_store::Error::Unauthenticated { .. } => "object store authentication failed",
+        object_store::Error::InvalidPath { .. } => "object store invalid path",
+        object_store::Error::NotSupported { .. } => "object store operation unsupported",
+        object_store::Error::NotImplemented { .. } => "object store operation unimplemented",
+        object_store::Error::NotModified { .. } => "object store object not modified",
+        object_store::Error::UnknownConfigurationKey { .. } => "object store configuration invalid",
+        _ => "object store task failed",
+    };
     drop(error);
     StorageError::new(kind, "object store operation failed")
+        .with_source(SanitizedObjectStoreError(category))
+}
+
+#[derive(Debug)]
+struct SanitizedObjectStoreError(&'static str);
+
+impl std::fmt::Display for SanitizedObjectStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for SanitizedObjectStoreError {}
+
+fn multipart_reader_error(error: std::io::Error) -> StorageError {
+    let kind = if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        ErrorKind::InvalidInput
+    } else {
+        ErrorKind::Backend
+    };
+    StorageError::new(kind, "blob reader failed before declared length").with_source(error)
 }
 
 #[async_trait]
@@ -399,9 +434,10 @@ impl BlobStore for S3Blobs {
                     let size = usize::try_from(remaining.min(PART_SIZE as u64))
                         .map_err(|_| StorageError::invalid_input("blob part size overflow"))?;
                     let mut part = vec![0; size];
-                    reader.read_exact(&mut part).await.map_err(|_| {
-                        StorageError::invalid_input("blob reader ended before declared length")
-                    })?;
+                    reader
+                        .read_exact(&mut part)
+                        .await
+                        .map_err(multipart_reader_error)?;
                     upload
                         .put_part(Bytes::from(part).into())
                         .await
@@ -524,6 +560,8 @@ impl BlobStore for S3Blobs {
         while let Some(object) = objects.try_next().await.map_err(map_error)? {
             if let Some(key) = object.location.as_ref().strip_prefix(&self.prefix)
                 && key.starts_with(prefix)
+                && validate_blob_key(key).is_ok()
+                && key.len() <= self.max_key_len()
             {
                 // S3 ListObjects omits content-type, so fetch HEAD for the
                 // port's complete metadata contract.

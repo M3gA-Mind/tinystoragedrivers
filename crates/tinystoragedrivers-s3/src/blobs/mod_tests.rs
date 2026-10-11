@@ -243,3 +243,76 @@ async fn scoped_key_limit_counts_utf8_and_rejects_overflow_without_network() {
         .is_err()
     );
 }
+
+#[derive(Debug)]
+struct FailedReader;
+
+impl tokio::io::AsyncRead for FailedReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset,
+        )))
+    }
+}
+
+#[tokio::test]
+async fn multipart_source_io_failure_is_a_backend_error_with_its_source() {
+    use std::error::Error;
+    let store = handle(Arc::new(object_store::memory::InMemory::new()), "alice");
+    let error = store
+        .put_stream("failed", Box::pin(FailedReader), PART_SIZE as u64 + 1, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    assert!(store.head("failed").await.unwrap().is_none());
+}
+
+#[test]
+fn object_store_error_source_describes_the_category_without_transport_secrets() {
+    use std::error::Error;
+    let error = map_error(object_store::Error::Generic {
+        store: "s3",
+        source: Box::new(std::io::Error::other(
+            "https://secret@example.test?credential=hidden",
+        )),
+    });
+    let source = error
+        .source()
+        .expect("backend failures retain a sanitized source");
+    assert!(source.to_string().contains("backend"));
+    assert!(!format!("{error:?} {source}").contains("hidden"));
+    assert!(source.source().is_none());
+}
+
+#[tokio::test]
+async fn listing_skips_oversized_keys_written_by_other_clients() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let store = handle(objects.clone(), "alice");
+    store.put("valid", vec![1], None).await.unwrap();
+    for key in ["x".repeat(store.max_key_len() + 1)] {
+        let path = Path::from(format!("{}{key}", store.prefix));
+        objects
+            .put(&path, Bytes::from_static(b"external").into())
+            .await
+            .unwrap();
+    }
+    let listed = store.list("").await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>(),
+        ["valid"]
+    );
+}

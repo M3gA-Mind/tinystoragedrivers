@@ -112,9 +112,9 @@ async fn live_collection_listing_is_prefix_filtered_and_scope_isolated() {
     let Some(backend) = connect().await else {
         return skip("live_collection_listing_is_prefix_filtered_and_scope_isolated");
     };
-    let scope_a = Scope::new(&name("collections_a")).unwrap();
-    let scope_b = Scope::new(&name("collections_b")).unwrap();
-    let empty_scope = Scope::new(&name("collections_empty")).unwrap();
+    let scope_a = Scope::new(name("collections_a")).unwrap();
+    let scope_b = Scope::new(name("collections_b")).unwrap();
+    let empty_scope = Scope::new(name("collections_empty")).unwrap();
     let prefix = name("enumeration");
     let only_a = format!("{prefix}_a");
     let only_b = format!("{prefix}_b");
@@ -139,13 +139,9 @@ async fn live_collection_listing_is_prefix_filtered_and_scope_isolated() {
         b.documents().collections(&prefix).await.unwrap(),
         vec![only_b]
     );
-    assert!(
-        empty
-            .documents()
-            .collections(&prefix)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        empty.documents().collections(&prefix).await.unwrap(),
+        Vec::<String>::new()
     );
 
     a.documents()

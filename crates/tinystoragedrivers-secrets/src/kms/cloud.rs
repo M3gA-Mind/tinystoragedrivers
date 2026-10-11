@@ -15,7 +15,7 @@ impl SensitiveJson {
     fn encode(self) -> Result<Zeroizing<Vec<u8>>> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, &self.0)
-            .map_err(|_| StorageError::serialization("KMS payload encoding failed"))?;
+            .map_err(|_| StorageError::serialization("kms payload encoding failed"))?;
         Ok(bytes)
     }
 }
@@ -37,7 +37,7 @@ fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|_| StorageError::unavailable("KMS HTTP client initialization failed"))
+        .map_err(|_| StorageError::unavailable("kms HTTP client initialization failed"))
 }
 
 const LABEL: &str = "tinystoragedrivers-secrets/v1";
@@ -45,7 +45,7 @@ const LABEL: &str = "tinystoragedrivers-secrets/v1";
 async fn response(response: reqwest::Response) -> Result<SensitiveJson> {
     // Never echo cloud response bodies: an upstream could include plaintext.
     if !response.status().is_success() {
-        return Err(StorageError::unavailable("KMS request rejected"));
+        return Err(StorageError::unavailable("kms request rejected"));
     }
     response
         .json()
@@ -60,16 +60,16 @@ fn field(value: &SensitiveJson, name: &str) -> Result<Vec<u8>> {
                 .0
                 .get(name)
                 .and_then(Value::as_str)
-                .ok_or_else(|| StorageError::crypto("KMS response missing key material"))?,
+                .ok_or_else(|| StorageError::crypto("kms response missing key material"))?,
         )
-        .map_err(|_| StorageError::crypto("KMS response has invalid base64"))
+        .map_err(|_| StorageError::crypto("kms response has invalid base64"))
 }
 fn key(value: Vec<u8>) -> Result<Zeroizing<[u8; 32]>> {
     let value = Zeroizing::new(value);
     let bytes = value
         .as_slice()
         .try_into()
-        .map_err(|_| StorageError::crypto("KMS returned wrong key length"))?;
+        .map_err(|_| StorageError::crypto("kms returned wrong key length"))?;
     Ok(Zeroizing::new(bytes))
 }
 
@@ -140,7 +140,7 @@ impl GcpKms {
             request
                 .send()
                 .await
-                .map_err(|_| StorageError::unavailable("KMS transport failed"))?,
+                .map_err(|_| StorageError::unavailable("kms transport failed"))?,
         )
         .await
     }
@@ -288,7 +288,7 @@ impl AwsKms {
             request
                 .send()
                 .await
-                .map_err(|_| StorageError::unavailable("KMS transport failed"))?,
+                .map_err(|_| StorageError::unavailable("kms transport failed"))?,
         )
         .await
     }
@@ -342,7 +342,7 @@ fn signature(
 fn mac(key: &[u8], data: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
-        .map_err(|_| StorageError::crypto("AWS signing failed"))?;
+        .map_err(|_| StorageError::crypto("aws signing failed"))?;
     mac.update(data);
     Ok(Zeroizing::new(mac.finalize().into_bytes().into()))
 }
@@ -360,7 +360,7 @@ fn hex(bytes: &[u8]) -> String {
 fn validate_aws_key_id(id: &str) -> Result<()> {
     if id.is_empty() || id.starts_with("alias/") || id.contains(":alias/") {
         return Err(StorageError::invalid_input(
-            "AWS KMS requires an immutable key id or key ARN",
+            "aws kms requires an immutable key id or key arn",
         ));
     }
     Ok(())

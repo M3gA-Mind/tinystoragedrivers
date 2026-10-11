@@ -72,6 +72,14 @@ async fn crud(storage: &ScopedStorage) {
 
 async fn collection_listing(storage: &ScopedStorage) {
     let docs = storage.documents();
+    if !has(storage, Capability::CollectionEnumeration) {
+        fails(
+            docs.collections("").await,
+            ErrorKind::Unsupported(Capability::CollectionEnumeration),
+            "collections without the capability",
+        );
+        return;
+    }
     let prefix = unique("collections");
     let first = format!("{prefix}_first");
     let second = format!("{prefix}_second");
