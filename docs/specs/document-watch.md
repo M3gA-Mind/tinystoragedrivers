@@ -69,3 +69,37 @@ Mongo conformance covers subscribe-before-read, same-scope independent handles,
 scope/database/filter/cursor isolation, deletion/filter exit, TTL, lost resume,
 and stale fence refusal. Live tests use an explicitly supplied local replica
 set fixture and retain the optional environment gate used by other drivers.
+
+## Local implementation evidence
+
+The implementation branch preserves its feature checkpoint and merge of
+canonical 89cc548. It does not change a host checkout or consume ScopePurge.
+
+Behavioral failures were observed before each relevant fix:
+
+- Polling accepted stale opening and stale delivery: four passing tests,
+  two failures, exit 101. Native empty checked-batch admission now rejects both.
+- Reset Debug exposed its native error payload: one failure, exit 101. Debug
+  now records only the source kind while callers retain the original source.
+- Native Mongo initially returned Unsupported for the actual subscribe/read,
+  cross-scope, insertion, filter exit and deletion regression: exit 101. The
+  same real local replica-set test passes through the native stream.
+- Cancellation during native admission discarded a consumed hint: one failure,
+  exit 101. Pending delivery now retains it until successful admission.
+- Memory's backend capability inherited unsupported Watch, and a composite
+  imported arbitrary document capabilities from a blob backend: both focused
+  regressions failed with exit 101 before explicit capability masks.
+
+Fresh local replica/standalone Watch tests pass (seven): scope and connected
+context isolation, exact cursor binding, stale owner refusal, TTL boundary,
+collection destruction/reopening, insertion/filter exit/deletion and native
+history-loss terminal reset with the original Mongo error. History loss changes
+only a returned token timestamp; no oplog truncation or server state mutation
+is required. Wait cancellation and admission cancellation have separate tests.
+
+At this point strict full-workspace Clippy, all-target/all-feature build,
+573 all-feature tests, 530 default tests (including doctests, none ignored),
+strict rustdoc, fmt and Rust 1.88 locked workspace check all passed. Per-source
+coverage is still a required publication gate and is recorded separately after
+its instrumented execution. Disposable log filenames are not a substitute for
+these retained behavior names and recorded terminal outcomes.

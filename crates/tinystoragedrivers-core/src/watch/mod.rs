@@ -20,7 +20,7 @@ impl WatchCursor {
     /// Wrap a driver's encoded cursor or a previously persisted cursor.
     ///
     /// # Errors
-    /// Empty or oversized cursors return InvalidInput. Binding and native
+    /// Empty or oversized cursors return `InvalidInput`. Binding and native
     /// token validation remain the issuing driver's responsibility.
     pub fn new(bytes: Vec<u8>) -> Result<Self> {
         let cursor = Self(bytes);
@@ -37,7 +37,7 @@ impl WatchCursor {
     /// Validate size, including cursors reconstructed by serde.
     ///
     /// # Errors
-    /// InvalidInput for empty or oversized cursors.
+    /// `InvalidInput` for empty or oversized cursors.
     pub fn validate(&self) -> Result<()> {
         if self.0.is_empty() || self.0.len() > MAX_WATCH_CURSOR_BYTES {
             return Err(StorageError::invalid_input("invalid watch cursor size"));
@@ -75,7 +75,7 @@ impl WatchOptions {
     /// Validate bounded waiting and cursor size before backend access.
     ///
     /// # Errors
-    /// InvalidInput for intervals outside 1 ms..=60 s or invalid cursor sizes.
+    /// `InvalidInput` for intervals outside 1 ms..=60 s or invalid cursor sizes.
     pub fn validate(&self) -> Result<()> {
         if self.interval < Duration::from_millis(1) || self.interval > Duration::from_secs(60) {
             return Err(StorageError::invalid_input("invalid watch interval"));

@@ -201,7 +201,7 @@ fn refusing(successes: usize, kind: ErrorKind) -> (ScopedStorage, std::sync::Arc
     )
 }
 
-fn assert_source(error: StorageError, kind: ErrorKind, source: &std::sync::Arc<NativeFailure>) {
+fn assert_source(error: &StorageError, kind: ErrorKind, source: &std::sync::Arc<NativeFailure>) {
     use std::error::Error;
     assert_eq!(error.kind(), kind);
     assert!(std::sync::Arc::ptr_eq(
@@ -223,7 +223,7 @@ async fn explicit_native_refusal_keeps_source_at_open_and_delivery() {
     ] {
         let (handle, source) = refusing(0, kind);
         assert_source(
-            PollingWatch::open(handle, "notes", &Filter::All, &WatchOptions::default())
+            &PollingWatch::open(handle, "notes", &Filter::All, &WatchOptions::default())
                 .await
                 .unwrap_err(),
             kind,
@@ -233,7 +233,7 @@ async fn explicit_native_refusal_keeps_source_at_open_and_delivery() {
         let mut watch = PollingWatch::open(handle, "notes", &Filter::All, &WatchOptions::default())
             .await
             .unwrap();
-        assert_source(watch.next().await.unwrap_err(), kind, &source);
+        assert_source(&watch.next().await.unwrap_err(), kind, &source);
     }
 }
 

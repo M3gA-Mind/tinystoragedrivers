@@ -25,7 +25,7 @@ impl PollingWatch {
     /// is used; this adapter never finds or installs a default backend.
     ///
     /// # Errors
-    /// InvalidInput for names, filters, options or any resume cursor;
+    /// `InvalidInput` for names, filters, options or any resume cursor;
     /// Unsupported without native validated batches; native admission failures
     /// retain their type and source, including stale fence refusal.
     pub async fn open(

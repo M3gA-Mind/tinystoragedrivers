@@ -95,25 +95,21 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
         .database(&format!("cursor_{}", std::process::id()))
         .unwrap();
     let a = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
+    let docs = a.documents();
     let filter = Filter::eq("state", "queued");
     let options = WatchOptions {
         interval: Duration::from_secs(10),
         ..WatchOptions::default()
     };
-    let mut watch = a
-        .documents()
-        .watch("tasks", &filter, &options)
-        .await
-        .unwrap();
-    a.documents()
-        .put(
-            "tasks",
-            "one",
-            json!({"state":"queued"}),
-            Precondition::None,
-        )
-        .await
-        .unwrap();
+    let mut watch = docs.watch("tasks", &filter, &options).await.unwrap();
+    docs.put(
+        "tasks",
+        "one",
+        json!({"state":"queued"}),
+        Precondition::None,
+    )
+    .await
+    .unwrap();
     let notice = tokio::time::timeout(Duration::from_secs(3), watch.next())
         .await
         .unwrap()
@@ -129,20 +125,15 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
         after: Some(cursor),
         ..options.clone()
     };
-    let mut continuation = a
-        .documents()
-        .watch("tasks", &filter, &resumed)
-        .await
-        .unwrap();
-    a.documents()
-        .put(
-            "tasks",
-            "two",
-            json!({"state":"queued"}),
-            Precondition::None,
-        )
-        .await
-        .unwrap();
+    let mut continuation = docs.watch("tasks", &filter, &resumed).await.unwrap();
+    docs.put(
+        "tasks",
+        "two",
+        json!({"state":"queued"}),
+        Precondition::None,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(3), continuation.next())
             .await
@@ -187,7 +178,7 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
             .kind(),
         ErrorKind::InvalidInput
     );
-    a.documents().drop_collection("tasks").await.unwrap();
+    docs.drop_collection("tasks").await.unwrap();
 }
 
 #[tokio::test]

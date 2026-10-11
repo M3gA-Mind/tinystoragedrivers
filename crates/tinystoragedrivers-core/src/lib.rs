@@ -49,6 +49,8 @@
 //!
 //! - `blocking`: [`Blocking`], a bridge for synchronous callers.
 //! - `testkit`: the [`conformance`] suite drivers run in their tests.
+//! - `polling-watch`: explicit conservative `PollingWatch` invalidations;
+//!   never adds native [`Capability::Watch`] support.
 
 mod backend;
 mod blob;

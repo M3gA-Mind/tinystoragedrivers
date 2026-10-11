@@ -74,7 +74,10 @@ pub(super) async fn run(storage: &ScopedStorage) {
             &collection,
             &Filter::All,
             &WatchOptions {
-                after: Some(WatchCursor::new(vec![1]).unwrap()),
+                after: Some(ok(
+                    WatchCursor::new(vec![1]),
+                    "construct invalid native cursor",
+                )),
                 ..options
             },
         )
