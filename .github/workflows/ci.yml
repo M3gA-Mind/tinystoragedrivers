@@ -67,6 +67,9 @@ jobs:
         run: cargo test --locked -p tinystoragedrivers-secrets --lib file::migration::tests::native_case_aliases_of_all_reserved_objects_never_publish_or_delete -- --exact --nocapture
       # Keep native key/file compatibility evidence even when birth is RED.
       # MongoDB and Bash service setup remain in the existing Linux lanes.
+      - name: Native bounded secret transactions
+        if: always()
+        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::transaction::tests -- --nocapture
       - name: Native existing file and key tests
         if: always()
         run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests -- --nocapture

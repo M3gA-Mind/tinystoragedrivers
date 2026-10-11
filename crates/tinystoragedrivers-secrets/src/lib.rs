@@ -72,7 +72,9 @@ pub mod testkit;
 
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
 pub use file::{
-    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, HexKeyFileSource, KEY_FILE_NAME,
+    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, FileTransactionBudget,
+    FileTransactionGuard, FileTransactionLease, FileTransactionOperation, FileTransactionPhase,
+    FileTransactionResource, FileTransactionResult, HexKeyFileSource, KEY_FILE_NAME,
     MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile, PublicationBoundary, SECRETS_FILE_NAME,
     VerifiedFileImport, load_or_create_key_file,
 };
