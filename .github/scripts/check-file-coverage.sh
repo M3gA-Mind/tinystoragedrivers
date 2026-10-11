@@ -22,6 +22,7 @@ cargo llvm-cov \
 python3 .github/scripts/native_profile_tests.py
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
+python3 .github/scripts/check-native-secret-service.py --coverage
 cargo llvm-cov report --json --output-path "$report"
 
 covered_files="$(jq --arg source_root "$source_root" '

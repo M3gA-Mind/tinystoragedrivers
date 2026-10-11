@@ -724,7 +724,6 @@ fn an_unpublishable_key_name_removes_only_its_staged_object() {
     assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
 }
 
-#[cfg(unix)]
 mod publication_pause {
     use std::cell::RefCell;
     type Callback = Box<dyn FnOnce()>;
@@ -757,12 +756,10 @@ mod publication_pause {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_publication_identity() {
     publication_pause::run(false);
 }
 
-#[cfg(unix)]
 pub(super) fn after_staged_key_identity() {
     publication_pause::run(true);
 }
@@ -842,7 +839,6 @@ fn namespace_substitution_during_key_publication_retains_the_unpublished_staged_
     assert_eq!(fs::read_dir(retained).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publication() {
     let root = TempDir::new("staged-ciphertext-replacement");
@@ -866,7 +862,6 @@ fn a_substituted_staged_ciphertext_is_never_acknowledged_as_the_verified_publica
     assert_eq!(fs::read(target).unwrap(), b"substitute ciphertext");
 }
 
-#[cfg(unix)]
 #[test]
 fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_material() {
     let root = TempDir::new("staged-ciphertext-mutation");
@@ -878,7 +873,14 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
             .unwrap();
-        fixture_write(staged, b"changed ciphertext").unwrap();
+        // Mutate the admitted object in place, preserving its private ACL and identity.
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(staged)
+            .unwrap()
+            .write_all(b"changed ciphertext")
+            .unwrap();
     });
     let error = write_atomic(&target, b"expected ciphertext").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict, "{error:?}");
@@ -887,7 +889,6 @@ fn changed_staged_ciphertext_bytes_fail_published_readback_without_deleting_mate
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publication() {
     let root = TempDir::new("staged-key-replacement");
@@ -910,4 +911,543 @@ fn a_substituted_staged_key_retains_both_objects_without_accepting_the_publicati
     assert_eq!(fs::read(target).unwrap(), substitute.as_bytes());
     assert!(!staged.exists());
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+}
+
+#[test]
+fn borrowed_namespace_path_reopens_the_same_private_master_key() {
+    let directory = TempDir::new("borrowed-master");
+    let path: &Path = directory.0.as_path();
+    let first = EncryptedFileSecrets::with_key_file(path).unwrap();
+    let bytes = fs::read(path.join(KEY_FILE_NAME)).unwrap();
+    let second = EncryptedFileSecrets::with_key_file(path).unwrap();
+    assert_eq!(*first.inner.key, *second.inner.key);
+    assert_eq!(fs::read(path.join(KEY_FILE_NAME)).unwrap(), bytes);
+    assert_eq!(
+        fs::read_dir(path)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                path.extension()
+                    .is_some_and(|value| value == "tmp")
+                    .then_some(path)
+            })
+            .count(),
+        0
+    );
+}
+
+mod staging_pause {
+    use super::{File, Path};
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce(&Path, &File)>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce(&Path, &File) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(path: &Path, file: &File) {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(path, file);
+        }
+    }
+}
+
+pub(super) fn after_staged_reservation(path: &Path, file: &File) {
+    staging_pause::run(path, file);
+}
+
+fn weaken_reserved_fixture(path: &Path, file: &File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        use windows_permissions::{
+            LocalBox, SecurityDescriptor,
+            constants::{SeObjectType, SecurityInformation},
+            wrappers,
+        };
+        let descriptor = wrappers::GetSecurityInfo(
+            file,
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+        )
+        .unwrap();
+        let owner = wrappers::ConvertSidToStringSid(descriptor.owner().unwrap())
+            .unwrap()
+            .into_string()
+            .unwrap();
+        // Grant Everyone access only to this empty, disposable fixture. The
+        // production admission must reject it before writing secret material.
+        let broad: LocalBox<SecurityDescriptor> =
+            format!("D:P(A;;FA;;;{owner})(A;;FA;;;WD)").parse().unwrap();
+        wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+            None,
+            None,
+            broad.dacl(),
+            None,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn private_admission_lost_after_reservation_never_writes_staged_secret_bytes() {
+    let root = TempDir::new("staging-admission-loss");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let _pause = staging_pause::Guard::install(weaken_reserved_fixture);
+    let error = stage(
+        &target,
+        b"must never reach the staged file",
+        &mut next_temp_seq,
+    )
+    .unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert!(!target.exists());
+    // Cleanup is best effort if native I/O refuses it. Even a retained staged
+    // object must remain empty because admission preceded every byte write.
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn an_unreservable_staging_name_leaves_no_private_objects() {
+    let root = TempDir::new("staging-name-limit");
+    let target = root.0.join("x".repeat(300));
+    let error = reserve_temp_file(&target, &mut || 0).unwrap_err();
+    assert_eq!(error.message(), "could not reserve a private staging file");
+    assert!(std::error::Error::source(&error).is_some());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[test]
+fn substituted_staging_object_is_rejected_before_secret_bytes_are_written() {
+    let root = TempDir::new("staging-object-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("original-empty-reservation");
+    let retained = preserved.clone();
+    let _pause = staging_pause::Guard::install(move |path, file| {
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        // Keep the original handle alive while replacing its visible leaf with
+        // another genuinely private object. Permission checks alone cannot
+        // distinguish the replacement; the retained native identity must.
+        fs::rename(path, &retained).unwrap();
+        fixture_write(path, b"").unwrap();
+    });
+    let error = stage(&target, b"must not enter either object", &mut next_temp_seq).unwrap_err();
+    assert_eq!(error.message(), "could not stage the secrets file");
+    assert_eq!(fs::metadata(preserved).unwrap().len(), 0);
+    assert!(!target.exists());
+    for entry in fs::read_dir(&root.0).unwrap() {
+        assert_eq!(entry.unwrap().metadata().unwrap().len(), 0);
+    }
+}
+
+// Fixture extraction must never format native values or errors on failure.
+fn native_fixture_ok<T, E>(result: std::result::Result<T, E>, phase: &'static str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(_) => std::panic::panic_any(phase),
+    }
+}
+
+fn native_fixture_error<T, E>(result: std::result::Result<T, E>, phase: &'static str) -> E {
+    match result {
+        Err(error) => error,
+        Ok(_) => std::panic::panic_any(phase),
+    }
+}
+
+struct PublicDebugProbe<'a>(&'a std::cell::Cell<usize>);
+
+impl std::fmt::Debug for PublicDebugProbe<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.set(self.0.get() + 1);
+        formatter.write_str("public synthetic debug probe")
+    }
+}
+
+#[test]
+fn native_fixture_success_extraction_never_formats_unexpected_error() {
+    let formatted = std::cell::Cell::new(0);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        native_fixture_ok::<(), _>(Err(PublicDebugProbe(&formatted)), "native success phase");
+    }))
+    .unwrap_err();
+    assert_eq!(
+        formatted.get(),
+        0,
+        "unexpected errors must not be formatted"
+    );
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"native success phase"));
+    assert_eq!(
+        native_fixture_ok::<_, PublicDebugProbe<'_>>(Ok(7), "expected success phase"),
+        7
+    );
+}
+
+#[test]
+fn native_fixture_error_extraction_never_formats_unexpected_success() {
+    let formatted = std::cell::Cell::new(0);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        native_fixture_error::<_, ()>(Ok(PublicDebugProbe(&formatted)), "native rejection phase");
+    }))
+    .unwrap_err();
+    assert_eq!(
+        formatted.get(),
+        0,
+        "unexpected values must not be formatted"
+    );
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"native rejection phase")
+    );
+    assert_eq!(
+        native_fixture_error::<PublicDebugProbe<'_>, _>(Err(7), "expected rejection phase"),
+        7
+    );
+}
+
+#[cfg(windows)]
+fn native_fixture_directory(label: &'static str) -> TempDir {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+    let directory = native_fixture_ok(
+        std::env::temp_dir().canonicalize(),
+        "resolve native fixture root",
+    )
+    .join(format!("tsd-secrets-{label}-{}-{seq}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    native_fixture_ok(
+        clack_private_fs::create_dir(&directory),
+        "create private native fixture root",
+    );
+    TempDir(directory)
+}
+
+#[cfg(windows)]
+fn windows_preserve_and_replace(source: &Path, preserved: &Path, bytes: &[u8]) -> File {
+    let namespace = native_fixture_ok(open_parent(source, false), "replacement parent admission");
+    let original = native_fixture_ok(
+        namespace.open_file(
+            native_fixture_ok(secure::file_name(source), "replacement file name"),
+            false,
+        ),
+        "replacement object admission",
+    );
+    let original_id = native_fixture_ok(secure::identity(&original), "original native identity");
+    native_fixture_ok(fs::rename(source, preserved), "preserve original object");
+    native_fixture_ok(fixture_write(source, bytes), "create private replacement");
+    let replacement = native_fixture_ok(
+        namespace.open_file(
+            native_fixture_ok(secure::file_name(source), "replacement file name"),
+            false,
+        ),
+        "replacement object admission",
+    );
+    let distinct = native_fixture_ok(
+        secure::identity(&replacement),
+        "replacement native identity",
+    ) != original_id;
+    assert!(distinct, "replacement must have a distinct native identity");
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(&original),
+            "original native link count"
+        )
+        .number_of_links(),
+        1
+    );
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(&replacement),
+            "replacement native link count"
+        )
+        .number_of_links(),
+        1
+    );
+    original
+}
+#[cfg(windows)]
+fn sole_staged_path(directory: &Path) -> PathBuf {
+    let paths: Vec<_> = native_fixture_ok(fs::read_dir(directory), "staging inventory")
+        .map(|entry| native_fixture_ok(entry, "staging inventory entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect();
+    assert_eq!(paths.len(), 1);
+    paths.into_iter().next().unwrap()
+}
+#[cfg(windows)]
+fn assert_private_bytes(path: &Path, expected: &[u8]) {
+    let unchanged =
+        native_fixture_ok(fs::read(path), "private fixture readback").as_slice() == expected;
+    assert!(unchanged, "private fixture bytes differ");
+}
+
+#[cfg(windows)]
+#[test]
+fn replaced_private_staging_object_is_rejected_before_payload_and_only_substitute_is_cleaned() {
+    let root = native_fixture_directory("stage-reservation-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let preserved = root.0.join("preserved-empty-stage");
+    let original = preserved.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = staging_pause::Guard::install(move |source, reserved| {
+        assert_eq!(
+            native_fixture_ok(reserved.metadata(), "reserved object metadata").len(),
+            0
+        );
+        let file = windows_preserve_and_replace(source, &original, b"");
+        let same_reserved = native_fixture_ok(secure::identity(&file), "retained native identity")
+            == native_fixture_ok(secure::identity(reserved), "reserved native identity");
+        assert!(
+            same_reserved,
+            "retained observer must identify the reserved object"
+        );
+        retained.borrow_mut().replace(file);
+    });
+    let error = native_fixture_error(
+        stage(&target, b"must never be written", &mut next_temp_seq),
+        "changed staging identity must be rejected",
+    );
+    let correct_message = error.message() == "could not stage the secrets file";
+    assert!(correct_message, "fixture rejection message differs");
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(native.kind(), std::io::ErrorKind::PermissionDenied);
+    let correct_reason = native.to_string() == "staged file identity changed";
+    assert!(correct_reason, "staging must reject changed identity");
+    assert_private_bytes(&preserved, b"");
+    assert_eq!(
+        native_fixture_ok(fs::read_dir(&root.0), "fixture final inventory").count(),
+        1
+    );
+    assert!(!target.exists());
+    let guard = observer.borrow();
+    let file = guard.as_ref().unwrap();
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(file),
+            "preserved native link count"
+        )
+        .number_of_links(),
+        1
+    );
+    let same_preserved = native_fixture_ok(secure::identity(file), "preserved native identity")
+        == native_fixture_ok(
+            secure::identity(&native_fixture_ok(
+                File::open(&preserved),
+                "open preserved observer",
+            )),
+            "preserved path native identity",
+        );
+    assert!(same_preserved, "preserved object identity changed");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_substituted_staged_ciphertext_is_not_acknowledged() {
+    let root = native_fixture_directory("ciphertext-identity-substitution");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    native_fixture_ok(
+        write_atomic(&target, b"previous ciphertext"),
+        "write initial ciphertext",
+    );
+    let preserved = root.0.join("preserved-staged-ciphertext");
+    let directory = root.0.clone();
+    let original = preserved.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let source = sole_staged_path(&directory);
+        retained.borrow_mut().replace(windows_preserve_and_replace(
+            &source,
+            &original,
+            b"substitute ciphertext",
+        ));
+    });
+    let error = native_fixture_error(
+        write_atomic(&target, b"verified staged ciphertext"),
+        "substituted ciphertext must be rejected",
+    );
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    let correct_message = error.message() == "published secrets identity changed";
+    assert!(correct_message, "fixture rejection message differs");
+    assert_private_bytes(&preserved, b"verified staged ciphertext");
+    assert_private_bytes(&target, b"substitute ciphertext");
+    assert_eq!(
+        native_fixture_ok(fs::read_dir(&root.0), "fixture final inventory").count(),
+        2
+    );
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(observer.borrow().as_ref().unwrap()),
+            "retained observer link count"
+        )
+        .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_same_identity_staged_byte_mutation_fails_published_readback() {
+    let root = native_fixture_directory("ciphertext-readback-mutation");
+    let target = root.0.join(SECRETS_FILE_NAME);
+    let directory = root.0.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(false, move || {
+        let source = sole_staged_path(&directory);
+        let namespace = native_fixture_ok(open_parent(&source, false), "mutation parent admission");
+        let mut file = native_fixture_ok(
+            namespace.open_file(
+                native_fixture_ok(secure::file_name(&source), "mutation file name"),
+                true,
+            ),
+            "admit writable staged object",
+        );
+        let before = native_fixture_ok(secure::identity(&file), "retained native identity");
+        native_fixture_ok(file.set_len(0), "truncate admitted staged object");
+        native_fixture_ok(
+            file.write_all(b"changed ciphertext"),
+            "mutate admitted staged bytes",
+        );
+        native_fixture_ok(file.sync_all(), "flush admitted staged bytes");
+        let same_object =
+            native_fixture_ok(secure::identity(&file), "retained native identity") == before;
+        assert!(same_object, "mutation must preserve native identity");
+        retained.borrow_mut().replace(file);
+    });
+    let error = native_fixture_error(
+        write_atomic(&target, b"expected ciphertext"),
+        "changed readback must be rejected",
+    );
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    let correct_message = error.message() == "published secrets readback differs";
+    assert!(correct_message, "fixture rejection message differs");
+    assert_private_bytes(&target, b"changed ciphertext");
+    assert_eq!(
+        native_fixture_ok(fs::read_dir(&root.0), "fixture final inventory").count(),
+        1
+    );
+    let file = observer.borrow();
+    let same_published = native_fixture_ok(
+        secure::identity(file.as_ref().unwrap()),
+        "published observer native identity",
+    ) == native_fixture_ok(
+        secure::identity(&native_fixture_ok(
+            File::open(&target),
+            "open published observer",
+        )),
+        "published path native identity",
+    );
+    assert!(
+        same_published,
+        "mutation observer must identify published object"
+    );
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(file.as_ref().unwrap()),
+            "published observer link count"
+        )
+        .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_substituted_staged_key_retains_both_objects_without_acceptance() {
+    let root = native_fixture_directory("key-identity-substitution");
+    let target = root.0.join(KEY_FILE_NAME);
+    let expected = key_to_hex(&fixture_key());
+    let substitute = key_to_hex(&[42; KEY_LEN]);
+    let staged = native_fixture_ok(
+        stage(&target, expected.as_bytes(), &mut next_temp_seq),
+        "stage private key",
+    );
+    let preserved = root.0.join("preserved-staged-key");
+    let original = preserved.clone();
+    let source = staged.clone();
+    let changed = substitute.clone();
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let retained = observer.clone();
+    let _pause = publication_pause::Guard::install(true, move || {
+        retained.borrow_mut().replace(windows_preserve_and_replace(
+            &source,
+            &original,
+            changed.as_bytes(),
+        ));
+    });
+    let result = publish_key(&staged, &target, fixture_key());
+    assert!(result.is_err(), "substituted key must not be accepted");
+    let error = result.err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    let correct_message = error.message() == "published key object changed";
+    assert!(correct_message, "fixture rejection message differs");
+    assert_private_bytes(&preserved, expected.as_bytes());
+    assert_private_bytes(&target, substitute.as_bytes());
+    assert!(!staged.exists());
+    assert_eq!(
+        native_fixture_ok(fs::read_dir(&root.0), "fixture final inventory").count(),
+        2
+    );
+    assert_eq!(
+        native_fixture_ok(
+            winapi_util::file::information(observer.borrow().as_ref().unwrap()),
+            "retained observer link count"
+        )
+        .number_of_links(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_staging_parent_fails_once_without_creating_sibling() {
+    let root = native_fixture_directory("reservation-missing-parent");
+    let missing = root.0.join("absent");
+    let target = missing.join(SECRETS_FILE_NAME);
+    let mut attempts = 0;
+    let result = reserve_temp_file(&target, &mut || {
+        attempts += 1;
+        7
+    });
+    assert!(result.is_err(), "missing parent must fail reservation");
+    let error = result.err().unwrap();
+    assert_eq!(attempts, 1);
+    let correct_message = error.message() == "could not reserve a private staging file";
+    assert!(correct_message, "fixture rejection message differs");
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(native.kind(), std::io::ErrorKind::NotFound);
+    assert!(!missing.exists());
+    assert_eq!(
+        native_fixture_ok(fs::read_dir(&root.0), "fixture final inventory").count(),
+        0
+    );
 }

@@ -39,6 +39,9 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux Secret Service build and native probe dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
       # Run the new named regression before a broader suite can fail. These
       # are native runtime tests; cross-target compilation is not acceptance.
       - name: Windows empty production handle at birth
@@ -95,6 +98,9 @@ jobs:
       - name: Observe a real paused key publisher and concurrent reader
         if: runner.os == 'Linux'
         run: python .github/scripts/check-native-key-race.py
+      - name: Exercise the real isolated Secret Service provider
+        if: runner.os == 'Linux'
+        run: python3 .github/scripts/check-native-secret-service.py --coverage
       - name: Include all native executions in LLVM JSON
         run: cargo llvm-cov report --json --output-path target/secrets-native-coverage.json
       - name: Export the same native execution as LCOV
@@ -113,6 +119,7 @@ jobs:
             target/secrets-native-coverage-receipt.json
             target/native-io-fault-*/*
             target/native-key-race-*/*
+            target/native-secret-service-*/receipt.json
             target/native-user-denial-*/*
           if-no-files-found: error
 
@@ -140,6 +147,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux Secret Service build and native probe dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
 
@@ -190,6 +199,38 @@ jobs:
           name: coverage-json
           path: coverage.json
           if-no-files-found: ignore
+
+  secret-service:
+    name: Real isolated Linux Secret Service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.88.0'
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install owned-provider fixture dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
+      - name: Strict feature-off and feature-on checks at MSRV
+        run: |
+          cargo clippy --locked -p tinystoragedrivers-secrets --all-targets --no-default-features --features keyring -- -D warnings
+          cargo clippy --locked -p tinystoragedrivers-secrets --all-targets --no-default-features --features keyring-secret-service -- -D warnings
+      - name: Test explicit provider selection and existing injected builders
+        run: cargo test --locked -p tinystoragedrivers-secrets --features keyring-secret-service --lib
+      - name: Test private-bus launcher invariants
+        run: python3 .github/scripts/native_secret_service_tests.py
+      - name: Native Set Get readback Delete NoEntry and locked absent denials
+        run: python3 .github/scripts/check-native-secret-service.py
+      - name: Retain privacy-safe native provider receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-secret-service
+          path: target/native-secret-service-*/receipt.json
+          if-no-files-found: error
 
   mongodb:
     name: MongoDB driver
@@ -246,6 +287,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux Secret Service build dependency
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev
+
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -279,6 +323,9 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Secret Service build dependency
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev
 
       - name: Build with the declared MSRV
         run: cargo build --all-targets --all-features

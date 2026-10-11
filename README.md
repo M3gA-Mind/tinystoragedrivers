@@ -10,7 +10,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
-| Secrets | none (feature `secrets`, `keyring`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
+| Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
 Cargo features on the `tinystoragedrivers` facade. A desktop build never links
@@ -121,3 +121,16 @@ the tag through a git dependency or a submodule gitlink.
 ## License
 
 GPL-3.0-only. See [`LICENSE`](LICENSE).
+
+### Mongo live-test database permissions
+
+Run the complete live suite on a disposable MongoDB server. Transaction race
+fixtures use isolated logical collection prefixes inside the database named in
+`TSD_MONGO_URL` (or `tsd_test` when the URL has no database). This prevents
+parallel schema changes from invalidating unrelated transactions without
+requiring access to other databases.
+
+The test account must be allowed to create collections and indexes, and read,
+write and delete documents in the configured database. On an authenticated
+disposable server, `readWrite` on that database is sufficient. The URL's
+`authSource` continues to select the authentication database independently.

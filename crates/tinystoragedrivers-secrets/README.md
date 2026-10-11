@@ -14,6 +14,38 @@ cloud builds share the port and the byte formats.
 | `DocumentSecrets` | `{"ciphertext": "enc2:…"}` per secret in any `DocumentStore` | cloud, multi-tenant |
 | `KeyringSecrets` (feature `keyring`) | the OS credential store | desktop |
 
+## Explicit Linux credential providers
+
+Defaults are empty. Enable `keyring` for `KeyringSecrets::linux_kernel(service)`,
+which selects the kernel keyring explicitly. Enable `keyring-secret-service`
+for `KeyringSecrets::secret_service(service)`, which selects the synchronous
+Secret Service provider with encrypted D-Bus transport (`crypto-rust`). The
+facade forwards both features. Secret Service builds on Linux require libdbus
+development headers; no OpenSSL or vendored libdbus is selected here.
+
+```rust,no_run
+# #[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+# fn example() {
+use tinystoragedrivers_secrets::KeyringSecrets;
+let kernel = KeyringSecrets::linux_kernel("my-app");
+let desktop = KeyringSecrets::secret_service("my-app");
+# }
+```
+
+Both factories retain their own immutable credential builder, construct lazily,
+and never set the process default or fall back to another provider. Availability
+is established by an operation, not by construction. `backend_name() == "keyring"`
+does not distinguish these providers. Permission and human consent remain the
+caller's responsibility.
+
+`KeyringSecrets::new` keeps the `keyring` crate's compiled default. Cargo unifies
+features across consumers: enabling Secret Service alongside `linux-native`
+can change that Linux default even without a global setter. Review ambient
+`new` call sites before enabling the feature in a shared graph, and use explicit
+factories for provider-sensitive code. Custom injected builders retain their
+existing behavior. Consumer feature unions must not combine synchronous and
+asynchronous Secret Service or `crypto-rust` and `crypto-openssl`.
+
 ## Formats
 
 Every format is OpenHuman's own, so existing data opens unchanged:
@@ -70,7 +102,25 @@ on every call:
 `testkit::secrets_conformance` (feature `testkit`) runs the same suite
 against every driver. The keyring driver runs it over an in-memory
 credential builder. The real OS store is only touched by
-`live_keyring_conformance`, and only with `TSD_LIVE_KEYRING=1`.
+`live_keyring_conformance`, and only with `TSD_LIVE_KEYRING=1`, or by the isolated
+Linux Secret Service launcher:
+
+```sh
+cargo test --locked -p tinystoragedrivers-secrets --features keyring-secret-service --lib
+python3 .github/scripts/check-native-secret-service.py
+```
+
+Run those commands from the repository root. The launcher requires
+`dbus-run-session`, `gdbus` and `gnome-keyring-daemon`. It creates private XDG
+state under this checkout's `target/`, leaves HOME unchanged, starts an owned
+bus with service activation disabled and an owned disposable daemon, proves
+bus-owner/default-collection state, and exercises real set/get/exact readback/
+delete/NoEntry plus locked and absent-service denial. It stops and waits for
+its daemon, disposes scratch credential state and retains only boolean receipts.
+`--coverage` uses the already instrumented secrets test executable and report
+profile directory. A timeout fails the probe and terminates its owned process
+group. Kernel access, macOS Keychain and Windows Credential Manager runtime
+proof are separate; they are not inferred from this Linux probe.
 
 Private file namespaces, atomic restrictive birth, and the bounded verified file
 import API are documented in [the file module](src/file/README.md). Import

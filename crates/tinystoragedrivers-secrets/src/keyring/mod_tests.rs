@@ -395,3 +395,92 @@ async fn live_keyring_conformance() {
     assert_eq!(*secrets.load_or_create_key(&name).await.unwrap(), *key);
     assert!(secrets.delete(&name).await.unwrap());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_kernel_factory_retains_its_concrete_builder_without_provider_access() {
+    let store = KeyringSecrets::linux_kernel("factory-test");
+    let expected = keyring::keyutils::default_credential_builder();
+    let concrete = store
+        .builder
+        .as_ref()
+        .is_some_and(|builder| builder.as_any().type_id() == expected.as_any().type_id());
+    assert!(
+        concrete,
+        "kernel factory must retain the explicit kernel builder"
+    );
+    assert_eq!(store.service(), "factory-test");
+    assert!(KeyringSecrets::new("factory-test").builder.is_none());
+}
+
+#[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+#[test]
+fn explicit_secret_service_factory_retains_its_concrete_builder_without_provider_access() {
+    let store = KeyringSecrets::secret_service("factory-test");
+    let concrete = store.builder.as_ref().is_some_and(|builder| {
+        builder
+            .as_any()
+            .is::<keyring::secret_service::SsCredentialBuilder>()
+    });
+    assert!(
+        concrete,
+        "Secret Service factory must retain its concrete builder"
+    );
+    let kernel = keyring::keyutils::default_credential_builder();
+    let distinct = store
+        .builder
+        .as_ref()
+        .is_some_and(|builder| builder.as_any().type_id() != kernel.as_any().type_id());
+    assert!(
+        distinct,
+        "native factories must select different provider builders"
+    );
+    assert_eq!(store.service(), "factory-test");
+    assert!(KeyringSecrets::new("factory-test").builder.is_none());
+}
+
+// Only the private-bus launcher opts into these real provider operations.
+#[cfg(all(target_os = "linux", feature = "keyring-secret-service"))]
+#[tokio::test]
+async fn live_isolated_secret_service_probe() {
+    let mode = std::env::var("TSD_ISOLATED_SECRET_SERVICE_MODE").ok();
+    if mode.is_none() {
+        return;
+    }
+    let store = KeyringSecrets::secret_service("tinystoragedrivers-disposable-probe");
+    let concrete = store.builder.as_ref().is_some_and(|builder| {
+        builder
+            .as_any()
+            .is::<keyring::secret_service::SsCredentialBuilder>()
+    });
+    assert!(
+        concrete,
+        "native probe must use the concrete Secret Service builder"
+    );
+    let passed = match mode.as_deref() {
+        Some("roundtrip") => {
+            let absent_before = matches!(store.get("disposable-entry").await, Ok(None));
+            let set = store
+                .set("disposable-entry", b"public disposable fixture value")
+                .await
+                .is_ok();
+            let exact_readback = matches!(store.get("disposable-entry").await, Ok(Some(value)) if value.as_slice() == b"public disposable fixture value");
+            let deleted = matches!(store.delete("disposable-entry").await, Ok(true));
+            let absent_after = matches!(store.get("disposable-entry").await, Ok(None));
+            let no_entry_delete = matches!(store.delete("disposable-entry").await, Ok(false));
+            absent_before && set && exact_readback && deleted && absent_after && no_entry_delete
+        }
+        Some("seed") => store
+            .set("disposable-entry", b"public disposable fixture value")
+            .await
+            .is_ok(),
+        Some("denied") => {
+            let get_denied = matches!(store.get("disposable-entry").await, Err(error) if matches!(error.kind(), ErrorKind::Backend | ErrorKind::Unavailable));
+            let set_denied = matches!(store.set("disposable-entry", b"public disposable fixture value").await, Err(error) if matches!(error.kind(), ErrorKind::Backend | ErrorKind::Unavailable));
+            let delete_denied = matches!(store.delete("disposable-entry").await, Err(error) if matches!(error.kind(), ErrorKind::Backend | ErrorKind::Unavailable));
+            get_denied && set_denied && delete_denied
+        }
+        _ => false,
+    };
+    assert!(passed, "isolated native provider operation failed");
+}
