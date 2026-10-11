@@ -186,9 +186,9 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
-        self.check_schema(collection)?;
         validate_collection(collection)?;
         crate::document::validate_id(id)?;
+        self.check_schema(collection)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state.get(self.scope.as_str(), collection, id, self.now()))
@@ -201,6 +201,9 @@ impl DocumentStore for MemoryDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        validate_collection(collection)?;
+        crate::document::validate_id(id)?;
+        validate_doc(&doc)?;
         self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
@@ -211,6 +214,8 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        validate_collection(collection)?;
+        crate::document::validate_id(id)?;
         self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
@@ -221,9 +226,10 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
-        self.check_schema(collection)?;
+        validate_collection(collection)?;
         query.validate()?;
         let start = parse_cursor(collection, query)?;
+        self.check_schema(collection)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
@@ -237,6 +243,8 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
+        validate_collection(collection)?;
+        filter.validate()?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
@@ -244,9 +252,9 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
-        self.check_schema(collection)?;
         validate_collection(collection)?;
         filter.validate()?;
+        self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -262,8 +270,13 @@ impl DocumentStore for MemoryDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
-        self.check_schema(collection)?;
+        validate_collection(collection)?;
+        filter.validate()?;
+        for order in sort {
+            Filter::exists(order.field.clone(), true).validate()?;
+        }
         validate_doc(patch)?;
+        self.check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -302,6 +315,27 @@ impl DocumentStore for MemoryDocuments {
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
+        for check in &checks {
+            check.validate()?;
+        }
+        for op in &ops {
+            match op {
+                WriteOp::Put {
+                    collection,
+                    id,
+                    doc,
+                    ..
+                } => {
+                    validate_collection(collection)?;
+                    crate::document::validate_id(id)?;
+                    validate_doc(doc)?;
+                }
+                WriteOp::Delete { collection, id, .. } => {
+                    validate_collection(collection)?;
+                    crate::document::validate_id(id)?;
+                }
+            }
+        }
         for check in &checks {
             self.check_schema(&check.collection)?;
         }

@@ -240,6 +240,12 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.shared.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot declare collections",
+            ));
+        }
         crate::purge::admitted!(
             self,
             self.shared.ensure(spec, &self.scope, self.generation).await

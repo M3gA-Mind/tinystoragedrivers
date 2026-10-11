@@ -257,3 +257,100 @@ async fn existing_schema_checked_dependencies_require_declarations() {
         ErrorKind::NotFound
     );
 }
+
+#[tokio::test]
+async fn existing_schema_validates_inputs_before_missing_declarations() {
+    let storage = MemoryStorage::new().existing_schema().unwrap();
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    let docs = scoped.documents();
+    let invalid_filter = Filter::eq("", 1);
+    let invalid_query = crate::Query {
+        filter: invalid_filter.clone(),
+        ..crate::Query::default()
+    };
+    let invalid_cursor = crate::Query {
+        cursor: Some(crate::Cursor("invalid".into())),
+        ..crate::Query::default()
+    };
+    let errors = [
+        docs.get("missing", "").await.unwrap_err(),
+        docs.put("missing", "n", json!(null), Precondition::None)
+            .await
+            .unwrap_err(),
+        docs.delete("missing", "", Precondition::None)
+            .await
+            .unwrap_err(),
+        docs.query("missing", &invalid_query).await.unwrap_err(),
+        docs.query("missing", &invalid_cursor).await.unwrap_err(),
+        docs.count("missing", &invalid_filter).await.unwrap_err(),
+        docs.delete_where("missing", &invalid_filter)
+            .await
+            .unwrap_err(),
+        docs.claim("missing", &invalid_filter, &[], &json!({}))
+            .await
+            .unwrap_err(),
+        docs.claim("missing", &Filter::All, &[], &json!(null))
+            .await
+            .unwrap_err(),
+        docs.atomic_batch(vec![crate::WriteOp::Put {
+            collection: "missing".into(),
+            id: "n".into(),
+            doc: json!(null),
+            precondition: Precondition::None,
+        }])
+        .await
+        .unwrap_err(),
+        docs.atomic_batch_checked(
+            vec![crate::ReadCheck {
+                collection: "missing".into(),
+                id: String::new(),
+                expected: crate::ExpectedDocument::Absent,
+            }],
+            vec![],
+        )
+        .await
+        .unwrap_err(),
+    ];
+    for error in errors {
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+}
+
+#[test]
+fn existing_schema_rejects_missing_named_databases_without_creating_them() {
+    let storage = MemoryStorage::new();
+    let restricted = storage.existing_schema().unwrap();
+    assert_eq!(
+        restricted.database("missing").unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+    let fence = Fence::new(Scope::local(), "leases", "n", Filter::All);
+    for generation in [crate::ScopeGeneration::default(), crate::ScopeGeneration(1)] {
+        assert_eq!(
+            restricted
+                .for_scope_fenced_in_database_generation(
+                    &Scope::local(),
+                    generation,
+                    &fence,
+                    &GuardDatabase::Named("missing".into())
+                )
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
+        );
+    }
+    assert_eq!(
+        restricted
+            .for_scope_fenced_in_database(
+                &Scope::local(),
+                &fence,
+                &GuardDatabase::Named("missing".into())
+            )
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
+    assert!(storage.databases.lock().unwrap().is_empty());
+    storage.database("present").unwrap();
+    restricted.database("present").unwrap();
+}

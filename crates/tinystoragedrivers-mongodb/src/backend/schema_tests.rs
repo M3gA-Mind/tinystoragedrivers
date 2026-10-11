@@ -554,3 +554,61 @@ async fn live_existing_schema_missing_validation_registry_is_not_created() {
     );
     assert_eq!(result.unwrap_err().kind(), ErrorKind::NotFound);
 }
+
+async fn blob_read_refuses_damaged_files_index(replace: bool) {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let (storage, prefix) = configured_fixture(&url).await;
+    storage.prepare_schema().await.unwrap();
+    let actor = storage
+        .existing_schema()
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap();
+    assert!(actor.blobs().get("missing").await.unwrap().is_none());
+    let files = storage.shared.raw(&format!("{BLOBS}.files"));
+    let indexes: Vec<_> = files
+        .list_indexes()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let index = indexes
+        .iter()
+        .find(|index| index.keys == doc! {"filename": 1, "uploadDate": 1})
+        .unwrap();
+    files
+        .drop_index(index.options.as_ref().unwrap().name.as_ref().unwrap())
+        .await
+        .unwrap();
+    if replace {
+        files
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {"filename": 1, "uploadDate": 1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+    }
+    let outcome = actor.blobs().get("missing").await;
+    cleanup_fixture(&storage, &prefix).await;
+    assert_eq!(outcome.unwrap_err().kind(), ErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn live_existing_schema_blob_read_refuses_missing_files_index() {
+    blob_read_refuses_damaged_files_index(false).await;
+}
+
+#[tokio::test]
+async fn live_existing_schema_blob_read_refuses_incompatible_files_index() {
+    blob_read_refuses_damaged_files_index(true).await;
+}

@@ -375,13 +375,13 @@ impl Shared {
         scope: &Scope,
         generation: tinystoragedrivers_core::ScopeGeneration,
     ) -> Result<()> {
-        crate::purge::check(self, scope, generation, None).await?;
         if self.existing {
             return Err(StorageError::unsupported(
                 Capability::ExistingSchema,
                 "existing-schema handles cannot declare collections",
             ));
         }
+        crate::purge::check(self, scope, generation, None).await?;
         spec.validate()?;
         let meta = self.raw(META);
         for _ in 0..ENSURE_ATTEMPTS {

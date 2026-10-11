@@ -131,9 +131,16 @@ impl MongoBlobs {
                 .await?;
         }
         let name = format!("{}{BLOBS}", self.shared.prefix);
-        let model = file_index();
+        let mut models = vec![file_index()];
+        if self.shared.existing {
+            models.push(
+                IndexModel::builder()
+                    .keys(doc! {"filename": 1, "uploadDate": 1})
+                    .build(),
+            );
+        }
         self.shared
-            .prepare(&format!("{BLOBS}.files"), vec![model])
+            .prepare(&format!("{BLOBS}.files"), models)
             .await?;
         Ok(self
             .shared

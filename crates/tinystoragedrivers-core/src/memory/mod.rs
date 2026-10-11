@@ -319,6 +319,12 @@ impl MemoryStorage {
             .databases
             .lock()
             .map_err(|_| StorageError::backend("memory database registry lock poisoned"))?;
+        if self.existing {
+            return databases
+                .get(name)
+                .cloned()
+                .ok_or_else(|| StorageError::not_found("named database does not exist"));
+        }
         Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
             || {
                 Arc::new(MemoryDb {

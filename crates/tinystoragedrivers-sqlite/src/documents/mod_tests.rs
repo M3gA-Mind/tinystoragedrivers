@@ -58,7 +58,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
     let tables = Arc::new(Tables::new(""));
     db.run_now(|conn| tables.ensure(conn)).unwrap();
     let scope = Scope::new("snapshot_reader").unwrap();
-    let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None);
+    let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None, false);
     docs.put(
         "records",
         "one",
