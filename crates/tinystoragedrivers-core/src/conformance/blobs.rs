@@ -205,7 +205,7 @@ async fn tree(storage: &ScopedStorage) {
     );
 
     assert_eq!(ok(blobs.delete_tree(&root).await, "delete_tree"), 4);
-    assert!(ok(blobs.list_dir(&root).await, "emptied").is_empty());
+    assert_eq!(ok(blobs.list_dir(&root).await, "emptied").len(), 0);
     assert_eq!(
         ok(blobs.list_dir(&sibling).await, "sibling survives").len(),
         1,

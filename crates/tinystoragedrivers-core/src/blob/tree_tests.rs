@@ -60,7 +60,7 @@ fn a_name_that_is_blob_and_directory_yields_both() {
 
 #[test]
 fn children_ignore_keys_outside_the_prefix() {
-    assert!(children("s/", vec![meta("t/x")]).is_empty());
+    assert_eq!(children("s/", vec![meta("t/x")]).len(), 0);
 }
 
 #[test]
