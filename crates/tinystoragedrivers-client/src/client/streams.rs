@@ -1,7 +1,7 @@
 //! `StreamStore` over the `Streams` object.
 use serde_json::Value;
 use tinystoragedrivers_bus as wire;
-use tinystoragedrivers_bus::{MAX_BATCH_OPS, MAX_PAGE_ITEMS};
+use tinystoragedrivers_bus::MAX_BATCH_OPS;
 use tinystoragedrivers_core::{
     Capability, Result, StorageError, StreamEntry, StreamStore, async_trait,
 };
@@ -91,17 +91,14 @@ impl StreamStore for BusStreams {
                 limit: limit - out.len(),
             };
             let window: wire::ReadWindowResponse = self.call("ReadWindow", &request, None).await?;
-            let full_page = window.len() == MAX_PAGE_ITEMS;
-            if let Some(last) = window.last() {
-                next = last.offset.saturating_add(1);
-            }
+            // Only an empty window ends the stream early: the server also cuts
+            // a page short at its byte cap, so a short page is not the end.
+            let Some(last) = window.last() else { break };
+            next = last.offset.saturating_add(1);
             out.extend(window.into_iter().map(|item| StreamEntry {
                 offset: item.offset,
                 value: item.record,
             }));
-            if !full_page {
-                break;
-            }
         }
         Ok(out)
     }

@@ -48,10 +48,13 @@ size limits and `CONTRACT_VERSION` are in `tinystoragedrivers-bus`. The bus
 client (`BusStorage` and the port handles), the reference `StorageServer` and
 the in-process `Loopback` are in `tinystoragedrivers-client`, and
 `conformance::run_ports` passes through them (including a blob above the frame
-cap over streams, and watch signals). A `TinyBus` proxy transport and the
-module-side server registration, the S3 feature and the port gaps
-(Vector spec, FTS reindex, keyset cursors, TTL, claim/CAS, blob tree view) are
-later slices of tinyhumansai/openhuman#7635.
+cap over streams, and watch signals). Port gaps landed: keyset cursors
+(already in the drivers), FTS ranking and reindex semantics, TTL visibility,
+claim/CAS run-ledger patterns (all pinned by conformance), the blob tree view,
+and the Vector decision (stays in TinyMemory). The S3 driver and its CI lane
+already exist. Still to come under tinyhumansai/openhuman#7635: a `TinyBus`
+proxy transport and the module-side server registration, native blob expiry,
+and the release.
 
 ## Current step
 

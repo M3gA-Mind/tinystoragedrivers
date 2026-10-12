@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StorageError};
 
+mod tree;
+
+pub use tree::{TreeEntry, TreeFile};
+
 /// The format limit for a blob key, in bytes.
 /// Drivers may announce a smaller physical limit with [`BlobStore::max_key_len`].
 pub const MAX_BLOB_KEY_LEN: usize = 1024;
@@ -193,6 +197,64 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     ///
     /// A backend error.
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>>;
+
+    /// The directory-like children of `dir` (`""` is the root): blobs directly
+    /// inside it and the sub-directories that hold more blobs, sorted by name.
+    ///
+    /// Built on [`list`](Self::list), so every driver answers it the same way.
+    /// `dir` is a prefix without a trailing `/`, and `skills/a` never lists
+    /// `skills/ab/...`.
+    ///
+    /// # Errors
+    ///
+    /// An invalid `dir`, or a backend error.
+    async fn list_dir(&self, dir: &str) -> Result<Vec<TreeEntry>> {
+        let prefix = tree::list_prefix(dir)?;
+        let listed = self.list(&prefix).await?;
+        Ok(tree::children(&prefix, listed))
+    }
+
+    /// Write `files` under `dir` (a skill bundle, say), replacing blobs at the
+    /// same paths. Every path is validated before the first write; the writes
+    /// themselves are **not** atomic across files, so a backend failure part
+    /// way leaves the files already written in place. Callers that need an
+    /// all-or-nothing bundle publish a manifest document last.
+    ///
+    /// # Errors
+    ///
+    /// An invalid or duplicate path, or the first backend error.
+    async fn put_tree(&self, dir: &str, files: Vec<TreeFile>) -> Result<Vec<BlobMeta>> {
+        let keys = tree::plan(dir, &files, self.max_key_len())?;
+        let mut written = Vec::with_capacity(files.len());
+        for (key, file) in keys.into_iter().zip(files) {
+            written.push(
+                self.put(&key, file.bytes, file.content_type.as_deref())
+                    .await?,
+            );
+        }
+        Ok(written)
+    }
+
+    /// Remove every blob below `dir` and report how many went.
+    ///
+    /// # Errors
+    ///
+    /// An invalid `dir` (the root is refused), or a backend error.
+    async fn delete_tree(&self, dir: &str) -> Result<u64> {
+        if dir.is_empty() {
+            return Err(StorageError::invalid_input(
+                "delete_tree needs a directory, not the root",
+            ));
+        }
+        let prefix = tree::list_prefix(dir)?;
+        let mut removed = 0;
+        for meta in self.list(&prefix).await? {
+            if self.delete(&meta.key).await? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
 }
 
 /// Validate a blob key: 1 to [`MAX_BLOB_KEY_LEN`] bytes, no NUL, no empty,

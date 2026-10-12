@@ -417,6 +417,51 @@ async fn watch_open_validates_options_and_caps_subscriptions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn concurrent_opens_cannot_exceed_the_cap_and_ended_watches_free_their_slot() {
+    use tinystoragedrivers_core::WatchReset;
+    let (server, source) = watching_server();
+    let request = json!({"collection":"c","filter":{"op":"all"},"after":null,"interval_ms":5});
+    let attempts: Vec<_> = (0..100)
+        .map(|_| {
+            let server = server.clone();
+            let request = request.clone();
+            tokio::spawn(async move {
+                server
+                    .handle(Admission::Private, "Documents", "WatchOpen", request)
+                    .await
+            })
+        })
+        .collect();
+    let mut opened = 0;
+    for attempt in attempts {
+        if attempt.await.unwrap().is_ok() {
+            opened += 1;
+        }
+    }
+    assert_eq!(opened, 64, "exactly the cap is admitted");
+    assert_eq!(server.open_watches(), 64);
+
+    // A watch that ends on its own gives its slot back without a WatchClose.
+    let tx = source.0.lock().unwrap()[0].clone();
+    tx.send(Some(WatchNotice::ResetRequired {
+        reason: WatchReset::ResumeLost,
+        source: None,
+    }))
+    .unwrap();
+    for _ in 0..100 {
+        if server.open_watches() < 64 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(server.open_watches(), 63);
+    server
+        .handle(Admission::Private, "Documents", "WatchOpen", request)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn secret_handles_never_print_and_report_their_backend() {
     let rig = rig(Admission::Confidential).await;
     let secrets = rig.bus.secrets();

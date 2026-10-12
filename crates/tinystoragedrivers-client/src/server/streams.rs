@@ -6,8 +6,18 @@ use tinystoragedrivers_bus::{MAX_BATCH_OPS, MAX_INLINE_BYTES, MAX_PAGE_ITEMS};
 use super::documents::bounded_list;
 use super::{Reply, StorageServer, decode, encode, invalid, native};
 
+/// Framing a `ReadWindow` page adds around each record (offset, separators).
+const RECORD_FRAMING: usize = 64;
+
+/// Whether `record` can be read back: alone in a `ReadWindow` page it must stay
+/// inside the inline byte cap, or the first-item exception would push the reply
+/// past the frame limit. Checked before any native write.
+fn fits(record: &Value) -> bool {
+    record.to_string().len() + RECORD_FRAMING <= MAX_INLINE_BYTES
+}
+
 fn records(items: Vec<wire::StreamRecord>) -> Result<Vec<Value>, wire::StorageFailure> {
-    if items.len() > MAX_BATCH_OPS {
+    if items.len() > MAX_BATCH_OPS || items.iter().any(|record| !fits(&record.0)) {
         return Err(invalid());
     }
     Ok(items.into_iter().map(|record| record.0).collect())
@@ -19,6 +29,9 @@ impl StorageServer {
         match selector {
             "Append" => {
                 let r: wire::AppendRequest = decode(request)?;
+                if !fits(&r.record) {
+                    return Err(invalid());
+                }
                 encode(&native(streams.append(&r.stream, r.record).await)?)
             }
             "AppendBatch" => {
@@ -43,7 +56,7 @@ impl StorageServer {
                 let mut size = 0usize;
                 let mut items = Vec::with_capacity(window.len());
                 for entry in window {
-                    size = size.saturating_add(entry.value.to_string().len() + 64);
+                    size = size.saturating_add(entry.value.to_string().len() + RECORD_FRAMING);
                     if !items.is_empty() && size > MAX_INLINE_BYTES {
                         break;
                     }

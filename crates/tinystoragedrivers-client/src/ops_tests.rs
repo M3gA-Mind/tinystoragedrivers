@@ -233,6 +233,58 @@ async fn read_window_over_the_page_cap_is_assembled_from_pages() {
 }
 
 #[tokio::test]
+async fn read_window_continues_after_a_byte_capped_page() {
+    let (storage, _, _) = connect().await;
+    let streams = storage.streams();
+    // Three records of 3 MiB cannot share one 8 MiB reply, so the server cuts
+    // each page short of the requested limit; the client must keep reading.
+    let big = "x".repeat(3 * 1024 * 1024);
+    for i in 0..5 {
+        streams
+            .append("fat", json!({"i": i, "pad": big}))
+            .await
+            .unwrap();
+    }
+    let window = streams.read_window("fat", 0, 5).await.unwrap();
+    assert_eq!(window.len(), 5, "a short page is not the end of the stream");
+    assert_eq!(window[4].offset, 4);
+    let tail = streams.read_window("fat", 3, 10).await.unwrap();
+    assert_eq!(tail.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unreadable_stream_record_is_refused_before_native_append() {
+    let (storage, _, _) = connect().await;
+    let streams = storage.streams();
+    let huge = json!("y".repeat(8 * 1024 * 1024));
+    assert_eq!(
+        streams
+            .append("big", huge.clone())
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        streams
+            .append_batch("big", vec![json!(1), huge.clone()])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        streams
+            .append_batch_if_offset("big", 0, vec![huge])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(streams.len("big").await.unwrap(), 0, "nothing was written");
+}
+
+#[tokio::test]
 async fn blobs_cover_every_operation() {
     let (storage, _, bus) = connect().await;
     let blobs = storage.blobs();
