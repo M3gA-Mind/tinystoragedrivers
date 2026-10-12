@@ -1,4 +1,4 @@
-//! Confined native document callbacks for compiled TinyBus modules.
+//! Confined native document callbacks for compiled `TinyBus` modules.
 //!
 //! Registration captures an already-admitted store and fixed collection.
 //! It never opens a backend or declares schema. Native storage owns atomic
@@ -14,7 +14,7 @@ use tinystoragedrivers_core::DocumentStore;
 /// Declare the exact callback interface and finite member allowlist.
 ///
 /// # Errors
-/// Refuses an invalid TinyBus path or name.
+/// Refuses an invalid `TinyBus` path or name.
 pub fn endpoint(path: &str) -> tinybus::Result<HostCallbackEndpoint> {
     Ok(HostCallbackEndpoint {
         path: ObjectPath::new(path)?,
@@ -81,7 +81,7 @@ impl DocumentService {
                             doc: document.doc,
                         })
                     })
-                    .map_err(storage_failure);
+                    .map_err(|error| storage_failure(&error));
                 encode(outcome)
             }
             "Put" => {
@@ -96,7 +96,7 @@ impl DocumentService {
                         )
                         .await
                         .map(|version| tinystoragedrivers_bus::Version(version.0))
-                        .map_err(storage_failure),
+                        .map_err(|error| storage_failure(&error)),
                 )
             }
             "Delete" => {
@@ -109,7 +109,7 @@ impl DocumentService {
                             native_condition(request.precondition),
                         )
                         .await
-                        .map_err(storage_failure),
+                        .map_err(|error| storage_failure(&error)),
                 )
             }
             _ => Err(tinybus::Error::failed("unknown document callback member")),
@@ -141,7 +141,7 @@ fn native_condition(
 }
 
 fn storage_failure(
-    error: tinystoragedrivers_core::StorageError,
+    error: &tinystoragedrivers_core::StorageError,
 ) -> tinystoragedrivers_bus::StorageFailure {
     use tinystoragedrivers_bus::{StorageFailure, StorageKind};
     use tinystoragedrivers_core::ErrorKind;

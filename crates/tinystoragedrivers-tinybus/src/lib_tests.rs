@@ -220,7 +220,7 @@ async fn registration_rejects_invalid_collection_without_creating_schema() {
         .await
         .is_err()
     );
-    assert!(docs.collections("").await.unwrap().is_empty());
+    assert_eq!(docs.collections("").await.unwrap(), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -278,7 +278,7 @@ fn every_native_failure_category_has_a_content_free_wire_mapping() {
     ] {
         let error = StorageError::new(kind, "private credential and user document")
             .with_source(std::io::Error::other("private backend cause"));
-        let failure = storage_failure(error);
+        let failure = storage_failure(&error);
         assert_eq!(failure.kind, expected);
         assert!(!serde_json::to_string(&failure).unwrap().contains("private"));
     }
@@ -347,7 +347,7 @@ async fn callback_registration_is_fixed_declared_and_single_use() {
         .is_err()
     );
     // Registration has no declaration/create/write authority.
-    assert!(docs.collections("").await.unwrap().is_empty());
+    assert_eq!(docs.collections("").await.unwrap(), Vec::<String>::new());
 }
 
 #[test]

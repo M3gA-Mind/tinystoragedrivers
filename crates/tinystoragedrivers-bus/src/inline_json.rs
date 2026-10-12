@@ -1,6 +1,6 @@
 //! Inline document data is JSON text, never a transport stream capability.
 //!
-//! TinyBus deliberately refuses recursively stream-shaped objects in private
+//! `TinyBus` deliberately refuses recursively stream-shaped objects in private
 //! calls. Encoding only document data as text preserves arbitrary business JSON
 //! while keeping native stream handles out of this contract.
 use serde::{Deserialize, Deserializer, Serializer};
