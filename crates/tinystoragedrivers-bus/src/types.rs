@@ -27,10 +27,12 @@ pub enum Precondition {
 #[serde(deny_unknown_fields)]
 pub struct Versioned {
     /// Document identifier.
+    #[serde(rename = "document_id")]
     pub id: String,
     /// Native version.
     pub version: Version,
     /// Inline JSON document, encoded as JSON text on the wire.
+    #[serde(rename = "document_json", with = "crate::inline_json")]
     pub doc: Value,
 }
 /// Read in the captured collection.
@@ -38,6 +40,7 @@ pub struct Versioned {
 #[serde(deny_unknown_fields)]
 pub struct GetRequest {
     /// Document identifier, never an authority selector.
+    #[serde(rename = "document_id")]
     pub id: String,
 }
 /// Conditional native write.
@@ -45,8 +48,10 @@ pub struct GetRequest {
 #[serde(deny_unknown_fields)]
 pub struct PutRequest {
     /// Document identifier.
+    #[serde(rename = "document_id")]
     pub id: String,
     /// Inline JSON object, encoded as JSON text on the wire.
+    #[serde(rename = "document_json", with = "crate::inline_json")]
     pub doc: Value,
     /// Atomic write condition.
     pub precondition: Precondition,
@@ -56,6 +61,7 @@ pub struct PutRequest {
 #[serde(deny_unknown_fields)]
 pub struct DeleteRequest {
     /// Document identifier.
+    #[serde(rename = "document_id")]
     pub id: String,
     /// Atomic deletion condition.
     pub precondition: Precondition,
