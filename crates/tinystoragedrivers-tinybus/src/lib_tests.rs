@@ -38,7 +38,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
     let first = service
         .dispatch(
             &put,
-            json!([{"id":"index","doc":{"value":1},"precondition":{"kind":"absent"}}]),
+            json!([{"document_id":"index","document_json":"{\"value\":1}","precondition":{"kind":"absent"}}]),
         )
         .await
         .unwrap();
@@ -51,7 +51,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
     let conflict = service
         .dispatch(
             &put,
-            json!([{"id":"index","doc":{"value":2},"precondition":{"kind":"absent"}}]),
+            json!([{"document_id":"index","document_json":"{\"value\":2}","precondition":{"kind":"absent"}}]),
         )
         .await
         .unwrap();
@@ -63,7 +63,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
         StorageKind::Conflict
     );
     let get = service
-        .dispatch(&"Get".parse().unwrap(), json!([{"id":"index"}]))
+        .dispatch(&"Get".parse().unwrap(), json!([{"document_id":"index"}]))
         .await
         .unwrap();
     assert_eq!(
@@ -80,7 +80,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
     let second = service
         .dispatch(
             &put,
-            json!([{"id":"index","doc":{"value":2},"precondition":{"kind":"version","version":1}}]),
+            json!([{"document_id":"index","document_json":"{\"value\":2}","precondition":{"kind":"version","version":1}}]),
         )
         .await
         .unwrap();
@@ -93,7 +93,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
     let stale = service
         .dispatch(
             &"Delete".parse().unwrap(),
-            json!([{"id":"index","precondition":{"kind":"version","version":1}}]),
+            json!([{"document_id":"index","precondition":{"kind":"version","version":1}}]),
         )
         .await
         .unwrap();
@@ -107,7 +107,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
     let deleted = service
         .dispatch(
             &"Delete".parse().unwrap(),
-            json!([{"id":"index","precondition":{"kind":"version","version":2}}]),
+            json!([{"document_id":"index","precondition":{"kind":"version","version":2}}]),
         )
         .await
         .unwrap();
@@ -117,7 +117,7 @@ async fn native_cas_conflicts_preserve_document_and_version() {
             .unwrap()
     );
     let missing = service
-        .dispatch(&"Get".parse().unwrap(), json!([{"id":"index"}]))
+        .dispatch(&"Get".parse().unwrap(), json!([{"document_id":"index"}]))
         .await
         .unwrap();
     assert_eq!(
@@ -142,7 +142,7 @@ async fn captured_scope_and_collection_cannot_be_selected_by_document_body() {
         .documents()
         .clone();
     let (_binding, service) = service(alice.clone(), "learned").await;
-    let request = json!([{"id":"index","doc":{"collection":"credentials","scope":"bob"},"precondition":{"kind":"absent"}}]);
+    let request = json!([{"document_id":"index","document_json":"{\"collection\":\"credentials\",\"scope\":\"bob\"}","precondition":{"kind":"absent"}}]);
     service
         .dispatch(&"Put".parse().unwrap(), request)
         .await
@@ -162,7 +162,8 @@ async fn direct_and_unverified_calls_refuse_before_document_mutation() {
         .clone();
     let (_binding, service) = service(docs.clone(), "learned").await;
     let member = "Put".parse().unwrap();
-    let request = json!([{"id":"index","doc":{},"precondition":{"kind":"absent"}}]);
+    let request =
+        json!([{"document_id":"index","document_json":"{}","precondition":{"kind":"absent"}}]);
     assert!(service.call(&member, request.clone()).await.is_err());
     assert!(
         service
@@ -183,7 +184,8 @@ async fn selector_fields_are_rejected_by_actual_dispatch_without_mutation() {
         .clone();
     let (_binding, service) = service(docs.clone(), "learned").await;
     for field in ["scope", "collection", "url", "database", "generation"] {
-        let mut request = json!({"id":"index","doc":{},"precondition":{"kind":"absent"}});
+        let mut request =
+            json!({"document_id":"index","document_json":"{}","precondition":{"kind":"absent"}});
         request[field] = json!("forged");
         assert!(
             service
@@ -244,7 +246,7 @@ async fn retained_native_fence_refuses_late_write_without_changing_document() {
         .put("leases", "alice", json!({"epoch":2}), Precondition::None)
         .await
         .unwrap();
-    let late = service.dispatch(&"Put".parse().unwrap(), json!([{"id":"index","doc":{"private":"do not expose"},"precondition":{"kind":"none"}}])).await.unwrap();
+    let late = service.dispatch(&"Put".parse().unwrap(), json!([{"document_id":"index","document_json":"{\"private\":\"do not expose\"}","precondition":{"kind":"none"}}])).await.unwrap();
     assert_eq!(late, json!({"Err":{"kind":"fenced"}}));
     assert!(
         target
@@ -303,7 +305,7 @@ async fn malformed_arguments_unknown_members_and_native_invalid_input_are_distin
     let invalid = service
         .dispatch(
             &"Put".parse().unwrap(),
-            json!([{"id":"index","doc":"private invalid body","precondition":{"kind":"none"}}]),
+            json!([{"document_id":"index","document_json":"\"private invalid body\"","precondition":{"kind":"none"}}]),
         )
         .await
         .unwrap();

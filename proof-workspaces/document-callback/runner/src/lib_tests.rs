@@ -85,7 +85,7 @@ async fn verified_module_native_cas_roundtrip_confines_collection_and_scope() {
     let fixture = Fixture::new(alice.documents().clone()).await;
     let proxy = fixture.proxy();
     let first: Outcome<Version> = proxy.call_confidential("Put",
-        (json!({"id":"index","doc":{"scope":"bob","collection":"credentials"},"precondition":{"kind":"absent"}}),)).await.unwrap();
+        (json!({"document_id":"index","document_json":"{\"scope\":\"bob\",\"collection\":\"credentials\"}","precondition":{"kind":"absent"}}),)).await.unwrap();
     assert_eq!(first.unwrap(), Version(1));
     assert!(
         alice
@@ -105,26 +105,26 @@ async fn verified_module_native_cas_roundtrip_confines_collection_and_scope() {
     let conflict: Outcome<Version> = proxy
         .call_confidential(
             "Put",
-            (json!({"id":"index","doc":{},"precondition":{"kind":"absent"}}),),
+            (json!({"document_id":"index","document_json":"{}","precondition":{"kind":"absent"}}),),
         )
         .await
         .unwrap();
     assert_eq!(conflict.unwrap_err().kind, StorageKind::Conflict);
     let document: Outcome<Option<Versioned>> = proxy
-        .call_confidential("Get", (json!({"id":"index"}),))
+        .call_confidential("Get", (json!({"document_id":"index"}),))
         .await
         .unwrap();
     assert_eq!(document.unwrap().unwrap().version, Version(1));
     let deleted: Outcome<bool> = proxy
         .call_confidential(
             "Delete",
-            (json!({"id":"index","precondition":{"kind":"version","version":1}}),),
+            (json!({"document_id":"index","precondition":{"kind":"version","version":1}}),),
         )
         .await
         .unwrap();
     assert!(deleted.unwrap());
     let missing: Outcome<Option<Versioned>> = proxy
-        .call_confidential("Get", (json!({"id":"index"}),))
+        .call_confidential("Get", (json!({"document_id":"index"}),))
         .await
         .unwrap();
     assert!(missing.unwrap().is_none());
@@ -132,7 +132,7 @@ async fn verified_module_native_cas_roundtrip_confines_collection_and_scope() {
     let other = Fixture::new(bob.documents().clone()).await;
     let missing: Outcome<Option<Versioned>> = other
         .proxy()
-        .call_confidential("Get", (json!({"id":"index"}),))
+        .call_confidential("Get", (json!({"document_id":"index"}),))
         .await
         .unwrap();
     assert!(missing.unwrap().is_none());
@@ -144,7 +144,8 @@ async fn unauthorized_peer_selector_and_revoked_binding_cannot_mutate_captured_p
     let backend = MemoryStorage::new();
     let scoped = backend.for_scope(&Scope::new("alice").unwrap()).unwrap();
     let fixture = Fixture::new(scoped.documents().clone()).await;
-    let request = (json!({"id":"index","doc":{},"precondition":{"kind":"absent"}}),);
+    let request =
+        (json!({"document_id":"index","document_json":"{}","precondition":{"kind":"absent"}}),);
     let direct = fixture
         .attacker
         .proxy(
@@ -231,7 +232,7 @@ async fn native_stale_fence_refusal_survives_compiled_module_without_private_pro
         .await
         .unwrap();
     let outcome: Outcome<Version> = fixture.proxy().call_confidential("Put",
-        (json!({"id":"index","doc":{"private":"sensitive document"},"precondition":{"kind":"none"}}),)).await.unwrap();
+        (json!({"document_id":"index","document_json":"{\"private\":\"sensitive document\"}","precondition":{"kind":"none"}}),)).await.unwrap();
     assert_eq!(
         serde_json::to_value(outcome).unwrap(),
         json!({"Err":{"kind":"fenced"}})
@@ -243,5 +244,42 @@ async fn native_stale_fence_refusal_survives_compiled_module_without_private_pro
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inline_business_json_with_stream_shaped_data_roundtrips_as_documents() {
+    use tinystoragedrivers_bus::{GetRequest, Precondition, PutRequest};
+    let backend = MemoryStorage::new();
+    let scoped = backend.for_scope(&Scope::new("alice").unwrap()).unwrap();
+    let fixture = Fixture::new(scoped.documents().clone()).await;
+    let document = json!({"nested":[{"id":"business-id"},{"id":"business-attachment","content_type":"text/plain","len":7}]});
+    // These are ordinary persisted JSON values, never TinyBus stream references.
+    let request = PutRequest {
+        id: "index".into(),
+        doc: document.clone(),
+        precondition: Precondition::Absent,
+    };
+    let outcome: Outcome<Version> = fixture
+        .proxy()
+        .call_confidential("Put", (request,))
+        .await
+        .unwrap();
+    assert_eq!(outcome.unwrap(), Version(1));
+    let result: Outcome<Option<Versioned>> = fixture
+        .proxy()
+        .call_confidential("Get", (GetRequest { id: "index".into() },))
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap().unwrap().doc, document);
+    assert_eq!(
+        scoped
+            .documents()
+            .get("learned", "index")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        document
     );
 }

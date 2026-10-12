@@ -17,3 +17,7 @@ No persistence policy or module business reducer is implemented here.
 Run the real artifact proof with scripts/test-document-callback.sh. This uses the
 canonical callback binding, not an OpenHuman workaround or private API copy.
 The proof does not establish TinyMemes persistence or unpublished lifecycle fixes.
+
+The wire uses document_id and strictly parsed inline document_json text. This
+preserves arbitrary business JSON without confusing id-only data with native
+TinyBus stream references. No privacy check or stream API is bypassed.

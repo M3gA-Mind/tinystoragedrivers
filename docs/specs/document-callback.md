@@ -6,6 +6,12 @@ destination, path, and fixed interface. Identifiers are document data, never
 scope, collection, database, URL, schema, or admission selectors.
 
 The minimal contract offers Get, Put, and Delete. Requests reject unknown fields.
+Identifiers use the explicit document_id field. Inline document values use
+document_json containing strictly parsed JSON text; the Rust API exposes Value.
+This separates business objects such as {"id":"entry"} from TinyBus stream
+capabilities, whose conservative private-call detection remains unchanged.
+No stream handles, bulk stream fallback, or implicit data references are used.
+
 Put/Delete preserve the native atomic Precondition; replies preserve versions
 and distinguish absent documents from errors. Native error categories cross
 the wire without messages, identifiers, documents, or backend sources.

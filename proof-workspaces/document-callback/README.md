@@ -19,3 +19,7 @@ The fixture is a proof of the wire/admission boundary, not TinyMemes business
 logic, a hostile-native-code sandbox, release availability, legacy import, or
 the unfinished production TinyMemes persistence migration. In-process native
 modules are trusted code with process privileges.
+
+The wire uses document_id and strictly parsed inline document_json text. This
+preserves arbitrary business JSON without confusing id-only data with native
+TinyBus stream references. No privacy check or stream API is bypassed.

@@ -30,7 +30,7 @@ pub struct Versioned {
     pub id: String,
     /// Native version.
     pub version: Version,
-    /// JSON document.
+    /// Inline JSON document, encoded as JSON text on the wire.
     pub doc: Value,
 }
 /// Read in the captured collection.
@@ -46,7 +46,7 @@ pub struct GetRequest {
 pub struct PutRequest {
     /// Document identifier.
     pub id: String,
-    /// JSON object.
+    /// Inline JSON object, encoded as JSON text on the wire.
     pub doc: Value,
     /// Atomic write condition.
     pub precondition: Precondition,

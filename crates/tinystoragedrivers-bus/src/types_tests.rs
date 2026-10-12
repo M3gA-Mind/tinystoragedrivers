@@ -11,13 +11,14 @@ fn requests_refuse_arbitrary_authority_fields() {
         "generation",
         "sender",
     ] {
-        let mut get = json!({"id":"entry"});
+        let mut get = json!({"document_id":"entry"});
         get[field] = json!("forged");
         assert!(serde_json::from_value::<GetRequest>(get).is_err());
-        let mut put = json!({"id":"entry","doc":{},"precondition":{"kind":"absent"}});
+        let mut put =
+            json!({"document_id":"entry","document_json":"{}","precondition":{"kind":"absent"}});
         put[field] = json!("forged");
         assert!(serde_json::from_value::<PutRequest>(put).is_err());
-        let mut delete = json!({"id":"entry","precondition":{"kind":"none"}});
+        let mut delete = json!({"document_id":"entry","precondition":{"kind":"none"}});
         delete[field] = json!("forged");
         assert!(serde_json::from_value::<DeleteRequest>(delete).is_err());
     }
@@ -32,7 +33,7 @@ fn body_and_cas_condition_preserve_native_wire_values() {
     let wire = serde_json::to_value(&request).unwrap();
     assert_eq!(
         wire,
-        json!({"id":"entry","doc":{"collection":"data","scope":"data"},"precondition":{"kind":"version","version":u64::MAX}})
+        json!({"document_id":"entry","document_json":"{\"collection\":\"data\",\"scope\":\"data\"}","precondition":{"kind":"version","version":u64::MAX}})
     );
     assert_eq!(serde_json::from_value::<PutRequest>(wire).unwrap(), request);
     assert!(

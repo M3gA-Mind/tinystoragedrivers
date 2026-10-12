@@ -3,6 +3,7 @@
 //! Scope and collection authority remain captured by the host, outside the wire.
 //! This contract links no native storage ports or implementations.
 mod client;
+mod inline_json;
 mod types;
 pub use client::DocumentClient;
 pub use types::{
