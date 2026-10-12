@@ -19,9 +19,10 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
-    Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
-    WriteResult, async_trait, validate_collection, validate_doc, validate_id, value,
+    Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
+    Precondition, Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
+    Versioned, WriteOp, WriteResult, async_trait, validate_collection, validate_doc, validate_id,
+    value,
 };
 
 use crate::connection::Db;
@@ -162,21 +163,18 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// A fingerprint of what decides a query's result order.
-fn fingerprint(collection: &str, query: &Query) -> Result<u64> {
-    let shape = serde_json::to_string(&(collection, &query.filter, &query.sort))?;
+fn fingerprint(collection: &str, scope: &Scope, query: &Query) -> Result<u64> {
+    let shape = serde_json::to_string(&(collection, scope.as_str(), &query.filter, &query.sort))?;
     Ok(fnv1a(shape.as_bytes()))
 }
 
-fn parse_cursor(collection: &str, query: &Query) -> Result<usize> {
+fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option<CursorPosition>> {
     let Some(cursor) = &query.cursor else {
-        return Ok(0);
+        return Ok(None);
     };
-    let expected = format!("sqlite:{:016x}:", fingerprint(collection, query)?);
-    cursor
-        .0
-        .strip_prefix(&expected)
-        .and_then(|offset| offset.parse().ok())
-        .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))
+    let position = cursor.decode_keyset("sqlite", fingerprint(collection, scope, query)?)?;
+    position.validate(&query.sort)?;
+    Ok(Some(position))
 }
 
 #[async_trait]
@@ -261,21 +259,38 @@ impl DocumentStore for SqliteDocuments {
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
         validate_collection(collection)?;
         query.validate()?;
-        let start = parse_cursor(collection, query)?;
+        let position = parse_cursor(collection, &self.scope, query)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
         }
-        let fingerprint = fingerprint(collection, query)?;
+        let fingerprint = fingerprint(collection, &self.scope, query)?;
         let (collection, query) = (collection.to_owned(), query.clone());
         self.with(Access::Read, move |conn, ctx| {
-            let found = ops::matching(conn, ctx, &collection, &query.filter, &query.sort)?;
-            let end = query.limit.map_or(found.len(), |limit| {
-                start.saturating_add(limit).min(found.len())
-            });
-            let items = found.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
-            let next =
-                (end < found.len()).then(|| Cursor(format!("sqlite:{fingerprint:016x}:{end}")));
+            let found = ops::matching_after(
+                conn,
+                ctx,
+                &collection,
+                &query.filter,
+                &query.sort,
+                position.as_ref(),
+            )?;
+            let end = query
+                .limit
+                .map_or(found.len(), |limit| limit.min(found.len()));
+            let items = found.get(..end).map(<[_]>::to_vec).unwrap_or_default();
+            let next = if end < found.len() {
+                let last = items
+                    .last()
+                    .ok_or_else(|| StorageError::backend("a continued page was empty"))?;
+                Some(Cursor::keyset(
+                    "sqlite",
+                    fingerprint,
+                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                )?)
+            } else {
+                None
+            };
             Ok(Page { items, next })
         })
         .await

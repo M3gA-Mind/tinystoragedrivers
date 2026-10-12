@@ -16,9 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition,
-    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection,
-    validate_doc, validate_id, value,
+    Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
+    Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
+    validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -117,10 +117,12 @@ impl FileDocuments {
 /// A fingerprint of everything that decides a query's result order, so a
 /// cursor only resumes the query that issued it. FNV-1a is stable across
 /// processes, so a cursor survives a restart.
-pub(crate) fn fingerprint(collection: &str, query: &Query) -> u64 {
+pub(crate) fn fingerprint(collection: &str, scope: &Scope, query: &Query) -> u64 {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(collection.as_bytes());
     // A separator no collection name contains keeps the parts apart.
+    bytes.push(0);
+    bytes.extend_from_slice(scope.as_str().as_bytes());
     bytes.push(0);
     bytes.extend(serde_json::to_vec(&query.filter).unwrap_or_default());
     bytes.push(0);
@@ -128,17 +130,14 @@ pub(crate) fn fingerprint(collection: &str, query: &Query) -> u64 {
     fnv1a_64(&bytes)
 }
 
-/// Decode an offset cursor issued by [`FileDocuments::query`] for this query.
-fn parse_cursor(collection: &str, query: &Query) -> Result<usize> {
+/// Decode a keyset cursor issued by [`FileDocuments::query`] for this scope and query.
+fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option<CursorPosition>> {
     let Some(cursor) = &query.cursor else {
-        return Ok(0);
+        return Ok(None);
     };
-    let expected = format!("file:{:016x}:", fingerprint(collection, query));
-    cursor
-        .0
-        .strip_prefix(&expected)
-        .and_then(|offset| offset.parse().ok())
-        .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))
+    let position = cursor.decode_keyset("file", fingerprint(collection, scope, query))?;
+    position.validate(&query.sort)?;
+    Ok(Some(position))
 }
 
 #[async_trait]
@@ -209,21 +208,38 @@ impl DocumentStore for FileDocuments {
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
         validate_collection(collection)?;
         query.validate()?;
-        let start = parse_cursor(collection, query)?;
+        let position = parse_cursor(collection, &self.scope, query)?;
         if self.existing {
             self.validate_collection_spec(&CollectionSpec::new(collection))
                 .await?;
         }
-        let fingerprint = fingerprint(collection, query);
+        let fingerprint = fingerprint(collection, &self.scope, query);
         let (collection, query) = (collection.to_owned(), query.clone());
         self.with(move |docs| {
             let found = docs.matching(&collection, &query.filter, &query.sort)?;
+            let start = position.as_ref().map_or(0, |cursor| {
+                found.partition_point(|item| {
+                    CursorPosition::for_document(&item.id, &item.doc, &query.sort)
+                        .compare(cursor, &query.sort)
+                        != std::cmp::Ordering::Greater
+                })
+            });
             let end = query.limit.map_or(found.len(), |limit| {
                 start.saturating_add(limit).min(found.len())
             });
             let items = found.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
-            let next =
-                (end < found.len()).then(|| Cursor(format!("file:{fingerprint:016x}:{end}")));
+            let next = if end < found.len() {
+                let last = items
+                    .last()
+                    .ok_or_else(|| StorageError::backend("a continued page was empty"))?;
+                Some(Cursor::keyset(
+                    "file",
+                    fingerprint,
+                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                )?)
+            } else {
+                None
+            };
             Ok(Page { items, next })
         })
         .await

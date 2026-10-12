@@ -65,15 +65,32 @@ async fn query_pages_past_the_end_are_empty() {
     docs.put("c", "a", json!({}), Precondition::None)
         .await
         .unwrap();
-    let past_end = format!("mem:{:016x}:9", documents::fingerprint("c", &Query::all()));
+    let query = Query::all();
+    let fingerprint = documents::fingerprint("c", &Scope::local(), &query);
     let page = docs
-        .query("c", &Query::all().after(crate::Cursor(past_end)))
+        .query(
+            "c",
+            &query.after(
+                crate::Cursor::keyset(
+                    "mem",
+                    fingerprint,
+                    &crate::CursorPosition {
+                        id: "z".into(),
+                        values: vec![],
+                    },
+                )
+                .unwrap(),
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(page.items.len(), 0);
     assert!(page.next.is_none());
     let error = docs
-        .query("c", &Query::all().after(crate::Cursor("mem:x".into())))
+        .query(
+            "c",
+            &Query::all().after(crate::Cursor("mem:keyset1:x".into())),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);

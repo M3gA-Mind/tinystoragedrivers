@@ -12,12 +12,12 @@
 //!   under [`BODY`] so its field names never collide with the driver's. A
 //!   removed document stays as a tombstone (`_del: true`, empty body).
 //! - **Cursors and index names** carry an FNV-1a hash, which, unlike
-//!   `DefaultHasher`, is stable across processes and Rust releases. A cursor
-//!   issued by one server process is valid on another.
+//!   `DefaultHasher`, is stable across processes and Rust releases. Query
+//!   cursors carry the last sort values and id, not a result offset.
 
 use mongodb::bson::{Bson, Document, doc};
 use tinystoragedrivers_core::{
-    Cursor, Filter, Query, RESERVED_PREFIX, Result, Scope, Sort, StorageError,
+    Cursor, CursorPosition, Filter, Query, RESERVED_PREFIX, Result, Scope, Sort, StorageError,
 };
 
 /// The field holding the tenant key on every stored record.
@@ -86,8 +86,10 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// A fingerprint of everything that decides a query's result order.
-pub(crate) fn fingerprint(collection: &str, filter: &Filter, sort: &[Sort]) -> u64 {
+pub(crate) fn fingerprint(collection: &str, scope: &Scope, filter: &Filter, sort: &[Sort]) -> u64 {
     let mut bytes = collection.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(scope.as_str().as_bytes());
     bytes.push(0);
     bytes.extend(serde_json::to_vec(filter).unwrap_or_default());
     bytes.push(0);
@@ -95,33 +97,40 @@ pub(crate) fn fingerprint(collection: &str, filter: &Filter, sort: &[Sort]) -> u
     fnv1a(&bytes)
 }
 
-/// The cursor that resumes `query` on `collection` at `offset`.
-pub(crate) fn encode_cursor(collection: &str, query: &Query, offset: u64) -> Cursor {
-    Cursor(format!(
-        "mongo:{:016x}:{offset}",
-        fingerprint(collection, &query.filter, &query.sort)
-    ))
+/// The cursor that resumes `query` on `collection` after `position`.
+pub(crate) fn encode_cursor(
+    collection: &str,
+    scope: &Scope,
+    query: &Query,
+    position: &CursorPosition,
+) -> Result<Cursor> {
+    Cursor::keyset(
+        "mongo",
+        fingerprint(collection, scope, &query.filter, &query.sort),
+        position,
+    )
 }
 
-/// The offset `query.cursor` resumes at, or 0 without a cursor.
+/// The keyset position `query.cursor` resumes after, or `None` without a cursor.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
 /// for a cursor this driver did not issue for this query.
-pub(crate) fn decode_cursor(collection: &str, query: &Query) -> Result<u64> {
+pub(crate) fn decode_cursor(
+    collection: &str,
+    scope: &Scope,
+    query: &Query,
+) -> Result<Option<CursorPosition>> {
     let Some(cursor) = &query.cursor else {
-        return Ok(0);
+        return Ok(None);
     };
-    let expected = format!(
-        "mongo:{:016x}:",
-        fingerprint(collection, &query.filter, &query.sort)
-    );
-    cursor
-        .0
-        .strip_prefix(&expected)
-        .and_then(|offset| offset.parse().ok())
-        .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))
+    let position = cursor.decode_keyset(
+        "mongo",
+        fingerprint(collection, scope, &query.filter, &query.sort),
+    )?;
+    position.validate(&query.sort)?;
+    Ok(Some(position))
 }
 
 /// An anchored regular expression matching strings that start with `prefix`.

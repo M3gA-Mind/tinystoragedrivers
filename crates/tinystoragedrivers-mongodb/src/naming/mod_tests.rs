@@ -29,20 +29,34 @@ fn prefixes_and_ids() {
 #[test]
 fn cursors_bind_to_their_query() {
     let query = Query::filter(Filter::eq("a", 1)).sort(Sort::asc("b"));
-    assert_eq!(decode_cursor("c", &query).unwrap(), 0);
-    let cursor = encode_cursor("c", &query, 7);
+    let scope = Scope::new("alice").unwrap();
+    assert_eq!(decode_cursor("c", &scope, &query).unwrap(), None);
+    let position = CursorPosition {
+        id: "last".into(),
+        values: vec![serde_json::json!(5)],
+    };
+    let cursor = encode_cursor("c", &scope, &query, &position).unwrap();
     assert!(cursor.0.starts_with("mongo:"));
     assert_eq!(
-        decode_cursor("c", &query.clone().after(cursor.clone())).unwrap(),
-        7
+        decode_cursor("c", &scope, &query.clone().after(cursor.clone())).unwrap(),
+        Some(position)
     );
 
     let foreign = [
-        decode_cursor("other", &query.clone().after(cursor.clone())),
-        decode_cursor("c", &Query::all().after(cursor.clone())),
-        decode_cursor("c", &query.clone().sort(Sort::desc("x")).after(cursor)),
-        decode_cursor("c", &query.clone().after(Cursor("mongo:zz:1".into()))),
-        decode_cursor("c", &query.after(Cursor("forged".into()))),
+        decode_cursor("other", &scope, &query.clone().after(cursor.clone())),
+        decode_cursor("c", &scope, &Query::all().after(cursor.clone())),
+        decode_cursor(
+            "c",
+            &scope,
+            &query.clone().sort(Sort::desc("x")).after(cursor.clone()),
+        ),
+        decode_cursor("c", &Scope::local(), &query.clone().after(cursor.clone())),
+        decode_cursor(
+            "c",
+            &scope,
+            &query.clone().after(Cursor("mongo:keyset1:zz:{}".into())),
+        ),
+        decode_cursor("c", &scope, &query.after(Cursor("forged".into()))),
     ];
     for result in foreign {
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);

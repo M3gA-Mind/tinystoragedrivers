@@ -7,12 +7,12 @@
 //! Otherwise the server returns a superset, which is filtered, sorted and
 //! paged in Rust with the reference semantics, still scoped server-side.
 
-use mongodb::bson::{Document, doc};
+use mongodb::bson::{Bson, Document, doc, to_bson};
 use mongodb::options::FindOptions;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CollectionSpec, Filter, Result, SearchHit, Sort, StorageError, Version, Versioned,
-    sort_documents, value,
+    CollectionSpec, CursorPosition, Filter, Result, SearchHit, Sort, StorageError, Version,
+    Versioned, sort_documents, value,
 };
 
 use super::MongoDocuments;
@@ -60,14 +60,13 @@ impl MongoDocuments {
             .collect())
     }
 
-    /// The page of documents matching `filter` in `sort` order starting at
-    /// `offset`.
+    /// The page of documents matching `filter` in `sort` order after `position`.
     pub(super) async fn page(
         &self,
         collection: &str,
         filter: &Filter,
         sort: &[Sort],
-        offset: u64,
+        position: Option<CursorPosition>,
         limit: Option<usize>,
     ) -> Result<Matches> {
         let spec = self.shared.spec(collection).await?;
@@ -76,6 +75,9 @@ impl MongoDocuments {
         if translated.exact
             && let Some(plan) = translate::sort_plan(sort)
         {
+            let cursor_needs_reference_sort = position
+                .as_ref()
+                .is_some_and(|position| !cursor_is_scalar_bson_position(position));
             let complex = if sort.is_empty() {
                 false
             } else {
@@ -91,17 +93,17 @@ impl MongoDocuments {
                     )
                     .await
                     .map_err(errors::failed("inspect sort values"))?;
-                !found.is_empty()
+                cursor_needs_reference_sort || !found.is_empty()
             };
             if !complex {
                 let mut stages = Vec::new();
                 if !plan.add_fields.is_empty() {
                     stages.push(doc! {"$addFields": plan.add_fields});
                 }
-                stages.push(doc! {"$sort": plan.sort});
-                if offset > 0 {
-                    stages.push(doc! {"$skip": to_i64(offset)});
+                if let Some(position) = &position {
+                    stages.push(doc! {"$match": {"$expr": Self::seek_expression(sort, position)?}});
                 }
+                stages.push(doc! {"$sort": plan.sort});
                 if let Some(limit) = limit {
                     stages.push(doc! {"$limit": to_i64(limit as u64).saturating_add(1)});
                 }
@@ -130,14 +132,72 @@ impl MongoDocuments {
             .map(Stored::into_versioned)
             .collect();
         sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(found.len());
+        let start = position.as_ref().map_or(0, |cursor| {
+            found.partition_point(|item| {
+                CursorPosition::for_document(&item.id, &item.doc, sort).compare(cursor, sort)
+                    != std::cmp::Ordering::Greater
+            })
+        });
         let end = limit.map_or(found.len(), |limit| {
             start.saturating_add(limit).min(found.len())
         });
         let more = end < found.len();
         Ok((found.drain(start..end).collect(), more))
+    }
+
+    /// Build a lexicographic seek predicate over the computed sort rank/value
+    /// fields. This path is used only after the sort plan confirms every
+    /// matching value is scalar, so BSON value comparison agrees with core
+    /// ordering within each type.
+    pub(super) fn seek_expression(sort: &[Sort], position: &CursorPosition) -> Result<Bson> {
+        let mut alternatives = Vec::with_capacity(sort.len() + 1);
+        let mut prefix = Vec::with_capacity(sort.len() * 2);
+        for (index, key) in sort.iter().enumerate() {
+            let value = position
+                .values
+                .get(index)
+                .unwrap_or(&serde_json::Value::Null);
+            let rank = scalar_rank(value);
+            let rank_ref = format!("$_tsd_r{index}");
+            let value_ref = format!("$_tsd_k{index}");
+            let operator = match key.direction {
+                tinystoragedrivers_core::Direction::Asc => "$gt",
+                tinystoragedrivers_core::Direction::Desc => "$lt",
+            };
+            let bson_value = to_bson(value).map_err(|error| {
+                StorageError::serialization(error.to_string()).with_source(error)
+            })?;
+            let literal_value = doc! {"$literal": bson_value.clone()};
+            let mut rank_advance = Document::new();
+            rank_advance.insert(
+                operator,
+                Bson::Array(vec![Bson::String(rank_ref.clone()), Bson::Int32(rank)]),
+            );
+            let mut value_advance = Document::new();
+            value_advance.insert(
+                operator,
+                Bson::Array(vec![
+                    Bson::String(value_ref.clone()),
+                    Bson::Document(literal_value.clone()),
+                ]),
+            );
+            let advances = doc! {"$or": [
+                rank_advance,
+                {"$and": [
+                    {"$eq": [&rank_ref, rank]},
+                    value_advance,
+                ]},
+            ]};
+            let mut clause = prefix.clone();
+            clause.push(advances);
+            alternatives.push(Bson::Document(doc! {"$and": clause}));
+            prefix.push(doc! {"$eq": [&rank_ref, rank]});
+            prefix.push(doc! {"$eq": [&value_ref, literal_value]});
+        }
+        let mut tied = prefix;
+        tied.push(doc! {"$gt": ["$_key", {"$literal": position.id.as_str()}]});
+        alternatives.push(Bson::Document(doc! {"$and": tied}));
+        Ok(Bson::Document(doc! {"$or": alternatives}))
     }
 
     /// How many live documents match `filter`.
@@ -239,5 +299,32 @@ impl MongoDocuments {
         }
         hits.truncate(limit);
         Ok(hits)
+    }
+}
+
+/// Whether every cursor sort value can use Mongo's scalar BSON seek ordering.
+/// The current rows may no longer contain the complex or unrepresentable
+/// value that produced the cursor (for example, after that row was deleted).
+fn cursor_is_scalar_bson_position(position: &CursorPosition) -> bool {
+    position.values.iter().all(|value| {
+        !matches!(
+            value,
+            serde_json::Value::Array(_) | serde_json::Value::Object(_)
+        ) && to_bson(value).is_ok()
+    })
+}
+
+#[cfg(test)]
+#[path = "read_tests.rs"]
+mod tests;
+
+fn scalar_rank(value: &serde_json::Value) -> i32 {
+    match value {
+        serde_json::Value::Null => 0,
+        serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(_) => 2,
+        serde_json::Value::String(_) => 3,
+        serde_json::Value::Array(_) => 4,
+        serde_json::Value::Object(_) => 5,
     }
 }

@@ -8,8 +8,8 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CollectionSpec, Filter, Precondition, Result, Sort, StorageError, Version, Versioned,
-    sort_documents, validate_collection, validate_doc, validate_id, value,
+    CollectionSpec, CursorPosition, Filter, Precondition, Result, Sort, StorageError, Version,
+    Versioned, sort_documents, validate_collection, validate_doc, validate_id, value,
 };
 
 use super::pushdown;
@@ -334,6 +334,18 @@ pub(crate) fn matching(
     filter: &Filter,
     sort: &[Sort],
 ) -> Result<Vec<Versioned<Value>>> {
+    matching_after(conn, ctx, collection, filter, sort, None)
+}
+
+/// Live documents strictly after an optional cursor in `sort` order.
+pub(crate) fn matching_after(
+    conn: &Connection,
+    ctx: Ctx<'_>,
+    collection: &str,
+    filter: &Filter,
+    sort: &[Sort],
+    after: Option<&CursorPosition>,
+) -> Result<Vec<Versioned<Value>>> {
     validate_collection(collection)?;
     filter.validate()?;
     let spec = load_spec(conn, ctx.tables, collection)?;
@@ -344,6 +356,12 @@ pub(crate) fn matching(
     );
     let mut params = vec![SqlValue::Text(ctx.scope.to_owned())];
     if let Some(clause) = pushdown::clause(filter) {
+        sql.push_str(" AND (");
+        sql.push_str(&clause.sql);
+        sql.push(')');
+        params.extend(clause.params);
+    }
+    if let Some(clause) = after.and_then(|position| pushdown::after(position, sort)) {
         sql.push_str(" AND (");
         sql.push_str(&clause.sql);
         sql.push(')');
@@ -369,6 +387,12 @@ pub(crate) fn matching(
         }
     }
     sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
+    if let Some(after) = after {
+        found.retain(|item| {
+            CursorPosition::for_document(&item.id, &item.doc, sort).compare(after, sort)
+                == std::cmp::Ordering::Greater
+        });
+    }
     Ok(found)
 }
 

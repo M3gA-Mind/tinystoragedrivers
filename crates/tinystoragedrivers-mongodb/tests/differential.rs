@@ -187,3 +187,47 @@ async fn live_filters_sorts_and_pages_agree_with_memory() {
         assert_eq!(got, want, "delete_where {filter:?}");
     }
 }
+
+#[tokio::test]
+async fn deleted_complex_sort_cursor_keeps_all_later_scalar_rows() {
+    let Some(backend) = connect().await else {
+        return skip("deleted_complex_sort_cursor_keeps_all_later_scalar_rows");
+    };
+    let scoped = backend
+        .for_scope(&Scope::new("deleted-complex-cursor").unwrap())
+        .unwrap();
+    let docs = scoped.documents();
+    let coll = format!("deleted_cursor_{}", std::process::id());
+    for (id, value) in [("a", json!("x")), ("b", json!([1])), ("c", json!("y"))] {
+        docs.put(&coll, id, json!({"value": value}), Precondition::None)
+            .await
+            .unwrap();
+    }
+
+    let query = Query::all().sort(Sort::desc("value")).limit(1);
+    let first = docs.query(&coll, &query).await.unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["b"]
+    );
+    let cursor = first
+        .next
+        .expect("the scalar rows follow the complex boundary");
+    docs.delete(&coll, "b", Precondition::None).await.unwrap();
+
+    let mut query = query.after(cursor);
+    let mut rest = Vec::new();
+    loop {
+        let page = docs.query(&coll, &query).await.unwrap();
+        rest.extend(page.items.into_iter().map(|item| item.id));
+        match page.next {
+            Some(cursor) => query = query.after(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(rest, ["c", "a"]);
+}

@@ -6,32 +6,34 @@ use super::*;
 
 #[test]
 fn fingerprints_are_stable_and_query_specific() {
-    let a = fingerprint("c", &Query::all()).unwrap();
+    let scope = Scope::local();
+    let a = fingerprint("c", &scope, &Query::all()).unwrap();
     assert_eq!(
         a,
-        fingerprint("c", &Query::all().limit(5)).unwrap(),
+        fingerprint("c", &scope, &Query::all().limit(5)).unwrap(),
         "limit does not matter"
     );
-    assert_ne!(a, fingerprint("d", &Query::all()).unwrap());
+    assert_ne!(a, fingerprint("d", &scope, &Query::all()).unwrap());
     assert_ne!(
         a,
-        fingerprint("c", &Query::filter(Filter::eq("x", 1))).unwrap()
+        fingerprint("c", &scope, &Query::filter(Filter::eq("x", 1))).unwrap()
     );
     assert_ne!(
         a,
-        fingerprint("c", &Query::all().sort(Sort::asc("x"))).unwrap()
+        fingerprint("c", &scope, &Query::all().sort(Sort::asc("x"))).unwrap()
     );
     assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
 }
 
 #[test]
 fn rejects_foreign_cursors() {
-    let query = Query::all().after(Cursor("mem:0000000000000000:1".into()));
+    let scope = Scope::local();
+    let query = Query::all().after(Cursor("mem:keyset1:0000000000000000:{}".into()));
     assert_eq!(
-        parse_cursor("c", &query).unwrap_err().kind(),
+        parse_cursor("c", &scope, &query).unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
-    assert_eq!(parse_cursor("c", &Query::all()).unwrap(), 0);
+    assert_eq!(parse_cursor("c", &scope, &Query::all()).unwrap(), None);
 }
 
 #[test]

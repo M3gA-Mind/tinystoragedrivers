@@ -194,8 +194,22 @@ fn sort_plans_rank_then_value_then_key() {
         plan.sort,
         doc! {"_tsd_r0": -1, "_tsd_k0": -1, "_tsd_r1": 1, "_tsd_k1": 1, "_key": 1}
     );
-    assert_eq!(plan.add_fields.get_str("_tsd_k0").unwrap(), "$d.rank");
-    assert_eq!(plan.add_fields.get_str("_tsd_k1").unwrap(), "$_key");
+    assert_eq!(
+        plan.add_fields
+            .get_document("_tsd_k0")
+            .unwrap()
+            .get_array("$ifNull")
+            .unwrap(),
+        &[Bson::String("$d.rank".into()), Bson::Null]
+    );
+    assert_eq!(
+        plan.add_fields
+            .get_document("_tsd_k1")
+            .unwrap()
+            .get_array("$ifNull")
+            .unwrap(),
+        &[Bson::String("$_key".into()), Bson::Null]
+    );
     assert!(plan.add_fields.get_document("_tsd_r0").is_ok());
     assert_eq!(plan.unset, ["_tsd_k0", "_tsd_r0", "_tsd_k1", "_tsd_r1"]);
     assert_eq!(

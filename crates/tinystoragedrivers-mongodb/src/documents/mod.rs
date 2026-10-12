@@ -29,9 +29,10 @@ use async_trait::async_trait;
 use mongodb::ClientSession;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Filter, Page, Precondition,
-    Query, RESERVED_PREFIX, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
-    Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id, value,
+    Capabilities, Capability, CollectionSpec, CursorPosition, DocumentStore, ErrorKind, Filter,
+    Page, Precondition, Query, RESERVED_PREFIX, ReadCheck, Result, Scope, SearchHit, Sort,
+    StorageError, Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
+    validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
@@ -135,7 +136,7 @@ impl MongoDocuments {
         patch: &Value,
         session: Option<&mut ClientSession>,
     ) -> Result<Option<Versioned<Value>>> {
-        let (first, _) = self.page(collection, filter, sort, 0, Some(1)).await?;
+        let (first, _) = self.page(collection, filter, sort, None, Some(1)).await?;
         let Some(first) = first.into_iter().next() else {
             return Ok(None);
         };
@@ -340,11 +341,29 @@ impl DocumentStore for MongoDocuments {
         crate::purge::admitted!(self, {
             query.validate()?;
             validate_collection(collection)?;
-            let offset = decode_cursor(collection, query)?;
+            let position = decode_cursor(collection, &self.scope, query)?;
             let (items, more) = self
-                .page(collection, &query.filter, &query.sort, offset, query.limit)
+                .page(
+                    collection,
+                    &query.filter,
+                    &query.sort,
+                    position,
+                    query.limit,
+                )
                 .await?;
-            let next = more.then(|| encode_cursor(collection, query, offset + items.len() as u64));
+            let next = if more {
+                let last = items
+                    .last()
+                    .ok_or_else(|| StorageError::backend("a continued page was empty"))?;
+                Some(encode_cursor(
+                    collection,
+                    &self.scope,
+                    query,
+                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                )?)
+            } else {
+                None
+            };
             Ok(Page { items, next })
         })
     }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::*;
-use crate::{ErrorKind, MemoryStorage, Scope, StorageBackend};
+use crate::{ErrorKind, ID_FIELD, MemoryStorage, Scope, StorageBackend};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Task {
@@ -121,6 +121,50 @@ fn queries_build_fluently() {
     assert_eq!(Query::all(), Query::default());
     let encoded = serde_json::to_value(Query::all()).unwrap();
     assert_eq!(encoded, json!({"filter": {"op": "all"}, "sort": []}));
+}
+
+#[test]
+fn keyset_positions_validate_shape_and_order_by_values_then_id() {
+    let sort = [Sort::desc("rank"), Sort::asc(ID_FIELD)];
+    let position = CursorPosition::for_document("b", &json!({"rank": 4}), &sort);
+    assert_eq!(position.values, [json!(4), json!("b")]);
+    assert_eq!(
+        position.compare(
+            &CursorPosition::for_document("a", &json!({"rank": 4}), &sort),
+            &sort,
+        ),
+        std::cmp::Ordering::Greater,
+        "the id breaks ties after all requested directions"
+    );
+    position.validate(&sort).unwrap();
+
+    for invalid in [
+        CursorPosition {
+            id: String::new(),
+            values: vec![json!(4), json!("b")],
+        },
+        CursorPosition {
+            id: "b".into(),
+            values: vec![json!(4)],
+        },
+        CursorPosition {
+            id: "b".into(),
+            values: vec![json!(4), json!("other")],
+        },
+    ] {
+        assert_eq!(
+            invalid.validate(&sort).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+    }
+
+    assert_eq!(
+        Cursor("mem:keyset1:0000000000000000:{\"id\":\"x\",\"values\":[],\"extra\":true}".into())
+            .decode_keyset("mem", 0)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
