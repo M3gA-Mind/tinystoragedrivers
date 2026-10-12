@@ -259,3 +259,38 @@ fn checked_batch_roundtrips_and_rejects_authority_selectors() {
     forged["scope"] = json!("bob");
     assert!(serde_json::from_value::<BatchRequest>(forged).is_err());
 }
+
+#[test]
+fn batch_writes_reuse_document_id_and_inline_document_json_fields() {
+    let value = json!({"nested":{"id":"business-data","items":[1,true,null]}});
+    let batch = BatchRequest {
+        checks: vec![],
+        ops: vec![
+            WriteOp::Put {
+                collection: "items".into(),
+                id: "put-id".into(),
+                doc: value.clone(),
+                precondition: Precondition::Absent,
+            },
+            WriteOp::Delete {
+                collection: "items".into(),
+                id: "delete-id".into(),
+                precondition: Precondition::None,
+            },
+        ],
+    };
+    let wire = serde_json::to_value(batch).unwrap();
+    let put = &wire["ops"][0];
+    let delete = &wire["ops"][1];
+    assert_eq!(put["document_id"], "put-id");
+    assert!(put["document_id"].is_string());
+    assert!(put["document_json"].is_string());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(put["document_json"].as_str().unwrap()).unwrap(),
+        value
+    );
+    assert!(put.get("id").is_none());
+    assert!(put.get("doc").is_none());
+    assert_eq!(delete["document_id"], "delete-id");
+    assert!(delete.get("id").is_none());
+}

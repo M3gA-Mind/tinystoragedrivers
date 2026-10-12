@@ -305,8 +305,10 @@ pub enum WriteOp {
         /// Collection constrained by host grants.
         collection: String,
         /// Record id.
+        #[serde(rename = "document_id")]
         id: String,
         /// Replacement object.
+        #[serde(rename = "document_json", with = "crate::inline_json")]
         doc: Value,
         /// Atomic precondition.
         #[serde(default)]
@@ -317,6 +319,7 @@ pub enum WriteOp {
         /// Collection constrained by host grants.
         collection: String,
         /// Record id.
+        #[serde(rename = "document_id")]
         id: String,
         /// Atomic precondition.
         #[serde(default)]
