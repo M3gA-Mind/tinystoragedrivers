@@ -385,7 +385,10 @@ async fn existing_schema_validation_refuses_retired_generation_after_purge() {
         .validate_collection_spec(&spec)
         .await
         .unwrap();
-    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Fenced));
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(ErrorKind::ScopeGenerationRejected)
+    );
 }
 
 #[tokio::test]

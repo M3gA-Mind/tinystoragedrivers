@@ -32,7 +32,7 @@ fn verify(document: Option<&Document>, expected: ScopeGeneration) -> Result<()> 
         .is_some_and(|receipt| receipt.status == PurgeStatus::Pending)
         || current != expected
     {
-        return Err(StorageError::fenced(
+        return Err(StorageError::scope_generation_rejected(
             "scope reset is pending or this handle generation has retired",
         ));
     }

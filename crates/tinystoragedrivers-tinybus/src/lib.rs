@@ -168,6 +168,7 @@ fn storage_failure(
         ErrorKind::Crypto => StorageKind::Crypto,
         ErrorKind::Unavailable => StorageKind::Unavailable,
         ErrorKind::Fenced => StorageKind::Fenced,
+        ErrorKind::ScopeGenerationRejected => StorageKind::ScopeGenerationRejected,
         // Future native error kinds safely retain the generic driver category.
         _ => StorageKind::Backend,
     };

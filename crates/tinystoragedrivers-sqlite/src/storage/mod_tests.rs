@@ -354,7 +354,7 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
                     .await
                     .unwrap_err()
                     .kind(),
-                ErrorKind::Fenced
+                ErrorKind::ScopeGenerationRejected
             );
             assert_eq!(
                 target
@@ -363,7 +363,7 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
                     .await
                     .unwrap_err()
                     .kind(),
-                ErrorKind::Fenced
+                ErrorKind::ScopeGenerationRejected
             );
             assert_eq!(
                 target
@@ -372,7 +372,7 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
                     .await
                     .unwrap_err()
                     .kind(),
-                ErrorKind::Fenced
+                ErrorKind::ScopeGenerationRejected
             );
         }
         drop(storage);
@@ -394,7 +394,7 @@ async fn verify_reopened_generation(location: &Path, scope: &Scope) {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     let fresh = reopened
         .database("sessions")
@@ -927,7 +927,7 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         old.streams()
@@ -935,10 +935,10 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         old.blobs().get("blob").await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
 }

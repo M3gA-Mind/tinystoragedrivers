@@ -40,6 +40,11 @@ pub enum ErrorKind {
     /// expired, or moved on (a newer lease epoch). Nothing was written.
     /// Not retryable: the caller lost the right to write.
     Fenced,
+    /// This handle's scope generation is retired or unissued, or a scope reset
+    /// is pending. This does not imply that an independent native lease was
+    /// lost. Not retryable through the same handle: only a trusted owner may
+    /// complete the reset and bind an explicitly issued generation.
+    ScopeGenerationRejected,
 }
 
 impl fmt::Display for ErrorKind {
@@ -55,6 +60,7 @@ impl fmt::Display for ErrorKind {
             Self::Unavailable => f.write_str("unavailable"),
             Self::Backend => f.write_str("backend"),
             Self::Fenced => f.write_str("fenced"),
+            Self::ScopeGenerationRejected => f.write_str("scope generation rejected"),
         }
     }
 }
@@ -154,6 +160,12 @@ impl StorageError {
     #[must_use]
     pub fn fenced(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Fenced, message)
+    }
+
+    /// [`ErrorKind::ScopeGenerationRejected`].
+    #[must_use]
+    pub fn scope_generation_rejected(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::ScopeGenerationRejected, message)
     }
 
     /// What went wrong.

@@ -529,7 +529,7 @@ async fn live_watch_retired_generation_refuses_open_and_delivery() {
         .unwrap();
     assert_eq!(
         old_watch.next().await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         original
@@ -538,7 +538,7 @@ async fn live_watch_retired_generation_refuses_open_and_delivery() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     let replacement = db.for_scope_generation(&scope, first.generation).unwrap();
     assert_eq!(
@@ -580,6 +580,6 @@ async fn live_watch_retired_generation_refuses_open_and_delivery() {
         .unwrap();
     assert_eq!(
         fresh_watch.next().await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
 }

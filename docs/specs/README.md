@@ -22,4 +22,5 @@ the contract; production code still belongs under `src/`.
 
 See [`storage-ports.md`](storage-ports.md),
 [`secret-storage.md`](secret-storage.md) and
-[`write-fencing.md`](write-fencing.md).
+[`write-fencing.md`](write-fencing.md) and
+[`generation-admission-errors.md`](generation-admission-errors.md).
