@@ -227,11 +227,17 @@ async fn query_pages_past_the_end_are_empty() {
     docs.put("c", "a", json!({}), Precondition::None)
         .await
         .unwrap();
-    let past_end = format!("file:{:016x}:9", fingerprint("c", &Query::all()));
-    let page = docs
-        .query("c", &Query::all().after(Cursor(past_end)))
-        .await
-        .unwrap();
+    let query = Query::all();
+    let past_end = Cursor::keyset(
+        "file",
+        fingerprint("c", &Scope::local(), &query),
+        &CursorPosition {
+            id: "z".into(),
+            values: vec![],
+        },
+    )
+    .unwrap();
+    let page = docs.query("c", &query.after(past_end)).await.unwrap();
     assert_eq!(page.items.len(), 0);
     assert!(page.next.is_none());
     for forged in ["file:x", "mem:0000000000000000:1"] {

@@ -54,9 +54,17 @@ Versioned JSON **objects** in named collections.
 - **Sorting.** Any number of keys. Ties, and an empty sort, fall back to id
   ascending. A missing field sorts as null.
 - **Paging.** `Query.limit` caps a page and must be at least 1. Sort fields
-  follow the same path rules as filters. `Page.next`
-  is an opaque cursor, valid only for the same collection, filter and sort on
-  the same driver; any other cursor is `ErrorKind::InvalidInput`.
+  follow the same path rules as filters. `Page.next` is an opaque keyset cursor
+  containing the last returned sort values and id, bound to the issuing driver,
+  scope, collection, filter and sort; any other cursor is
+  `ErrorKind::InvalidInput`. Legacy native offset cursors are invalid because
+  their contents cannot be interpreted as a keyset position.
+  Each continuation re-evaluates the query and starts strictly after that saved
+  total-order position. Paging does not promise a snapshot: inserts before the
+  saved position are not returned, inserts after it can be returned, and
+  deletions or sort-key changes affect later pages according to their current
+  values. A document moved from before the cursor to after it can therefore
+  appear, while one moved from after it to before it can be omitted.
 - **Declarations.** `ensure_collection` merges into what is already declared:
   indexes and search fields accumulate, and an expiry field can be added but
   not changed. Redeclaring an index name with different fields is

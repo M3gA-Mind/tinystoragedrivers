@@ -21,9 +21,9 @@ use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
 pub use types::{
-    CollectionSpec, Cursor, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN, MAX_ID_LEN, Page,
-    Precondition, Query, RESERVED_PREFIX, ReadCheck, SearchHit, SearchSpec, Version, Versioned,
-    WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
+    CollectionSpec, Cursor, CursorPosition, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN,
+    MAX_ID_LEN, Page, Precondition, Query, RESERVED_PREFIX, ReadCheck, SearchHit, SearchSpec,
+    Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
 };
 
 /// Versioned JSON documents in named collections, bound to one scope.

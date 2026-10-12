@@ -338,6 +338,110 @@ pub fn validate_doc(doc: &Value) -> Result<()> {
 #[serde(transparent)]
 pub struct Cursor(pub String);
 
+impl Cursor {
+    /// Encode a keyset position for a driver-owned query fingerprint.
+    ///
+    /// The payload is deliberately versioned so legacy driver cursors that
+    /// represented offsets are rejected instead of silently changing meaning.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the position cannot be encoded.
+    pub fn keyset(driver: &str, fingerprint: u64, position: &CursorPosition) -> Result<Self> {
+        let payload = serde_json::to_string(position)?;
+        Ok(Self(format!(
+            "{driver}:keyset1:{fingerprint:016x}:{payload}"
+        )))
+    }
+
+    /// Decode a keyset position issued for the expected driver and query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput)
+    /// when the cursor is legacy, malformed, or belongs to another query.
+    pub fn decode_keyset(&self, driver: &str, fingerprint: u64) -> Result<CursorPosition> {
+        let prefix = format!("{driver}:keyset1:{fingerprint:016x}:");
+        let payload = self
+            .0
+            .strip_prefix(&prefix)
+            .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))?;
+        serde_json::from_str(payload)
+            .map_err(|_| StorageError::invalid_input("cursor was not issued for this query"))
+    }
+}
+
+/// The last document's total-order position in a keyset-paged query.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CursorPosition {
+    /// The document id, used after all explicit sort keys tie.
+    pub id: String,
+    /// Sort values in query sort-key order; absent fields are represented as null.
+    pub values: Vec<Value>,
+}
+
+impl CursorPosition {
+    /// Capture a document's sort values and id for a continuation cursor.
+    #[must_use]
+    pub fn for_document(id: &str, document: &Value, sort: &[Sort]) -> Self {
+        let values = sort
+            .iter()
+            .map(|key| {
+                if key.field == crate::ID_FIELD {
+                    Value::String(id.to_owned())
+                } else {
+                    crate::value::lookup(document, &key.field)
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                }
+            })
+            .collect();
+        Self {
+            id: id.to_owned(),
+            values,
+        }
+    }
+
+    /// Compare two positions in the total order defined by `sort` and id.
+    #[must_use]
+    pub fn compare(&self, other: &Self, sort: &[Sort]) -> std::cmp::Ordering {
+        for (index, key) in sort.iter().enumerate() {
+            let left = self.values.get(index).unwrap_or(&Value::Null);
+            let right = other.values.get(index).unwrap_or(&Value::Null);
+            let ordering = crate::value::compare(left, right);
+            let ordering = match key.direction {
+                crate::Direction::Asc => ordering,
+                crate::Direction::Desc => ordering.reverse(),
+            };
+            if !ordering.is_eq() {
+                return ordering;
+            }
+        }
+        self.id.cmp(&other.id)
+    }
+
+    /// Validate a decoded keyset position against its query sort.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) if
+    /// the id or number of stored values cannot represent this query order.
+    pub fn validate(&self, sort: &[Sort]) -> Result<()> {
+        crate::document::validate_id(&self.id)?;
+        if self.values.len() != sort.len()
+            || sort.iter().zip(&self.values).any(|(key, value)| {
+                key.field == crate::ID_FIELD && value != &Value::String(self.id.clone())
+            })
+        {
+            return Err(StorageError::invalid_input(
+                "cursor was not issued for this query",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A filtered, ordered, paginated read.
 ///
 /// ```

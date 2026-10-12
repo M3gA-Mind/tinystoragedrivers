@@ -384,7 +384,176 @@ async fn queries(storage: &ScopedStorage) {
         "pages cover the result once"
     );
 
+    keyset_continuations_survive_prefix_mutations(storage).await;
+    keyset_ties_follow_total_sort_order(storage).await;
+
     filters(storage, &coll).await;
+}
+
+async fn keyset_continuations_survive_prefix_mutations(storage: &ScopedStorage) {
+    let docs = storage.documents();
+    for mutation in ["insert", "delete"] {
+        let coll = unique("keyset_mutation");
+        for (id, rank) in [("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5)] {
+            ok(
+                docs.put(&coll, id, json!({"rank": rank}), Precondition::None)
+                    .await,
+                "seed keyset mutation document",
+            );
+        }
+
+        let query = Query::all().sort(Sort::asc("rank")).limit(2);
+        let first = ok(docs.query(&coll, &query).await, "first keyset page");
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        let cursor = first.next.expect("more documents follow the first page");
+
+        // Moving the prefix must not move the continuation point. Offset
+        // cursors skip `b` after insertion and skip `c` after deletion.
+        if mutation == "insert" {
+            ok(
+                docs.put(&coll, "before", json!({"rank": 0}), Precondition::None)
+                    .await,
+                "insert before cursor",
+            );
+        } else {
+            assert!(ok(
+                docs.delete(&coll, "a", Precondition::None).await,
+                "delete before cursor",
+            ));
+        }
+
+        let second = ok(
+            docs.query(&coll, &query.clone().after(cursor)).await,
+            "continue after prefix mutation",
+        );
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "d"],
+            "the continuation remains strictly after the last returned sort key"
+        );
+    }
+}
+
+async fn keyset_ties_follow_total_sort_order(storage: &ScopedStorage) {
+    let docs = storage.documents();
+    let coll = unique("keyset_ties");
+    for (id, body) in [
+        ("a", json!({"primary": 1, "secondary": null})),
+        ("b", json!({"primary": 1})),
+        ("c", json!({"primary": 1, "secondary": 2})),
+        ("d", json!({"primary": 2, "secondary": 1})),
+        ("e", json!({"primary": 2, "secondary": 3})),
+    ] {
+        ok(
+            docs.put(&coll, id, body, Precondition::None).await,
+            "seed keyset tie document",
+        );
+    }
+
+    // Exercise an implicit id tie-break, descending values, mixed directions,
+    // and missing/null values. A page boundary may split any tied group.
+    for (sorts, expected) in [
+        (vec![Sort::asc("primary")], ["a", "b", "c", "d", "e"]),
+        (vec![Sort::desc("primary")], ["d", "e", "a", "b", "c"]),
+        (
+            vec![Sort::asc("primary"), Sort::desc("secondary")],
+            ["c", "a", "b", "e", "d"],
+        ),
+        (
+            vec![Sort::desc("secondary"), Sort::asc("primary")],
+            ["e", "c", "d", "a", "b"],
+        ),
+        (vec![], ["a", "b", "c", "d", "e"]),
+    ] {
+        let mut query = Query::all().limit(2);
+        query.sort = sorts;
+        let mut ids = Vec::new();
+        loop {
+            let page = ok(docs.query(&coll, &query).await, "keyset tie page");
+            ids.extend(page.items.into_iter().map(|item| item.id));
+            match page.next {
+                Some(cursor) => query = query.after(cursor),
+                None => break,
+            }
+        }
+        assert_eq!(
+            ids, expected,
+            "keyset pages preserve the complete sort order"
+        );
+    }
+
+    let mixed = unique("keyset_mixed_values");
+    for (id, body) in [
+        ("a", json!({})),
+        ("b", json!({"value": null})),
+        ("c", json!({"value": false})),
+        ("d", json!({"value": true})),
+        ("e", json!({"value": 1})),
+        ("f", json!({"value": "x"})),
+        ("g", json!({"value": []})),
+        ("h", json!({"value": {}})),
+    ] {
+        ok(
+            docs.put(&mixed, id, body, Precondition::None).await,
+            "seed mixed keyset value",
+        );
+    }
+    for (sort, expected) in [
+        (Sort::asc("value"), ["a", "b", "c", "d", "e", "f", "g", "h"]),
+        (
+            Sort::desc("value"),
+            ["h", "g", "f", "e", "d", "c", "a", "b"],
+        ),
+    ] {
+        let mut query = Query::all().sort(sort).limit(3);
+        let mut ids = Vec::new();
+        loop {
+            let page = ok(docs.query(&mixed, &query).await, "mixed-value keyset page");
+            ids.extend(page.items.into_iter().map(|item| item.id));
+            match page.next {
+                Some(cursor) => query = query.after(cursor),
+                None => break,
+            }
+        }
+        assert_eq!(ids, expected, "nullable mixed JSON ordering is stable");
+    }
+
+    let literals = unique("keyset_literal_values");
+    for (id, value) in [
+        ("$$ID", "$$ROOT"),
+        ("$$key", "$$ROOT"),
+        ("$key", "$field"),
+        ("a", "$field"),
+        ("z", "x"),
+    ] {
+        ok(
+            docs.put(&literals, id, json!({"value": value}), Precondition::None)
+                .await,
+            "seed dollar-prefixed keyset value",
+        );
+    }
+    let mut query = Query::all().sort(Sort::asc("value")).limit(1);
+    let mut ids = Vec::new();
+    loop {
+        let page = ok(docs.query(&literals, &query).await, "literal keyset page");
+        ids.extend(page.items.into_iter().map(|item| item.id));
+        match page.next {
+            Some(cursor) => query = query.after(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(ids, ["$$ID", "$$key", "$key", "a", "z"]);
 }
 
 /// Filter shapes over the documents `queries` seeded.

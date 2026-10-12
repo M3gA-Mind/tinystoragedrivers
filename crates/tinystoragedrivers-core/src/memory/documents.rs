@@ -1,7 +1,6 @@
 //! [`DocumentStore`] for the in-memory driver.
 
-use std::collections::{BTreeSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,8 +11,8 @@ use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::capabilities::{Capabilities, Capability};
 use crate::document::{
-    CollectionSpec, Cursor, DocumentStore, Page, Precondition, Query, ReadCheck, SearchHit,
-    Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
+    CollectionSpec, Cursor, CursorPosition, DocumentStore, Page, Precondition, Query, ReadCheck,
+    SearchHit, Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
 };
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort, sort_documents};
@@ -110,29 +109,22 @@ impl MemoryDocuments {
 
 /// A fingerprint of everything that decides a query's result order, so a
 /// cursor only resumes the query that issued it.
-pub(super) fn fingerprint(collection: &str, query: &Query) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    collection.hash(&mut hasher);
-    serde_json::to_string(&query.filter)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    serde_json::to_string(&query.sort)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
+pub(super) fn fingerprint(collection: &str, scope: &Scope, query: &Query) -> u64 {
+    let shape = serde_json::to_vec(&(collection, scope.as_str(), &query.filter, &query.sort))
+        .unwrap_or_default();
+    shape.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
-/// Decode an offset cursor issued by [`MemoryDocuments::query`] for this query.
-fn parse_cursor(collection: &str, query: &Query) -> Result<usize> {
+/// Decode a keyset cursor issued by [`MemoryDocuments::query`] for this scope and query.
+fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option<CursorPosition>> {
     let Some(cursor) = &query.cursor else {
-        return Ok(0);
+        return Ok(None);
     };
-    let expected = format!("mem:{:016x}:", fingerprint(collection, query));
-    cursor
-        .0
-        .strip_prefix(&expected)
-        .and_then(|offset| offset.parse().ok())
-        .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))
+    let position = cursor.decode_keyset("mem", fingerprint(collection, scope, query))?;
+    position.validate(&query.sort)?;
+    Ok(Some(position))
 }
 
 #[async_trait]
@@ -229,17 +221,34 @@ impl DocumentStore for MemoryDocuments {
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
         validate_collection(collection)?;
         query.validate()?;
-        let start = parse_cursor(collection, query)?;
+        let position = parse_cursor(collection, &self.scope, query)?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
+        let start = position.as_ref().map_or(0, |cursor| {
+            found.partition_point(|item| {
+                CursorPosition::for_document(&item.id, &item.doc, &query.sort)
+                    .compare(cursor, &query.sort)
+                    != std::cmp::Ordering::Greater
+            })
+        });
         let end = query.limit.map_or(found.len(), |limit| {
             start.saturating_add(limit).min(found.len())
         });
         let items = found.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
-        let next = (end < found.len())
-            .then(|| Cursor(format!("mem:{:016x}:{end}", fingerprint(collection, query))));
+        let next = if end < found.len() {
+            let last = items
+                .last()
+                .ok_or_else(|| StorageError::backend("a continued page was empty"))?;
+            Some(Cursor::keyset(
+                "mem",
+                fingerprint(collection, &self.scope, query),
+                &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+            )?)
+        } else {
+            None
+        };
         Ok(Page { items, next })
     }
 

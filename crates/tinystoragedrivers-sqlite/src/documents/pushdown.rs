@@ -9,9 +9,9 @@
 
 use rusqlite::types::Value as SqlValue;
 use serde_json::Value;
-use tinystoragedrivers_core::{Filter, ID_FIELD};
+use tinystoragedrivers_core::{CursorPosition, Direction, Filter, ID_FIELD, Sort};
 
-use crate::sql::json_path;
+use crate::sql::{json_path, literal};
 
 /// SQL text and its bound parameters.
 #[derive(Debug, Default, PartialEq)]
@@ -86,6 +86,126 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
             })
         }
         _ => None,
+    }
+}
+
+/// A SQL superset predicate that seeks strictly after a keyset position.
+///
+/// Numeric comparisons may include a value that rounds to the same SQLite
+/// number as the cursor; the caller rechecks the exact JSON order in Rust.
+/// Arrays and objects are left to the Rust fallback because SQLite's JSON
+/// comparison does not implement the port's structural ordering.
+pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause> {
+    let mut alternatives = Vec::with_capacity(sorts.len() + 1);
+    for current in 0..sorts.len() {
+        let mut terms = Vec::with_capacity(current + 1);
+        let mut params = Vec::new();
+        for index in 0..current {
+            let key = sorts.get(index)?;
+            let value = position.values.get(index)?;
+            if matches!(value, Value::Array(_) | Value::Object(_)) {
+                return None;
+            }
+            let (rank_expression, expression) = expressions(&key.field)?;
+            terms.push(format!("({rank_expression} = ? AND {expression} IS ?)",));
+            params.push(SqlValue::Integer(rank(value)));
+            params.push(sql_value(value)?);
+        }
+        let key = sorts.get(current)?;
+        let value = position.values.get(current)?;
+        if matches!(value, Value::Array(_) | Value::Object(_)) {
+            return None;
+        }
+        let (rank_expression, value_expression) = expressions(&key.field)?;
+        let cursor_rank = rank(value);
+        let direction = match key.direction {
+            Direction::Asc => ">",
+            Direction::Desc => "<",
+        };
+        let advance = if cursor_rank == 0 {
+            format!("{rank_expression} {direction} ?")
+        } else {
+            let inclusive = match key.direction {
+                Direction::Asc => ">=",
+                Direction::Desc => "<=",
+            };
+            format!(
+                "({rank_expression} {direction} ? OR ({rank_expression} = ? AND {value_expression} {inclusive} ?))"
+            )
+        };
+        terms.push(advance);
+        params.push(SqlValue::Integer(cursor_rank));
+        if cursor_rank != 0 {
+            params.push(SqlValue::Integer(cursor_rank));
+            params.push(sql_value(value)?);
+        }
+        alternatives.push((format!("({})", terms.join(" AND ")), params));
+    }
+
+    let mut terms = Vec::with_capacity(sorts.len() + 1);
+    let mut params = Vec::new();
+    for (index, key) in sorts.iter().enumerate() {
+        let value = position.values.get(index)?;
+        if matches!(value, Value::Array(_) | Value::Object(_)) {
+            return None;
+        }
+        let (rank_expression, value_expression) = expressions(&key.field)?;
+        terms.push(format!(
+            "({rank_expression} = ? AND {value_expression} IS ?)",
+        ));
+        params.push(SqlValue::Integer(rank(value)));
+        params.push(sql_value(value)?);
+    }
+    terms.push("id > ?".to_owned());
+    params.push(SqlValue::Text(position.id.clone()));
+    alternatives.push((format!("({})", terms.join(" AND ")), params));
+
+    Some(Clause {
+        sql: alternatives
+            .iter()
+            .map(|(sql, _)| sql.as_str())
+            .collect::<Vec<_>>()
+            .join(" OR "),
+        params: alternatives
+            .into_iter()
+            .flat_map(|(_, params)| params)
+            .collect(),
+    })
+}
+
+fn expressions(field: &str) -> Option<(String, String)> {
+    if field == ID_FIELD {
+        return Some(("3".to_owned(), "id".to_owned()));
+    }
+    let path = literal(&json_path(field)?);
+    let kind = format!("json_type(doc, {path})");
+    let rank = format!(
+        "CASE WHEN {kind} IS NULL OR {kind} = 'null' THEN 0 WHEN {kind} IN ('false', 'true') THEN 1 WHEN {kind} IN ('integer', 'real') THEN 2 WHEN {kind} = 'text' THEN 3 WHEN {kind} = 'array' THEN 4 ELSE 5 END"
+    );
+    Some((rank, format!("json_extract(doc, {path})")))
+}
+
+fn rank(value: &Value) -> i64 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        Value::String(_) => 3,
+        Value::Array(_) => 4,
+        Value::Object(_) => 5,
+    }
+}
+
+fn sql_value(value: &Value) -> Option<SqlValue> {
+    match value {
+        Value::Null => Some(SqlValue::Null),
+        Value::Bool(value) => Some(SqlValue::Integer(i64::from(*value))),
+        Value::Number(number) => Some(match number.as_i64() {
+            Some(value) => SqlValue::Integer(value),
+            None => SqlValue::Real(number.as_f64()?),
+        }),
+        Value::String(value) => Some(SqlValue::Text(value.clone())),
+        Value::Array(_) | Value::Object(_) => None,
     }
 }
 
