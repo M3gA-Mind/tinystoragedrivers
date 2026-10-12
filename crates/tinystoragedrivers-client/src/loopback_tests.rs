@@ -171,12 +171,17 @@ mod watching {
     }
 
     #[derive(Debug)]
-    struct Feed(mpsc::UnboundedReceiver<Option<WatchNotice>>);
+    struct Feed(Option<mpsc::UnboundedReceiver<Option<WatchNotice>>>);
 
     #[async_trait]
     impl DocumentWatch for Feed {
         async fn next(&mut self) -> Result<Option<WatchNotice>> {
-            Ok(self.0.recv().await.flatten())
+            match self.0.as_mut() {
+                Some(feed) => Ok(feed.recv().await.flatten()),
+                None => Err(tinystoragedrivers_core::StorageError::backend(
+                    "feed failed",
+                )),
+            }
         }
     }
 
@@ -187,13 +192,16 @@ mod watching {
         }
         async fn watch(
             &self,
-            _collection: &str,
+            collection: &str,
             _filter: &Filter,
             _options: &WatchOptions,
         ) -> Result<Box<dyn DocumentWatch>> {
+            if collection == "failing" {
+                return Ok(Box::new(Feed(None)));
+            }
             let (tx, rx) = mpsc::unbounded_channel();
             self.source.0.lock().unwrap().push(tx);
-            Ok(Box::new(Feed(rx)))
+            Ok(Box::new(Feed(Some(rx))))
         }
         async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
             self.inner.ensure_collection(spec).await
@@ -470,4 +478,101 @@ async fn secret_handles_never_print_and_report_their_backend() {
     assert!(secrets.delete("").await.is_err());
     assert!(secrets.list("a\u{0}").await.is_err());
     assert!(secrets.set("", b"x").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_that_fails_ends_with_a_backend_reset_and_frees_its_slot() {
+    let (server, _source) = watching_server();
+    let mut signals = server.signals();
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "WatchOpen",
+            json!({"collection":"failing","filter":{"op":"all"},"after":null,"interval_ms":5}),
+        )
+        .await
+        .unwrap();
+    let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+        .await
+        .expect("signal arrives")
+        .unwrap();
+    assert!(matches!(
+        signal.notice,
+        tinystoragedrivers_bus::WatchNotice::ResetRequired {
+            reason: tinystoragedrivers_bus::WatchReset::Backend
+        }
+    ));
+    for _ in 0..100 {
+        if server.open_watches() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(server.open_watches(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exhausted_watch_and_an_explicit_close_both_release_the_slot() {
+    let (server, source) = watching_server();
+    let request = json!({"collection":"c","filter":{"op":"all"},"after":null,"interval_ms":5});
+    let opened = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "WatchOpen",
+            request.clone(),
+        )
+        .await
+        .unwrap();
+    let id = opened["watch_id"].as_str().unwrap().to_owned();
+    server
+        .handle(Admission::Private, "Documents", "WatchOpen", request)
+        .await
+        .unwrap();
+    assert_eq!(server.open_watches(), 2);
+
+    // The source ending (no more notices) drops the first watch.
+    let tx = source.0.lock().unwrap()[1].clone();
+    tx.send(None).unwrap();
+    for _ in 0..100 {
+        if server.open_watches() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(server.open_watches(), 1);
+
+    // Closing the other by id succeeds once, then it is gone.
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "WatchClose",
+            json!({"watch_id": id}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.open_watches(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_poisoned_watch_registry_is_a_backend_failure() {
+    let (server, _source) = watching_server();
+    let registry = server.watches.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = registry.lock().unwrap();
+        panic!("poison the registry");
+    })
+    .join();
+    let error = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "WatchOpen",
+            json!({"collection":"c","filter":{"op":"all"},"after":null,"interval_ms":5}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, tinystoragedrivers_bus::StorageKind::Backend);
 }
