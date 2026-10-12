@@ -104,7 +104,7 @@ async fn documents_cover_every_operation() {
         )
         .await
         .unwrap();
-    assert!(checked.is_empty());
+    assert_eq!(checked.len(), 0);
     let stale = docs
         .atomic_batch_checked(
             vec![ReadCheck {
@@ -284,7 +284,7 @@ async fn blobs_cover_every_operation() {
         .await
         .unwrap_err();
     assert_eq!(bad_ttl.kind(), ErrorKind::InvalidInput);
-    assert!(!format!("{bus:?}").is_empty());
+    assert_ne!(format!("{bus:?}"), "");
 }
 
 #[test]
