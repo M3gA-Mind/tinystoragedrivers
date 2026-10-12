@@ -102,7 +102,7 @@ impl tinystoragedrivers_core::BlobStore for NoTtl {
 #[tokio::test]
 async fn a_host_without_blob_expiry_is_refused_before_any_io() {
     use std::time::Duration;
-    use tinystoragedrivers_core::{BlobStore, ScopedStorage};
+    use tinystoragedrivers_core::ScopedStorage;
 
     let backend = MemoryStorage::new();
     let base = backend.for_scope(&Scope::local()).unwrap();

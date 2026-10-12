@@ -33,7 +33,7 @@ async fn bytes_round_trip_through_a_stream_in_order() {
         out
     });
     pumped.unwrap();
-    assert!(collected == body);
+    assert_eq!(collected, body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -128,5 +128,5 @@ async fn a_zero_length_stream_closes_without_chunks() {
     pump(writer, &mut source, 0).await.unwrap();
     let mut out = Vec::new();
     reader.read_to_end(&mut out).await.unwrap();
-    assert!(out.is_empty());
+    assert_eq!(out.len(), 0);
 }

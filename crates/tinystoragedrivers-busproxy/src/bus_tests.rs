@@ -142,7 +142,7 @@ async fn an_empty_blob_and_a_short_body_over_a_stream() {
     tokio::io::AsyncReadExt::read_to_end(&mut stream.reader, &mut read)
         .await
         .unwrap();
-    assert!(read.is_empty());
+    assert_eq!(read.len(), 0);
 
     // A body shorter than it declared is refused and publishes nothing.
     let error = blobs
@@ -438,7 +438,7 @@ async fn a_failing_blob_source_fails_the_upload_without_publishing() {
         .unwrap_err();
     // Which side notices first (the module's source fault or the host's
     // aborted read) decides the category, so only the outcome is pinned.
-    assert!(!error.to_string().is_empty());
+    assert_ne!(error.to_string(), "");
     assert!(storage.blobs().head("broken").await.unwrap().is_none());
 }
 
