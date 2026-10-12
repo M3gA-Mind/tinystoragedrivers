@@ -95,7 +95,8 @@ The same verified binary was restarted in a persistent tool session; the entire
 fresh suite then passed. No product code, test, timeout or assertion changed.
 
 Independent review of 7602308 found no blocking authority, CAS or source issue.
-TinyBus is pinned to canonical 1f255765 (0.1.4); PR59 is not a dependency and
+At that historical checkpoint, TinyBus was pinned to canonical 1f255765
+(0.1.4); PR59 was not a dependency and
 its pending lifecycle correction is not claimed by this CRUD transport.
 
 ## Hosted source policy
@@ -118,3 +119,18 @@ Original logs live under target/gates; this durable record survives build-output
 cleanup. The proof establishes this document callback boundary. It does not
 establish module business persistence, legacy import authority, read-fencing
 beyond the supplied native port's contract, or PR59 lifecycle drain behavior.
+
+## Canonical runtime dependency follow-up
+
+The dependency-only follow-up from canonical TSD `d2f85b2` aligns the
+production adapter and the excluded native proof with merged TinyBus
+`40814a8279ff71b8fb411f9f29362c8ec0be51e2` (PR60). This includes the host
+callback lifecycle accounting from PR59 and the SDK diagnostic ownership fix.
+It changes neither the document callback contract nor storage implementation.
+The root graph has one TinyBus identity; the native proof has one TinyBus and
+one matching SDK identity, without replacement directives or local runtime
+patches. This is canonical source availability, not a new release claim.
+
+The real native callback suite passed all four cases on the merged runtime.
+The historical evidence above remains evidence for its original checkpoint;
+it does not prove the later runtime's additional lifecycle behavior.

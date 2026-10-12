@@ -441,7 +441,7 @@ async fn scope_purge_erases_all_ports_and_revokes_old_writers() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         target
@@ -450,7 +450,7 @@ async fn scope_purge_erases_all_ports_and_revokes_old_writers() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         target
@@ -459,7 +459,7 @@ async fn scope_purge_erases_all_ports_and_revokes_old_writers() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(target.purge(&request).await.unwrap(), receipt);
     let resumed = backend
@@ -547,7 +547,7 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         old.streams()
@@ -555,11 +555,11 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         old.blobs().get("blob").await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
 }
 

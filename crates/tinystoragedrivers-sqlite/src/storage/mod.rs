@@ -351,3 +351,7 @@ mod tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "generation_tests.rs"]
+mod generation_tests;

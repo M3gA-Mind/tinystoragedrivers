@@ -131,7 +131,7 @@ use serde_json::json;
 use tinystoragedrivers_core::{Filter, Precondition, Scope};
 
 /// A backend on `TSD_MONGO_URL`, or `None` (with a note) without one.
-async fn live(test: &str) -> Option<MongoStorage> {
+pub(super) async fn live(test: &str) -> Option<MongoStorage> {
     let Some(url) = std::env::var("TSD_MONGO_URL")
         .ok()
         .filter(|url| !url.is_empty())
@@ -487,7 +487,7 @@ async fn assert_purge_retired(target: &ScopedStorage) {
             .await
             .unwrap_err(),
     ] {
-        assert_eq!(error.kind(), ErrorKind::Fenced);
+        assert_eq!(error.kind(), ErrorKind::ScopeGenerationRejected);
     }
 }
 

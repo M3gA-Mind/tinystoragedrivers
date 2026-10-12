@@ -84,6 +84,6 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
     assert_eq!(found.doc, serde_json::json!({"source":"old"}));
     assert_eq!(
         docs.get("records", "one").await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
 }

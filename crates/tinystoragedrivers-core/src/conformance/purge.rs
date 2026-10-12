@@ -273,74 +273,74 @@ async fn stale(ports: &ScopedStorage) {
     fails(
         docs.put("records", "late", json!({}), Precondition::None)
             .await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late document writer",
     );
     fails(
         docs.delete("records", "missing", Precondition::None).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late delete",
     );
     fails(
         docs.delete_where("records", &crate::Filter::All).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late delete filter",
     );
     fails(
         docs.claim("records", &crate::Filter::All, &[], &json!({}))
             .await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late claim",
     );
     fails(
         docs.atomic_batch(vec![]).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late empty batch",
     );
     fails(
         docs.atomic_batch_checked(vec![], vec![]).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late checked batch",
     );
     fails(
         docs.drop_collection("records").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late collection drop",
     );
     fails(
         docs.ensure_collection(&CollectionSpec::new("late_declaration"))
             .await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late declaration",
     );
     fails(
         ports.streams().append("events", json!({})).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late stream writer",
     );
     fails(
         ports.streams().append_batch("events", vec![]).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late empty append",
     );
     fails(
         ports.streams().truncate_before("events", 0).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late truncate",
     );
     fails(
         ports.streams().delete_stream("events").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late stream delete",
     );
     fails(
         ports.blobs().put("late", vec![], None).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late blob writer",
     );
     fails(
         ports.blobs().delete("missing").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "late blob delete",
     );
 }
@@ -349,62 +349,62 @@ async fn stale_reads(ports: &ScopedStorage) {
     let docs = ports.documents();
     fails(
         docs.get("records", "one").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired document read",
     );
     fails(
         docs.query("records", &crate::Query::default()).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired document query",
     );
     fails(
         docs.count("records", &crate::Filter::All).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired document count",
     );
     fails(
         docs.search("records", "one", 0).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired empty search",
     );
     fails(
         docs.collections("").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired collection enumeration",
     );
     fails(
         ports.streams().len("events").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired stream length",
     );
     fails(
         ports.streams().read_window("events", 0, 0).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired empty stream window",
     );
     fails(
         ports.streams().streams("").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired stream enumeration",
     );
     fails(
         ports.blobs().get("blob").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired blob read",
     );
     fails(
         ports.blobs().get_range("blob", 0..0).await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired blob range",
     );
     fails(
         ports.blobs().head("blob").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired blob metadata",
     );
     fails(
         ports.blobs().list("").await,
-        ErrorKind::Fenced,
+        ErrorKind::ScopeGenerationRejected,
         "retired blob enumeration",
     );
 }

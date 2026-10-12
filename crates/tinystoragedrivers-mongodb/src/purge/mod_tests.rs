@@ -50,7 +50,7 @@ fn admission_and_receipts_fail_closed_on_malformed_authority() {
 
     assert_eq!(
         verify(None, ScopeGeneration(1)).unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         verify(
@@ -70,7 +70,7 @@ fn admission_and_receipts_fail_closed_on_malformed_authority() {
         )
         .unwrap_err()
         .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     for record in [
         doc! {},
@@ -255,7 +255,7 @@ async fn pending_reset_blocks_all_generations_and_forced_off_independent_handles
                 bound.blobs().get("blob").await.unwrap_err(),
                 bound.blobs().put("blob", vec![1], None).await.unwrap_err(),
             ] {
-                assert_eq!(error.kind(), ErrorKind::Fenced);
+                assert_eq!(error.kind(), ErrorKind::ScopeGenerationRejected);
             }
         }
     }
@@ -265,7 +265,7 @@ async fn pending_reset_blocks_all_generations_and_forced_off_independent_handles
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     let other = PurgeRequest {
         operation_id: "another".into(),
@@ -285,7 +285,7 @@ async fn pending_reset_blocks_all_generations_and_forced_off_independent_handles
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
 }
 
@@ -512,7 +512,7 @@ async fn chunk_stage_failure_keeps_manifest_and_blocks_admission_until_resume() 
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     let independent = live("partial_resume").await.unwrap().0;
     let resumed = port(&independent, &scope).purge(&request).await.unwrap();
@@ -570,7 +570,7 @@ async fn stale_snapshot_writer_cannot_commit_after_reset_admission_closes() {
             .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     port(&backend, &scope).purge(&request).await.unwrap();
     assert!(
@@ -938,7 +938,10 @@ async fn reset_between_read_admission_and_payload_rejects_replacement_data() {
         })
     }
     .await;
-    assert_eq!(outcome.unwrap_err().kind(), ErrorKind::Fenced);
+    assert_eq!(
+        outcome.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
 }
 
 #[tokio::test]
@@ -1034,6 +1037,30 @@ async fn issued_generation_keeps_current_default_and_named_native_guards() {
                 .unwrap_err()
                 .kind(),
             ErrorKind::Fenced
+        );
+    }
+}
+
+#[test]
+fn generation_and_pending_reset_refusals_do_not_claim_native_lease_loss() {
+    let retired = doc! {
+        "generation": 1_i64, "pending": false, "operation": "reset", "stage": "complete"
+    };
+    let pending = doc! {
+        "generation": 1_i64, "pending": true, "operation": "reset", "stage": "records"
+    };
+    assert!(verify(Some(&retired), ScopeGeneration(1)).is_ok());
+    for (record, expected) in [
+        (Some(&retired), ScopeGeneration(0)),
+        (Some(&pending), ScopeGeneration(1)),
+        (None, ScopeGeneration(1)),
+    ] {
+        let refusal = verify(record, expected).unwrap_err();
+        assert_eq!(refusal.kind(), ErrorKind::ScopeGenerationRejected);
+        assert_ne!(
+            refusal.kind(),
+            ErrorKind::Fenced,
+            "generation/reset admission cannot revoke an unrelated native lease"
         );
     }
 }

@@ -94,7 +94,7 @@ pub(crate) fn check(
         ScopeGeneration::default()
     };
     if current != expected {
-        return Err(StorageError::fenced(
+        return Err(StorageError::scope_generation_rejected(
             "scope writer generation has been revoked",
         ));
     }

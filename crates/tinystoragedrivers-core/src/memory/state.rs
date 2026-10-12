@@ -73,7 +73,7 @@ impl DbState {
                 *generation
             });
         if current != expected {
-            return Err(StorageError::fenced(
+            return Err(StorageError::scope_generation_rejected(
                 "scope writer generation has been revoked",
             ));
         }
