@@ -3,6 +3,10 @@
 
 use tinystoragedrivers_core::{Result, StorageError};
 
+/// The native guarded file transaction deliberately bypasses this bridge:
+/// dropping this future does not cancel an already running blocking closure.
+/// Its native owner must execute synchronously with its physical job permit.
+///
 /// Run `work` on the current tokio runtime's blocking pool, or inline when the
 /// caller is not inside a tokio runtime.
 pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T>

@@ -136,3 +136,26 @@ check. Cancellation can leave blocking reads finishing, with no mutation.
 Reading grants no durable publication, migration or deletion acknowledgment.
 Native Windows source tests require their own Windows execution; Linux
 results do not establish that platform's admission.
+
+## Native bounded single-secret transactions
+
+FileTransactionResource captures a verified directory, sidecar and existing
+data identity without a key. Its synchronous execute method borrows one
+Zeroizing key for one typed Get, Set or Delete. It starts no hidden worker.
+The native owner retains its own finite physical job permit through return and
+supplies a private FileTransactionGuard bound to live authority and consent.
+
+Every phase invokes that owner hook. A scoped publication lease spans the actual
+atomic rename, flush and exact same-lock readback. Revocation/generation changes
+must serialize with that lease. A final output lease covers acknowledgment.
+Cancellation/deadlines stop later phases; they cannot interrupt OS calls that
+already started. A mutation followed by failed readback/output fences that
+resource. The owner must also fence uncertain jobs across reinitialization.
+
+Budgets bound ciphertext, decoded and serialized JSON, entries, UTF-8 names and
+values, returned bytes and conservative simultaneous allocation reservations.
+The string-map decoder wipes decoded keys, values and scratch on all paths.
+No map, raw key, generic closure, listing, import or recovery API is exposed.
+External object replacement invalidates the pinned resource. Ordinary async
+SecretStore behavior is unchanged. See the
+[transaction specification](../../../../docs/specs/bounded-secret-transaction.md).

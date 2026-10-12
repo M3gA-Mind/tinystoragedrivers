@@ -15,10 +15,10 @@ use crate::crypto::tests::{OPENHUMAN_SECRETS_ENC_HEX, fixture_key};
 use crate::testkit::secrets_conformance;
 
 /// A fresh directory under the target dir's temp area, removed on drop.
-struct TempDir(PathBuf);
+pub(super) struct TempDir(pub(super) PathBuf);
 
 impl TempDir {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let seq = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
@@ -45,7 +45,10 @@ impl Drop for TempDir {
 
 // Compatibility fixtures themselves must meet admission; the bytes and format
 // assertions are unchanged. Unsafe-permission fixtures use direct native APIs.
-fn fixture_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+pub(super) fn fixture_write(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;

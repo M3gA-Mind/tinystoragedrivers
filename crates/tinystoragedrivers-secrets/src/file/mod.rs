@@ -53,6 +53,12 @@ pub use migration::{
     CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
 };
 
+mod transaction;
+pub use transaction::{
+    FileTransactionBudget, FileTransactionGuard, FileTransactionLease, FileTransactionOperation,
+    FileTransactionPhase, FileTransactionResource, FileTransactionResult,
+};
+
 mod secure;
 #[cfg(unix)]
 mod unix;
