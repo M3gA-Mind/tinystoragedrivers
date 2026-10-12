@@ -95,6 +95,9 @@ impl StorageBackend for CompositeStorage {
     fn driver(&self) -> &'static str {
         "composite"
     }
+    fn document_driver(&self) -> &'static str {
+        self.records.document_driver()
+    }
     fn capabilities(&self) -> Capabilities {
         let mut caps = self
             .records

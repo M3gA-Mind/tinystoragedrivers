@@ -82,6 +82,9 @@ impl StorageBackend for MaskedRecords {
     fn driver(&self) -> &'static str {
         "masked-memory"
     }
+    fn document_driver(&self) -> &'static str {
+        self.0.document_driver()
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities::none()
     }
@@ -174,4 +177,43 @@ async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn composite_document_driver_preserves_record_identity_instead_of_blob_or_wrapper_name() {
+    let records = Arc::new(MaskedRecords(MemoryStorage::new()));
+    let blobs = Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new())));
+    let backend = CompositeStorage::new(records, blobs);
+    assert_eq!(
+        backend.driver(),
+        "composite",
+        "diagnostic wrapper label remains compatible"
+    );
+    assert_eq!(
+        backend.document_driver(),
+        "memory",
+        "record coordination must not use composite or blob identity"
+    );
+}
+
+#[test]
+fn native_default_and_erased_nested_composite_database_keep_document_driver() {
+    let native: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    assert_eq!(native.document_driver(), "memory");
+    let inner: Arc<dyn StorageBackend> = Arc::new(CompositeStorage::new(
+        native,
+        Arc::new(BackendBlobs::new(Arc::new(MaskedRecords(
+            MemoryStorage::new(),
+        )))),
+    ));
+    let outer: Arc<dyn StorageBackend> = Arc::new(CompositeStorage::new(
+        inner,
+        Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+    ));
+    assert_eq!(outer.driver(), "composite");
+    assert_eq!(outer.document_driver(), "memory");
+    let named = outer.database("records").unwrap();
+    assert_eq!(named.driver(), "composite");
+    assert_eq!(named.document_driver(), "memory");
+    assert_eq!(outer.document_driver(), "memory");
 }
