@@ -25,7 +25,9 @@ use futures_util::TryStreamExt;
 use mongodb::IndexModel;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::IndexOptions;
-use tinystoragedrivers_core::{CollectionSpec, Result, Scope, SearchSpec, StorageError};
+use tinystoragedrivers_core::{
+    Capability, CollectionSpec, Result, Scope, SearchSpec, StorageError,
+};
 
 use super::Shared;
 use crate::documents::stored::{Stored, bury, expired_filter, not_deleted, visible};
@@ -228,12 +230,79 @@ impl Shared {
         Ok(())
     }
 
+    pub(crate) async fn collection_exists(&self, name: &str) -> Result<bool> {
+        let names = self
+            .db
+            .list_collection_names()
+            .filter(doc! {"name": format!("{}{name}", self.prefix)})
+            .await
+            .map_err(errors::failed("inspect existing collection"))?;
+        Ok(!names.is_empty())
+    }
+
+    pub(crate) async fn require_collection(&self, name: &str) -> Result<()> {
+        if !self.collection_exists(name).await? {
+            return Err(StorageError::not_found("native collection does not exist"));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn persisted_spec(&self, collection: &str) -> Result<CollectionSpec> {
+        let row = self
+            .raw(META)
+            .find_one(doc! {"_id": collection})
+            .await
+            .map_err(errors::failed("validate collection declaration"))?
+            .ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
+        let spec = decode_meta(&row)?.0;
+        if spec.name != collection {
+            return Err(StorageError::invalid_input(
+                "stored declaration names a different collection",
+            ));
+        }
+        spec.validate()?;
+        Ok(spec)
+    }
+
+    pub(crate) async fn validate_indexes(&self, name: &str, required: &[IndexModel]) -> Result<()> {
+        self.require_collection(name).await?;
+        let stored: Vec<IndexModel> = self
+            .raw(name)
+            .list_indexes()
+            .await
+            .map_err(errors::failed("inspect existing indexes"))?
+            .try_collect()
+            .await
+            .map_err(errors::failed("read existing indexes"))?;
+        for expected in required {
+            if !stored
+                .iter()
+                .any(|actual| compatible_index(actual, expected))
+            {
+                return Err(StorageError::invalid_input(
+                    "native collection lacks a compatible index",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The declaration of `collection`, or an empty one.
     ///
     /// # Errors
     ///
     /// A backend error, or a malformed stored declaration.
     pub(crate) async fn spec(&self, collection: &str) -> Result<CollectionSpec> {
+        if self.existing {
+            let spec = self.persisted_spec(collection).await?;
+            let mut models = vec![scope_key_model()];
+            models.extend(index_models(&spec)?);
+            if let Some(model) = spec.search.as_ref().map(text_model).transpose()?.flatten() {
+                models.push(model);
+            }
+            self.validate_indexes(collection, &models).await?;
+            return Ok(spec);
+        }
         if let Some(spec) = self.specs.cached(collection) {
             return Ok(spec);
         }
@@ -277,6 +346,9 @@ impl Shared {
     ///
     /// A backend error.
     pub(crate) async fn prepare(&self, name: &str, models: Vec<IndexModel>) -> Result<()> {
+        if self.existing {
+            return self.validate_indexes(name, &models).await;
+        }
         let key = format!("{}{name}", self.prefix);
         if self.specs.is_prepared(&key) {
             return Ok(());
@@ -303,6 +375,12 @@ impl Shared {
         scope: &Scope,
         generation: tinystoragedrivers_core::ScopeGeneration,
     ) -> Result<()> {
+        if self.existing {
+            return Err(StorageError::unsupported(
+                Capability::ExistingSchema,
+                "existing-schema handles cannot declare collections",
+            ));
+        }
         crate::purge::check(self, scope, generation, None).await?;
         spec.validate()?;
         let meta = self.raw(META);
@@ -453,6 +531,41 @@ impl Shared {
     }
 }
 
+/// Mongo rewrites text keys into _fts/_ftsx and exposes fields as weights.
+fn compatible_index(actual: &IndexModel, expected: &IndexModel) -> bool {
+    let actual_options = actual.options.clone().unwrap_or_default();
+    let expected_options = expected.options.clone().unwrap_or_default();
+    if expected_options.name.is_some() && actual_options.name != expected_options.name {
+        return false;
+    }
+    if actual_options.unique.unwrap_or(false) != expected_options.unique.unwrap_or(false)
+        || actual_options.partial_filter_expression != expected_options.partial_filter_expression
+        || actual_options.sparse.unwrap_or(false) != expected_options.sparse.unwrap_or(false)
+        || actual_options.expire_after != expected_options.expire_after
+        || actual_options.collation.is_some()
+    {
+        return false;
+    }
+    if expected_options.default_language.is_some() {
+        let fields: Vec<_> = expected
+            .keys
+            .iter()
+            .filter(|(_, value)| **value == Bson::String("text".into()))
+            .map(|(key, _)| key)
+            .collect();
+        let Some(weights) = actual_options.weights.as_ref() else {
+            return false;
+        };
+        return actual_options.default_language == expected_options.default_language
+            && actual_options.language_override == expected_options.language_override
+            && weights.len() == fields.len()
+            && fields
+                .iter()
+                .all(|field| weights.get_i32(field.as_str()) == Ok(1))
+            && actual.keys.get(SCOPE) == expected.keys.get(SCOPE);
+    }
+    actual.keys.iter().eq(expected.keys.iter())
+}
 #[cfg(test)]
 #[path = "specs_tests.rs"]
 mod tests;

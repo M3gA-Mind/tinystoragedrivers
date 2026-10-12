@@ -32,8 +32,8 @@ fn scoped_storage_exposes_its_parts() {
     );
 }
 
-#[test]
-fn unknown_adapters_refuse_explicit_guard_addresses() {
+#[tokio::test]
+async fn unknown_adapters_refuse_explicit_guard_addresses() {
     #[derive(Debug)]
     struct Adapter;
     impl StorageBackend for Adapter {
@@ -50,6 +50,14 @@ fn unknown_adapters_refuse_explicit_guard_addresses() {
             Ok(Arc::new(Adapter))
         }
     }
+    assert_eq!(
+        Adapter.prepare_schema().await.unwrap_err().kind(),
+        crate::ErrorKind::Unsupported(Capability::ExistingSchema)
+    );
+    assert!(matches!(
+        Adapter.existing_schema().unwrap_err().kind(),
+        crate::ErrorKind::Unsupported(Capability::ExistingSchema)
+    ));
     let fence = Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
     for locator in [
         crate::GuardDatabase::Default,

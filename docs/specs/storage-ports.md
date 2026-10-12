@@ -302,3 +302,14 @@ bytes/values cannot be revoked, so hosts must gate and drain readers too before
 publishing a full reset. Each document/stream mutation serializes on its scope
 metadata row; unrelated scopes use separate rows. Scoped expiry reclamation
 after a reset uses sweep_expired_generation with the issued generation.
+
+### Record driver identity in composites
+
+`StorageBackend::driver` remains its diagnostic label (`composite` for a
+composition). `document_driver` identifies the originating native document and
+stream driver, defaulting to `driver` for ordinary backends. Compositions and
+transparent backend wrappers forward it recursively, including named database
+views. It performs no opening or I/O. Hosts must use the record identity when
+applying their own coordination/recovery rules rather than classifying a wrapper
+or independent blob driver. The identity grants no capability or actor authority;
+native capabilities and admission still govern operations.

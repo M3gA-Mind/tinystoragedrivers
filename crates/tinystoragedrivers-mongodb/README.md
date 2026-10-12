@@ -156,3 +156,5 @@ The test account must be allowed to create collections and indexes, and read,
 write and delete documents in the configured database. On an authenticated
 disposable server, `readWrite` on that database is sufficient. The URL's
 `authSource` continues to select the authentication database independently.
+
+Existing-schema handles also refuse scope purge before any mutation: native reset may initialize its private receipt and manifest collections. Use trusted bootstrap authority for reset, with actual writer quiescence. Schema validation reads remain bound to the captured scope generation and refuse after that generation retires.

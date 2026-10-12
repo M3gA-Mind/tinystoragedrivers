@@ -25,7 +25,8 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Result, Scope, StorageError, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Capability, Result, Scope, StorageError, clamp_range,
+    validate_blob_key,
 };
 
 use crate::backend::Shared;
@@ -68,6 +69,32 @@ pub(crate) fn chunk_span(range: &Range<usize>, chunk_size: usize) -> (usize, usi
     (first, last, range.start - first * size)
 }
 
+/// The standard filename/upload-date index required by the GridFS driver.
+pub(crate) fn standard_file_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {"filename": 1, "uploadDate": 1})
+        .build()
+}
+
+pub(crate) fn file_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1})
+        .options(
+            IndexOptions::builder()
+                .name(BLOB_KEY_INDEX.to_owned())
+                .build(),
+        )
+        .build()
+}
+
+/// GridFS requires one chunk per file ordinal, enforced by a unique index.
+pub(crate) fn chunk_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {"files_id": 1, "n": 1})
+        .options(IndexOptions::builder().unique(true).build())
+        .build()
+}
+
 /// MongoDB blobs bound to one scope.
 #[derive(Debug)]
 pub(crate) struct MongoBlobs {
@@ -105,17 +132,19 @@ impl MongoBlobs {
     }
 
     async fn bucket(&self) -> Result<GridFsBucket> {
+        if self.shared.existing {
+            self.shared
+                .prepare(&format!("{BLOBS}.chunks"), vec![chunk_index()])
+                .await?;
+        }
         let name = format!("{}{BLOBS}", self.shared.prefix);
-        let model = IndexModel::builder()
-            .keys(doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1})
-            .options(
-                IndexOptions::builder()
-                    .name(BLOB_KEY_INDEX.to_owned())
-                    .build(),
-            )
-            .build();
+        let models = if self.shared.existing {
+            vec![file_index(), standard_file_index()]
+        } else {
+            vec![file_index()]
+        };
         self.shared
-            .prepare(&format!("{BLOBS}.files"), vec![model])
+            .prepare(&format!("{BLOBS}.files"), models)
             .await?;
         Ok(self
             .shared
@@ -236,6 +265,12 @@ impl BlobStore for MongoBlobs {
         crate::purge::admitted!(self, {
             validate_blob_key(key)?;
             self.writable("a blob put")?;
+            if self.shared.existing {
+                return Err(StorageError::unsupported(
+                    Capability::ExistingSchema,
+                    "GridFS upload may initialize schema",
+                ));
+            }
             let bucket = self.bucket().await?;
             let mut upload = bucket
                 .open_upload_stream(key)

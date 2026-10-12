@@ -118,6 +118,9 @@ impl MongoDocuments {
             .map(|cursor| decode(cursor, binding))
             .transpose()?;
         admitted(self).await?;
+        if self.shared.existing {
+            self.shared.spec(collection).await?;
+        }
         let mut native_options = ChangeStreamOptions::default();
         native_options.resume_after = resume_after;
         native_options.max_await_time = Some(options.interval);

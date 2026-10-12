@@ -44,6 +44,7 @@ fn handles_render_their_scope_and_file() {
         Scope::local(),
         Arc::new(|| 0),
         None,
+        false,
     );
     let shown = format!("{docs:?}");
     assert!(shown.contains("local") && shown.contains("d.db"), "{shown}");
@@ -57,7 +58,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
     let tables = Arc::new(Tables::new(""));
     db.run_now(|conn| tables.ensure(conn)).unwrap();
     let scope = Scope::new("snapshot_reader").unwrap();
-    let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None);
+    let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None, false);
     docs.put(
         "records",
         "one",

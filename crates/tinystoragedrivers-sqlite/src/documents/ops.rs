@@ -48,6 +48,29 @@ pub(crate) fn load_spec(
     }
 }
 
+/// Validate actual metadata presence without declaring schema.
+pub(crate) fn validate_spec(
+    conn: &Connection,
+    tables: &Tables,
+    required: &CollectionSpec,
+) -> Result<()> {
+    let sql = format!("SELECT spec FROM {} WHERE coll = ?1", ident(&tables.specs));
+    let stored: Option<String> = conn
+        .query_row(&sql, [&required.name], |row| row.get(0))
+        .optional()
+        .map_err(during("validate collection"))?;
+    let stored =
+        stored.ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
+    let stored: CollectionSpec = serde_json::from_str(&stored)?;
+    stored.validate()?;
+    if stored.merge(required)? != stored {
+        return Err(StorageError::invalid_input(
+            "stored declaration lacks required features",
+        ));
+    }
+    Ok(())
+}
+
 /// Merge `spec` into the stored declaration, create its indexes, and
 /// rebuild the search index if the searchable fields changed.
 pub(crate) fn declare(
