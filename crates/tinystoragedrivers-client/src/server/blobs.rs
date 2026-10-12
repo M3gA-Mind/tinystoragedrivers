@@ -57,7 +57,15 @@ impl StorageServer {
                 if r.bytes.len() > MAX_INLINE_BLOB_BYTES {
                     return Err(invalid());
                 }
-                let meta = native(blobs.put(&r.key, r.bytes, r.content_type.as_deref()).await)?;
+                let content_type = r.content_type.as_deref();
+                let meta = match r.ttl_ms {
+                    None => native(blobs.put(&r.key, r.bytes, content_type).await)?,
+                    Some(ttl_ms) => native(
+                        blobs
+                            .put_expiring(&r.key, r.bytes, content_type, Duration::from_millis(ttl_ms))
+                            .await,
+                    )?,
+                };
                 encode(&info(meta))
             }
             "Get" => {
@@ -116,6 +124,7 @@ impl StorageServer {
                 }
                 encode(&wire::BlobCapabilities {
                     presigned_urls: blobs.capabilities().contains(Capability::PresignedUrls),
+                    ttl: blobs.capabilities().contains(Capability::BlobTtl),
                     max_key_len: blobs.max_key_len(),
                 })
             }
@@ -133,12 +142,26 @@ impl StorageServer {
             inner: body,
             remaining: head.len,
         });
-        let meta = native(
-            self.storage
-                .blobs()
-                .put_stream(&head.key, reader, head.len, head.content_type.as_deref())
-                .await,
-        )?;
+        let blobs = self.storage.blobs();
+        let content_type = head.content_type.as_deref();
+        let meta = match head.ttl_ms {
+            None => native(
+                blobs
+                    .put_stream(&head.key, reader, head.len, content_type)
+                    .await,
+            )?,
+            Some(ttl_ms) => native(
+                blobs
+                    .put_stream_expiring(
+                        &head.key,
+                        reader,
+                        head.len,
+                        content_type,
+                        Duration::from_millis(ttl_ms),
+                    )
+                    .await,
+            )?,
+        };
         Ok(info(meta))
     }
 

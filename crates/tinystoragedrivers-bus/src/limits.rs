@@ -6,7 +6,7 @@
 ///
 /// Changing any existing wire shape or selector requires a new interface
 /// version; adding a selector or message bumps this constant.
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded-size cap for one inline page, batch or record set (half the frame,
