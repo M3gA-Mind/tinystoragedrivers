@@ -76,8 +76,8 @@ pub use backend::{
     StorageBackend, validate_database,
 };
 pub use blob::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, clamp_range,
-    validate_blob_key,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
+    clamp_range, validate_blob_key,
 };
 #[cfg(any(test, feature = "blocking"))]
 pub use blocking::Blocking;

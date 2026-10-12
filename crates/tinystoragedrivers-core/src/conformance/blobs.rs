@@ -2,6 +2,7 @@
 
 use super::{fails, ok, unique};
 use crate::backend::ScopedStorage;
+use crate::blob::{TreeEntry, TreeFile};
 use crate::error::ErrorKind;
 
 pub(super) async fn run(storage: &ScopedStorage) {
@@ -67,6 +68,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     assert!(!ok(blobs.delete(&key).await, "delete missing"));
 
     key_limits(storage).await;
+    tree(storage).await;
 
     for bad in ["", "/abs", "a//b", "a/../b", "a/./b"] {
         fails(
@@ -125,4 +127,89 @@ async fn key_limits(storage: &ScopedStorage) {
         );
         ok(blobs.delete(&key).await, "delete boundary");
     }
+}
+
+/// The directory view: listing one level, writing and removing a bundle, and
+/// the `a` versus `ab` prefix boundary.
+async fn tree(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    let root = unique("tree");
+    let sibling = format!("{root}b");
+    let files = vec![
+        TreeFile::new("SKILL.md", "# skill"),
+        TreeFile::new("scripts/run.sh", "echo hi"),
+        TreeFile::new("scripts/lib/util.sh", "util"),
+        TreeFile {
+            path: "refs/notes.md".to_owned(),
+            bytes: b"notes".to_vec(),
+            content_type: Some("text/markdown".to_owned()),
+        },
+    ];
+    let written = ok(blobs.put_tree(&root, files).await, "put_tree");
+    assert_eq!(written.len(), 4);
+    assert_eq!(written[0].key, format!("{root}/SKILL.md"));
+    ok(
+        blobs
+            .put(&format!("{sibling}/other.txt"), vec![1], None)
+            .await,
+        "sibling prefix",
+    );
+
+    let top = ok(blobs.list_dir(&root).await, "list_dir");
+    let shape: Vec<_> = top
+        .iter()
+        .map(|entry| (entry.name(), matches!(entry, TreeEntry::Dir { .. })))
+        .collect();
+    assert_eq!(
+        shape,
+        [("SKILL.md", false), ("refs", true), ("scripts", true)],
+        "one level, sorted, sub-directories folded"
+    );
+    assert!(matches!(
+        &top[2],
+        TreeEntry::Dir { prefix, .. } if *prefix == format!("{root}/scripts")
+    ));
+    let scripts = ok(blobs.list_dir(&format!("{root}/scripts")).await, "nested");
+    let names: Vec<_> = scripts.iter().map(TreeEntry::name).collect();
+    assert_eq!(names, ["lib", "run.sh"]);
+    if let TreeEntry::Blob { meta, .. } =
+        &ok(blobs.list_dir(&format!("{root}/refs")).await, "refs")[0]
+    {
+        assert_eq!(meta.content_type.as_deref(), Some("text/markdown"));
+    } else {
+        panic!("refs/notes.md should list as a blob");
+    }
+
+    fails(
+        blobs
+            .put_tree(
+                &root,
+                vec![TreeFile::new("ok.md", ""), TreeFile::new("../escape", "")],
+            )
+            .await,
+        ErrorKind::InvalidInput,
+        "a bad path fails the whole tree",
+    );
+    assert!(
+        ok(
+            blobs.head(&format!("{root}/ok.md")).await,
+            "validated first"
+        )
+        .is_none(),
+        "nothing is written when a path is invalid"
+    );
+    fails(
+        blobs.delete_tree("").await,
+        ErrorKind::InvalidInput,
+        "delete_tree refuses the root",
+    );
+
+    assert_eq!(ok(blobs.delete_tree(&root).await, "delete_tree"), 4);
+    assert_eq!(ok(blobs.list_dir(&root).await, "emptied").len(), 0);
+    assert_eq!(
+        ok(blobs.list_dir(&sibling).await, "sibling survives").len(),
+        1,
+        "deleting `a` leaves `ab` alone"
+    );
+    assert_eq!(ok(blobs.delete_tree(&sibling).await, "cleanup"), 1);
 }

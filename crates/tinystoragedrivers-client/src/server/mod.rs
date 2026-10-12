@@ -13,8 +13,8 @@ mod streams;
 mod watch;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -34,6 +34,20 @@ use crate::transport::{Admission, BlobBody, Object};
 /// Most watch subscriptions one caller binding may hold open.
 pub(crate) const MAX_WATCHES: usize = 64;
 const SIGNAL_BUFFER: usize = 256;
+
+/// Open watch tasks plus the slots reserved by opens still awaiting the native
+/// watch, so concurrent opens cannot together exceed [`MAX_WATCHES`].
+#[derive(Debug, Default)]
+pub(crate) struct WatchRegistry {
+    pub(crate) tasks: HashMap<String, JoinHandle<()>>,
+    pub(crate) reserved: usize,
+}
+
+impl WatchRegistry {
+    pub(crate) fn used(&self) -> usize {
+        self.tasks.len() + self.reserved
+    }
+}
 
 pub(crate) type Reply = Result<Value, StorageFailure>;
 
@@ -62,7 +76,7 @@ pub struct StorageServer {
     pub(crate) storage: ScopedStorage,
     pub(crate) secrets: Option<std::sync::Arc<dyn SecretStore>>,
     pub(crate) signals: broadcast::Sender<WatchChanged>,
-    pub(crate) watches: Mutex<HashMap<String, JoinHandle<()>>>,
+    pub(crate) watches: Arc<Mutex<WatchRegistry>>,
     pub(crate) next_watch: AtomicU64,
 }
 
@@ -85,7 +99,7 @@ impl StorageServer {
             storage,
             secrets: None,
             signals,
-            watches: Mutex::new(HashMap::new()),
+            watches: Arc::new(Mutex::new(WatchRegistry::default())),
             next_watch: AtomicU64::new(1),
         }
     }
@@ -100,7 +114,7 @@ impl StorageServer {
     /// Number of watch subscriptions currently held open for this caller.
     #[must_use]
     pub fn open_watches(&self) -> usize {
-        self.watches.lock().map_or(0, |watches| watches.len())
+        self.watches.lock().map_or(0, |watches| watches.tasks.len())
     }
 
     /// A receiver of the `WatchChanged` signals this server emits.
@@ -166,7 +180,7 @@ impl StorageServer {
 impl Drop for StorageServer {
     fn drop(&mut self) {
         if let Ok(mut watches) = self.watches.lock() {
-            for (_, task) in watches.drain() {
+            for (_, task) in watches.tasks.drain() {
                 task.abort();
             }
         }

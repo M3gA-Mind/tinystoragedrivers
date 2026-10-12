@@ -79,9 +79,23 @@ Versioned JSON **objects** in named collections.
   RFC 7396 merge patch, and returns the updated document, all as one atomic
   step. Two claims never return the same document when the patch makes it
   stop matching.
+  - *Run-ledger patterns.* A task or run ledger is built from the document
+    port alone: enqueue with `Precondition::Absent`, claim the next eligible
+    task with `claim(eligible, [priority, seq], patch)`, complete with
+    `Precondition::Version` of the claimed version (a stale holder gets
+    `Conflict`), release a worker's claims on shutdown by claiming
+    `state = running AND owner = me` until `None` with a patch that sets the
+    state back and nulls `owner`, and prune finished tasks past retention with
+    `delete_where`. Conformance (`conformance/ledger.rs`) pins these on every
+    driver.
 - **Optional capabilities.** A capability the driver lacks is
   `ErrorKind::Unsupported(capability)`.
   - `Ttl`: documents whose `ttl_field` (epoch ms) has passed read as absent.
+    Expired documents are invisible to `get`, `query`, `count`, `claim` and
+    `search` alike, and rewriting a document with a later expiry keeps it
+    alive. Blobs have no expiry of their own: a cache of blobs keeps one
+    document per blob in a TTL collection and removes the blob when the
+    document expires (`delete_tree` removes a whole prefix).
   - `Transactions`: `atomic_batch`, all or nothing.
   - `CollectionEnumeration`: `collections(prefix)` lists collection names with
     stored records in this handle's scope. It filters by a literal string prefix
@@ -91,8 +105,16 @@ Versioned JSON **objects** in named collections.
     `Unsupported(CollectionEnumeration)`. Enumeration never exposes another
     scope or named database.
 
-  - `FullText`: `search` over the declared `SearchSpec` fields. Conformance
-    checks single-token membership only, never ranking.
+  - `FullText`: `search` over the declared `SearchSpec` fields. Hits come
+    best first: scores never increase down the list, equal scores order by
+    document id, a document matching more of the query ranks ahead of one
+    matching less, and `limit` keeps the best prefix of the full ranking. Score
+    values are backend-local. Declaring a field searchable later indexes
+    documents written before the declaration (an idempotent reindex), and the
+    index follows updates and deletes. Conformance
+    (`conformance/semantics.rs`) pins all of this.
+  - Vector search is not a port here; it stays with TinyMemory (see
+    [`storage-bus.md`](storage-bus.md)).
   - CrossDatabaseFencing: native guard addressing in the default or another
     named database through for_scope_fenced_in_database.
   - `Fencing`: `StorageBackend::for_scope_fenced`, see
@@ -128,6 +150,15 @@ deletion must separately track identity.
 Bytes by `/`-separated key, without empty, `.` or `..` segments, and with no
 leading `/`. Supports ranged reads clamped to the blob's length, and prefix
 listing.
+
+**Tree view.** `list_dir(dir)` lists one level (blobs and the sub-directories
+that hold more blobs, sorted by name, `a` never matching `ab/...`),
+`put_tree(dir, files)` writes a bundle such as a skill (every path is validated
+before the first write; the writes are not atomic across files, so publish a
+manifest document last when all-or-nothing matters), and `delete_tree(dir)`
+removes everything below a directory (the root is refused). They are provided
+methods built on `list`/`put`/`delete`, so every driver, the S3 driver and the
+bus client answer them identically.
 
 ### `StorageBackend` and `Scope`
 
