@@ -89,3 +89,54 @@ async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_b
     );
     conformance::run(&backend, false).await;
 }
+
+/// A synchronous caller on the only worker of the runtime that built the
+/// client reaches the server through the blocking bridge. The client's
+/// connection pool runs on that runtime, so the bridge must not starve it.
+#[test]
+fn live_a_bridge_call_completes_on_a_one_worker_runtime() {
+    use std::sync::mpsc;
+    use tinystoragedrivers_core::{Blocking, Precondition, Scope, StorageBackend};
+    if support::url().is_none() {
+        return skip("live_a_bridge_call_completes_on_a_one_worker_runtime");
+    }
+    let (finished, outcome) = mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let written = runtime.block_on(async {
+            let backend = connect().await.unwrap();
+            let docs = backend
+                .for_scope(&Scope::local())
+                .unwrap()
+                .documents()
+                .clone();
+            tokio::spawn(async move {
+                Blocking::new()
+                    .unwrap()
+                    .run(async move {
+                        docs.put(
+                            "bridge",
+                            "one-worker",
+                            serde_json::json!({"ok": true}),
+                            Precondition::None,
+                        )
+                        .await
+                    })
+                    .unwrap()
+                    .is_ok()
+            })
+            .await
+            .unwrap()
+        });
+        let _ = finished.send(written);
+    });
+    assert_eq!(
+        outcome.recv_timeout(std::time::Duration::from_secs(30)),
+        Ok(true),
+        "the bridge call deadlocked the client's runtime"
+    );
+}

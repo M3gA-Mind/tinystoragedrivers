@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ErrorKind;
+use tokio::sync::oneshot;
 
 #[test]
 fn runs_futures_from_plain_threads() {
@@ -78,4 +79,47 @@ fn dropping_every_handle_lets_in_flight_work_finish() {
     drop(bridge);
     release.send(()).unwrap();
     assert_eq!(done.recv().unwrap(), "finished");
+}
+
+/// A driver like MongoDB's keeps a worker task on the runtime that built its
+/// client, and a call waits on that worker. A synchronous caller on the only
+/// worker thread of that runtime must not starve it.
+#[test]
+fn a_call_that_needs_the_callers_runtime_completes_on_one_worker() {
+    let (finished, outcome) = std_mpsc::channel();
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let answer = runtime.block_on(async {
+            // The "pool worker": it lives on this runtime and answers requests.
+            let (requests, mut incoming) = mpsc::unbounded_channel::<oneshot::Sender<u32>>();
+            tokio::spawn(async move {
+                while let Some(reply) = incoming.recv().await {
+                    let _ = reply.send(42);
+                }
+            });
+            // The synchronous caller runs on that runtime's one worker.
+            tokio::spawn(async move {
+                let bridge = Blocking::new().unwrap();
+                bridge
+                    .run(async move {
+                        let (reply, answer) = oneshot::channel();
+                        requests.send(reply).unwrap();
+                        answer.await.unwrap()
+                    })
+                    .unwrap()
+            })
+            .await
+            .unwrap()
+        });
+        let _ = finished.send(answer);
+    });
+    assert_eq!(
+        outcome.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(42),
+        "the bridge call deadlocked the caller's runtime"
+    );
 }
