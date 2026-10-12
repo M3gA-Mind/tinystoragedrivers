@@ -15,10 +15,19 @@
 //! assert!(wire["document_json"].is_string());
 //! # Ok::<(), serde_json::Error>(())
 //! ```
+mod blobs;
 mod client;
 mod documents;
 mod inline_json;
+mod limits;
+mod secrets;
+mod streams;
 mod types;
+pub use blobs::{
+    BLOBS_OBJECT, BLOBS_SELECTORS, BlobBody, BlobCapabilities, BlobInfo, BlobKeyRequest,
+    BlobStreamHead, GetRangeRequest, ListBlobsRequest, PresignRequest, PresignedUrl,
+    PutBlobRequest, PutBlobStreamRequest, is_blobs_selector,
+};
 pub use client::DocumentClient;
 pub use documents::{
     BatchRequest, BatchResponse, ClaimRequest, CollectionRequest, CollectionSpec,
@@ -28,6 +37,19 @@ pub use documents::{
     ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest, SearchSpec, Sort,
     ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest,
     WatchReset, WriteOp, WriteResult, is_documents_selector,
+};
+pub use limits::{
+    BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,
+    MAX_INLINE_BLOB_BYTES, MAX_INLINE_BYTES, MAX_PAGE_ITEMS, MAX_PRESIGN_TTL_SECS,
+};
+pub use secrets::{
+    ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretValue,
+    SetSecretRequest, is_secrets_selector,
+};
+pub use streams::{
+    AppendBatchIfOffsetRequest, AppendBatchRequest, AppendRequest, AppendResponse,
+    ListStreamsRequest, ReadWindowRequest, ReadWindowResponse, STREAMS_OBJECT, STREAMS_SELECTORS,
+    StreamItem, StreamRecord, StreamRequest, TruncateBeforeRequest, is_streams_selector,
 };
 pub use types::{
     DeleteRequest, GetRequest, Precondition, PutRequest, StorageFailure, StorageKind, Version,

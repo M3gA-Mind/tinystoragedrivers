@@ -98,6 +98,37 @@ The S3 driver remains a host-side driver. Hosts forward S3 configuration and
 credentials into their own storage backend construction; neither these secrets
 nor S3 endpoints are passed through a module request or module-controlled URL.
 
+## Wire reference
+
+Contract version: `CONTRACT_VERSION = 1` (crate `tinystoragedrivers-bus`).
+Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
+
+| Object | Selectors | Route |
+| --- | --- | --- |
+| `Documents` | 16, see `DOCUMENTS_SELECTORS` | private |
+| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams` | private |
+| `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
+| `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
+
+Size limits (constants in the crate, enforced by the server before native I/O):
+
+- `MAX_FRAME_BYTES` is 16 MiB, the `TinyBus` frame cap.
+- `MAX_INLINE_BYTES` is 8 MiB: encoded cap of one page, batch or window, so
+  escaping overhead cannot reach the frame.
+- `MAX_PAGE_ITEMS` and `MAX_BATCH_OPS` are 1,000 records or operations.
+- `MAX_INLINE_BLOB_BYTES` is 1 MiB (a JSON byte array can cost 4 bytes per byte): larger blobs use `PutStream` / `GetStream`
+  over a `TinyBus` stream in `BLOB_STREAM_CHUNK_BYTES` (512 KiB) chunks.
+- `MAX_PRESIGN_TTL_SECS` is 3,600.
+
+Stream records and document bodies are inline JSON text (`*_json`), never
+native stream references. Streamed blob calls carry only metadata
+(`PutBlobStreamRequest`, `BlobStreamHead`); the body is a separate `TinyBus`
+stream argument bound to one operation, whose length must equal the declared
+`len`. A page that would exceed `MAX_INLINE_BYTES` is cut short and continued
+with the returned cursor or last offset plus one. `Secrets` messages redact
+`Debug` output; presigned URLs are credentials and are likewise never printed.
+Watch signals are `WatchChanged` (Documents) and carry no payload.
+
 ## Acceptance
 
 - The new wire types use serde-only data dependencies, with no core, transport,
