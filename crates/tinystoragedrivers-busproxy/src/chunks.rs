@@ -131,3 +131,7 @@ pub(crate) async fn pump(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "chunks_tests.rs"]
+mod tests;

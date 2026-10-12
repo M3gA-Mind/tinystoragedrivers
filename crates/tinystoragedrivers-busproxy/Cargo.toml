@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tinybus.workspace = true
 tinystoragedrivers-bus.workspace = true

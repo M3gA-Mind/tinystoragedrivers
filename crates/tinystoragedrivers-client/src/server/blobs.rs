@@ -62,7 +62,12 @@ impl StorageServer {
                     None => native(blobs.put(&r.key, r.bytes, content_type).await)?,
                     Some(ttl_ms) => native(
                         blobs
-                            .put_expiring(&r.key, r.bytes, content_type, Duration::from_millis(ttl_ms))
+                            .put_expiring(
+                                &r.key,
+                                r.bytes,
+                                content_type,
+                                Duration::from_millis(ttl_ms),
+                            )
                             .await,
                     )?,
                 };

@@ -1,5 +1,5 @@
 //! Where the storage objects live on the bus, and how errors are named.
-use tinybus::{BusName, ObjectPath};
+use tinybus::{BusName, InterfaceName, MemberName, ObjectPath};
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
 use tinystoragedrivers_client::Object;
 
@@ -15,12 +15,38 @@ pub const ERROR_STORAGE: &str = "ai.tinyhumans.tinystorage.Error.Storage";
 /// Signal member that carries a payload-free `WatchChanged`.
 pub const WATCH_MEMBER: &str = "WatchChanged";
 
+/// A name this crate spells itself, which is valid by construction.
+pub(crate) fn fixed<T>(parsed: tinybus::Result<T>) -> T {
+    parsed.unwrap_or_else(|_| unreachable!("a name this crate fixes is valid"))
+}
+
 /// The object path serving `object`.
-///
-/// # Errors
-/// Never in practice: the root and object names are fixed valid names.
-pub fn object_path(object: Object) -> tinybus::Result<ObjectPath> {
-    ObjectPath::new(format!("{OBJECT_ROOT}/{}", object.as_str()))
+#[must_use]
+pub fn object_path(object: Object) -> ObjectPath {
+    fixed(ObjectPath::new(format!(
+        "{OBJECT_ROOT}/{}",
+        object.as_str()
+    )))
+}
+
+/// The storage interface name.
+pub(crate) fn interface() -> InterfaceName {
+    fixed(InterfaceName::new(STORAGE_INTERFACE))
+}
+
+/// A fixed member name.
+pub(crate) fn member(name: &str) -> MemberName {
+    fixed(MemberName::new(name))
+}
+
+/// The host's well-known bus name.
+pub(crate) fn host_name() -> BusName {
+    fixed(BusName::new(HOST_NAME))
+}
+
+/// A wire value for a plain derived-`Serialize` message, which cannot fail.
+pub(crate) fn wire_value<T: serde::Serialize>(message: &T) -> serde_json::Value {
+    serde_json::to_value(message).unwrap_or(serde_json::Value::Null)
 }
 
 /// The path the host emits `recipient`'s watch signals on.
@@ -46,3 +72,7 @@ pub fn watch_path(recipient: &BusName) -> tinybus::Result<ObjectPath> {
         .collect();
     ObjectPath::new(format!("{OBJECT_ROOT}/Watch/{element}"))
 }
+
+#[cfg(test)]
+#[path = "names_tests.rs"]
+mod tests;

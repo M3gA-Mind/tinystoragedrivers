@@ -342,6 +342,10 @@ async fn watch_signals_reach_only_the_watching_module() {
         .unwrap()
         .unwrap();
     assert!(matches!(notice, WatchNotice::Invalidated { .. }));
+
+    // Withdrawing the objects also stops the relays that watching started.
+    assert!(format!("{:?}", rig.served).contains("ServedStorage"));
+    rig.served.shutdown().await.unwrap();
 }
 
 #[test]
@@ -370,4 +374,110 @@ fn failures_become_named_bus_errors_and_back() {
         matches!(&storage, tinybus::Error::MethodFailed { name, message }
             if name == ERROR_STORAGE && message == "conflict")
     );
+}
+
+/// A transport for a peer the host has no binding for.
+async fn stranger_transport(rig: &Rig) -> BusTransport {
+    let connection = Connection::connect(rig.bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    BusTransport::connect(connection)
+        .await
+        .unwrap()
+        .with_timeout(Duration::from_secs(5))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unbound_peer_is_denied_on_calls_and_both_streamed_transfers() {
+    use tinystoragedrivers_client::{Object, StorageTransport, WireError};
+    let rig = rig().await;
+    let transport = stranger_transport(&rig).await;
+    assert!(format!("{transport:?}").contains("BusTransport"));
+
+    let denied = |error: WireError| matches!(&error, WireError::Transport(reason) if reason.contains("denied the call: unknown-caller"));
+    let error = transport
+        .call(Object::Documents, "Capabilities", serde_json::Value::Null)
+        .await
+        .unwrap_err();
+    assert!(denied(error));
+
+    let head = tinystoragedrivers_bus::PutBlobStreamRequest {
+        key: "k".into(),
+        len: 4,
+        content_type: Some("text/plain".into()),
+        ttl_ms: None,
+    };
+    let body: tinystoragedrivers_core::BlobReader =
+        Box::pin(std::io::Cursor::new(vec![1, 2, 3, 4]));
+    let error = transport.put_blob_stream(head, body).await.unwrap_err();
+    assert!(denied(error));
+
+    let request = tinystoragedrivers_bus::BlobKeyRequest { key: "k".into() };
+    let error = transport.get_blob_stream(request).await.err().unwrap();
+    assert!(denied(error));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_blob_source_fails_the_upload_without_publishing() {
+    struct Broken;
+    impl tokio::io::AsyncRead for Broken {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("disk gone")))
+        }
+    }
+    let rig = rig().await;
+    let (_module, storage) = rig.module("alpha").await;
+    let error = storage
+        .blobs()
+        .put_stream("broken", Box::pin(Broken), 10, None)
+        .await
+        .unwrap_err();
+    // Which side notices first (the module's source fault or the host's
+    // aborted read) decides the category, so only the outcome is pinned.
+    assert!(!error.to_string().is_empty());
+    assert!(storage.blobs().head("broken").await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_native_watch_fake_delegates_every_document_operation() {
+    use tinystoragedrivers_core::{DocumentStore, Query, Sort};
+    let rig = rig().await;
+    let base = rig.backend.for_scope(&Scope::new("fake").unwrap()).unwrap();
+    let docs = Docs {
+        inner: base.documents().clone(),
+        source: Arc::default(),
+    };
+    docs.ensure_collection(&CollectionSpec::new("c"))
+        .await
+        .unwrap();
+    docs.put("c", "a", json!({"n": 1}), Precondition::None)
+        .await
+        .unwrap();
+    assert!(docs.get("c", "a").await.unwrap().is_some());
+    assert_eq!(docs.count("c", &Filter::All).await.unwrap(), 1);
+    assert_eq!(
+        docs.query("c", &Query::default())
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    let sort: Vec<Sort> = Vec::new();
+    assert!(
+        docs.claim("c", &Filter::All, &sort, &json!({"n": 2}))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(docs.delete("c", "a", Precondition::None).await.unwrap());
+    docs.put("c", "b", json!({}), Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(docs.delete_where("c", &Filter::All).await.unwrap(), 1);
+    docs.drop_collection("c").await.unwrap();
 }

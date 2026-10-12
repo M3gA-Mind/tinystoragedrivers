@@ -112,3 +112,7 @@ where
             .map(|server| server.signals())
     }
 }
+
+#[cfg(test)]
+#[path = "per_caller_tests.rs"]
+mod tests;

@@ -225,8 +225,7 @@ impl Tables {
                     .filter(|ch| !ch.is_whitespace())
                     .collect::<String>()
             };
-            if normalize(&stored) != normalize(expected)
-            {
+            if normalize(&stored) != normalize(expected) {
                 return Err(StorageError::invalid_input(
                     "existing driver table has incompatible schema",
                 ));

@@ -14,15 +14,17 @@ use tinybus::{
     StreamRef, WeakConnection,
 };
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, STORAGE_INTERFACE, StorageFailure,
-    StorageKind, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_client::{Admission, Object};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::chunks::{blob_reader, pump};
-use crate::names::{ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, object_path, watch_path};
+use crate::names::{
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, interface, member, object_path,
+    watch_path, wire_value,
+};
 use tinystoragedrivers_core::BlobReader;
 
 /// How a call failed, before it becomes a bus error.
@@ -133,12 +135,7 @@ impl Shared {
         else {
             return;
         };
-        let (Ok(interface), Ok(member)) = (
-            InterfaceName::new(STORAGE_INTERFACE),
-            MemberName::new(WATCH_MEMBER),
-        ) else {
-            return;
-        };
+        let (interface, member) = (interface(), member(WATCH_MEMBER));
         let connection = self.connection.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -270,7 +267,7 @@ impl ObjectService {
                     kind: StorageKind::Unavailable,
                 })
             })?;
-        let reply = json!([head, writer.stream_ref()]);
+        let reply = json!([wire_value(&head), wire_value(&writer.stream_ref())]);
         // The body follows the reply: the caller accepts the stream only once it
         // has the reference, and the stream's window holds the first chunks.
         tokio::spawn(async move {
@@ -283,13 +280,13 @@ impl ObjectService {
 #[async_trait]
 impl Interface for ObjectService {
     fn name(&self) -> InterfaceName {
-        InterfaceName::new(STORAGE_INTERFACE).unwrap_or_else(|_| unreachable!("a fixed name"))
+        interface()
     }
 
     fn members(&self) -> Vec<MemberName> {
         selectors(self.object)
             .iter()
-            .filter_map(|selector| MemberName::new(*selector).ok())
+            .map(|selector| member(selector))
             .collect()
     }
 
@@ -365,7 +362,7 @@ impl ServedStorage {
     /// The bus refuses to release the name.
     pub async fn shutdown(self) -> tinybus::Result<()> {
         for object in ALL {
-            self.connection.unserve(&object_path(object)?).await;
+            self.connection.unserve(&object_path(object)).await;
         }
         if let Ok(mut forwarders) = self.shared.forwarders.lock() {
             for (_, task) in forwarders.drain() {
@@ -399,7 +396,7 @@ pub async fn serve(
     for object in ALL {
         connection
             .serve_at(
-                object_path(object)?,
+                object_path(object),
                 ObjectService {
                     object,
                     shared: Arc::clone(&shared),
@@ -410,7 +407,7 @@ pub async fn serve(
     if let Err(error) = connection.request_name(HOST_NAME).await {
         // Do not leave unreachable objects registered behind a name we lack.
         for object in ALL {
-            connection.unserve(&object_path(object)?).await;
+            connection.unserve(&object_path(object)).await;
         }
         return Err(error);
     }
@@ -419,3 +416,7 @@ pub async fn serve(
         shared,
     })
 }
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;

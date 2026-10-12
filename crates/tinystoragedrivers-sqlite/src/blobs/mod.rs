@@ -134,9 +134,8 @@ impl SqliteBlobs {
         };
         // A plain write clears any lifetime the key had.
         let now = now_ms();
-        let expires_at = ttl.map(|ttl| {
-            now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX))
-        });
+        let expires_at =
+            ttl.map(|ttl| now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)));
         let (scope, row) = (self.scope.clone(), described.clone());
         self.write(move |conn| {
             if expires_at.is_some() {
@@ -160,7 +159,9 @@ impl SqliteBlobs {
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Visible rows: no lifetime, or one still in the future.
@@ -233,9 +234,11 @@ impl BlobStore for SqliteBlobs {
         let count = i64::try_from(range.end - range.start).unwrap_or(i64::MAX);
         let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.read(move |conn| {
-            conn.query_row(&sql, params![scope.as_str(), key, start, count, now], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
+            conn.query_row(
+                &sql,
+                params![scope.as_str(), key, start, count, now],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
             .optional()
             .map_err(during("read blob range"))
         })
@@ -267,10 +270,7 @@ impl BlobStore for SqliteBlobs {
             "DELETE FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
         );
-        let expired = format!(
-            "DELETE FROM {} WHERE scope = ?1 AND key = ?2",
-            self.table()
-        );
+        let expired = format!("DELETE FROM {} WHERE scope = ?1 AND key = ?2", self.table());
         let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.write(move |conn| {
             let live = conn

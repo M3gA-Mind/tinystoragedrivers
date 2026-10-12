@@ -5,12 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinybus::{
-    BusName, Connection, InterfaceName, MatchRule, MemberName, Message, StreamDescriptor, StreamRef,
-};
+use tinybus::{BusName, Connection, MatchRule, Message, StreamDescriptor, StreamRef};
 use tinystoragedrivers_bus::{
-    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, STORAGE_INTERFACE, StorageFailure,
-    StorageKind, WatchChanged,
+    BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
 };
 use tinystoragedrivers_client::{Object, StorageTransport, WireError};
 use tinystoragedrivers_core::{BlobReader, Scope};
@@ -18,7 +15,10 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::chunks::{PumpError, blob_reader, pump};
-use crate::names::{ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, object_path, watch_path};
+use crate::names::{
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, host_name, interface, member,
+    object_path, watch_path, wire_value,
+};
 
 /// Signals buffered for a slow watcher before the oldest are dropped.
 const SIGNAL_BUFFER: usize = 256;
@@ -76,15 +76,15 @@ impl BusTransport {
         let owner = connection
             .name_owner(HOST_NAME)
             .await?
-            .ok_or_else(|| tinybus::Error::NameHasNoOwner(destination()))?;
+            .ok_or_else(|| tinybus::Error::NameHasNoOwner(host_name()))?;
         let me = connection
             .unique_name()
             .ok_or_else(|| tinybus::Error::failed("the connection has no unique name"))?;
         let mut rule = MatchRule::new()
             .signals()
             .sender(owner)
-            .interface(InterfaceName::new(STORAGE_INTERFACE)?)
-            .member(MemberName::new(WATCH_MEMBER)?);
+            .interface(interface())
+            .member(member(WATCH_MEMBER));
         rule.path = Some(watch_path(&me)?);
         // Subscribe before returning so no watch signal can be missed.
         let mut received = connection.add_match(rule).await?;
@@ -106,7 +106,7 @@ impl BusTransport {
         });
         Ok(Self {
             connection,
-            host: destination(),
+            host: host_name(),
             timeout: CALL_TIMEOUT,
             signals,
             forwarder,
@@ -121,26 +121,25 @@ impl BusTransport {
     }
 
     fn proxy(&self, object: Object) -> Result<tinybus::Proxy, WireError> {
-        let path = object_path(object).map_err(|error| transport_error(&error))?;
-        self.connection
-            .proxy(HOST_NAME, path.as_str(), STORAGE_INTERFACE)
-            .map(|proxy| proxy.with_timeout(self.timeout))
-            .map_err(|error| transport_error(&error))
+        tinybus::Proxy::new(
+            self.connection.clone(),
+            host_name(),
+            object_path(object),
+            interface(),
+        )
+        .map(|proxy| proxy.with_timeout(self.timeout))
+        .map_err(|error| transport_error(&error))
     }
 
-    fn streamed_call(member: &str, body: Value) -> Result<Message, WireError> {
-        Ok(Message::method_call(
-            destination(),
-            object_path(Object::Blobs).map_err(|error| transport_error(&error))?,
-            InterfaceName::new(STORAGE_INTERFACE).map_err(|error| transport_error(&error))?,
-            MemberName::new(member).map_err(|error| transport_error(&error))?,
+    fn streamed_call(selector: &str, body: Value) -> Message {
+        Message::method_call(
+            host_name(),
+            object_path(Object::Blobs),
+            interface(),
+            member(selector),
             body,
-        ))
+        )
     }
-}
-
-fn destination() -> BusName {
-    BusName::new(HOST_NAME).unwrap_or_else(|_| unreachable!("HOST_NAME is a valid bus name"))
 }
 
 fn transport_error(error: &tinybus::Error) -> WireError {
@@ -218,14 +217,13 @@ impl StorageTransport for BusTransport {
         }
         let writer = self
             .connection
-            .open_stream_with_timeout(&destination(), descriptor, self.timeout)
+            .open_stream_with_timeout(&host_name(), descriptor, self.timeout)
             .await
             .map_err(|error| transport_error(&error))?;
-        let head = serde_json::to_value(&head)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
-        let stream = serde_json::to_value(writer.stream_ref())
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
-        let message = Self::streamed_call("PutStream", json!([head, stream]))?;
+        let message = Self::streamed_call(
+            "PutStream",
+            json!([wire_value(&head), wire_value(&writer.stream_ref())]),
+        );
         // The call and the body are in flight together: the host reads the
         // stream while it answers, so neither can wait for the other. The
         // first failure wins and the other half is dropped.
@@ -254,11 +252,9 @@ impl StorageTransport for BusTransport {
         &self,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_core::BlobReader)>, WireError> {
-        let request = serde_json::to_value(&request)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
         let reply = self
             .proxy(Object::Blobs)?
-            .call::<Value>("GetStream", (request,))
+            .call::<Value>("GetStream", (wire_value(&request),))
             .await
             .map_err(wire_error)?;
         let Some((head, stream)) = decode_stream_reply(reply)? else {
@@ -292,3 +288,7 @@ pub async fn connect_storage(
         .map_err(|error| tinystoragedrivers_core::StorageError::unavailable(error.to_string()))?;
     tinystoragedrivers_client::BusStorage::connect(Arc::new(transport), module_scope_label()).await
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

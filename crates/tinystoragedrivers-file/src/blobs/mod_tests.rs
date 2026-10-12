@@ -141,11 +141,9 @@ fn open_driven() -> (
     let dir = tempfile::tempdir().unwrap();
     let now = Arc::new(AtomicU64::new(10_000));
     let reading = Arc::clone(&now);
-    let storage = FileStorage::open_with_clock(
-        dir.path(),
-        Arc::new(move || reading.load(Ordering::SeqCst)),
-    )
-    .unwrap();
+    let storage =
+        FileStorage::open_with_clock(dir.path(), Arc::new(move || reading.load(Ordering::SeqCst)))
+            .unwrap();
     let blobs = Arc::clone(storage.for_scope(&Scope::local()).unwrap().blobs());
     (dir, storage, blobs, now)
 }
@@ -159,7 +157,8 @@ async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
         .await
         .unwrap();
     let (data, meta) = files(&storage, "k");
-    let sidecar: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
     assert_eq!(sidecar["expires_at_ms"], 10_250);
 
     now.store(10_249, Ordering::SeqCst);
@@ -172,8 +171,14 @@ async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
     assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
     assert!(blobs.list("").await.unwrap().is_empty());
     assert!(data.exists(), "reads leave reclamation to the next write");
-    assert!(!blobs.delete("k").await.unwrap(), "a lapsed blob is not deleted");
-    assert!(!data.exists() && !meta.exists(), "delete reclaims the files");
+    assert!(
+        !blobs.delete("k").await.unwrap(),
+        "a lapsed blob is not deleted"
+    );
+    assert!(
+        !data.exists() && !meta.exists(),
+        "delete reclaims the files"
+    );
 }
 
 #[tokio::test]
