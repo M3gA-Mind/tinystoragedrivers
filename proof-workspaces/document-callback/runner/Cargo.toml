@@ -1,0 +1,17 @@
+[package]
+name = "document-callback-proof"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+tinybus = { workspace = true, features = ["modules"] }
+tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
+tinystoragedrivers-tinybus = { path = "../../../crates/tinystoragedrivers-tinybus" }
+tinystoragedrivers-core = { path = "../../../crates/tinystoragedrivers-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
