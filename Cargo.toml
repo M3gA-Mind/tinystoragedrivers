@@ -22,7 +22,7 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
 # Minimal document wire clients and confined host callbacks; never linked by core.
-tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "1f2557657db97470cd4efb7e1fc2f374f36fdd22", default-features = false }
+tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "40814a8279ff71b8fb411f9f29362c8ec0be51e2", default-features = false }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # SHA-256 binds Mongo watch cursors and protects native secret key identities.
 sha2 = "0.10"
