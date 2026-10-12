@@ -44,8 +44,12 @@ its client, host adapter and shared conformance pass.
 ## Progress
 
 Step 1 (Documents) and the Streams, Blobs and Secrets wire contracts plus
-size limits and `CONTRACT_VERSION` are in `tinystoragedrivers-bus`. Clients,
-host servers, conformance over the bus, the S3 feature and the port gaps
+size limits and `CONTRACT_VERSION` are in `tinystoragedrivers-bus`. The bus
+client (`BusStorage` and the port handles), the reference `StorageServer` and
+the in-process `Loopback` are in `tinystoragedrivers-client`, and
+`conformance::run_ports` passes through them (including a blob above the frame
+cap over streams, and watch signals). A `TinyBus` proxy transport and the
+module-side server registration, the S3 feature and the port gaps
 (Vector spec, FTS reindex, keyset cursors, TTL, claim/CAS, blob tree view) are
 later slices of tinyhumansai/openhuman#7635.
 

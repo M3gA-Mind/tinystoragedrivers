@@ -35,6 +35,21 @@ use crate::capabilities::Capability;
 use crate::error::{ErrorKind, Result};
 use crate::scope::Scope;
 
+/// Run the port checks (documents, validated batches, watch, streams, blobs)
+/// against one already-scoped handle.
+///
+/// This is the part of [`run`] that needs nothing from the backend itself, so
+/// a client that cannot choose scopes, databases or fences (a storage-bus
+/// client bound by its host) runs it directly. The scope, database, purge and
+/// fencing checks stay in [`run`].
+pub async fn run_ports(storage: &ScopedStorage) {
+    documents::run(storage).await;
+    validated::run(storage).await;
+    watch::run(storage).await;
+    streams::run(storage).await;
+    blobs::run(storage).await;
+}
+
 /// Run every check against `backend`.
 ///
 /// The backend must accept [`Scope::local`] and at least one other scope
@@ -49,11 +64,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     let local = backend
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
-    documents::run(&local).await;
-    validated::run(&local).await;
-    watch::run(&local).await;
-    streams::run(&local).await;
-    blobs::run(&local).await;
+    run_ports(&local).await;
     if single_scope {
         let other = Scope::new("conformance-b").expect("valid scope");
         assert!(

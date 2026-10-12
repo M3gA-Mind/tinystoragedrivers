@@ -24,6 +24,8 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 # Minimal document wire clients and confined host callbacks; never linked by core.
 tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "40814a8279ff71b8fb411f9f29362c8ec0be51e2", default-features = false }
 tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
+# Bus client implementing the storage ports, plus the reference server adapter.
+tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
 # SHA-256 binds Mongo watch cursors and protects native secret key identities.
 sha2 = "0.10"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.

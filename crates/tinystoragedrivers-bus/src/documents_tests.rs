@@ -24,7 +24,7 @@ fn query_roundtrips_and_rejects_authority_selectors() {
     let mut forged = encoded;
     forged["scope"] = json!("bob");
     assert!(serde_json::from_value::<Query>(forged).is_err());
-    assert_eq!(DOCUMENTS_SELECTORS.len(), 16);
+    assert_eq!(DOCUMENTS_SELECTORS.len(), 17);
     assert!(!DOCUMENTS_SELECTORS.contains(&"Arbitrary"));
     assert!(is_documents_selector("Query"));
     assert!(!is_documents_selector("Arbitrary"));
@@ -293,4 +293,23 @@ fn batch_writes_reuse_document_id_and_inline_document_json_fields() {
     assert!(put.get("doc").is_none());
     assert_eq!(delete["document_id"], "delete-id");
     assert!(delete.get("id").is_none());
+}
+
+#[test]
+fn watch_open_response_and_capabilities_reply_reject_unknown_fields() {
+    let open = WatchOpenResponse {
+        watch_id: "w1".into(),
+    };
+    let wire = serde_json::to_value(&open).unwrap();
+    assert_eq!(wire, json!({"watch_id":"w1"}));
+    assert!(
+        serde_json::from_value::<WatchOpenResponse>(json!({"watch_id":"w1","scope":"bob"}))
+            .is_err()
+    );
+    let caps = CapabilitiesReply {
+        capabilities: vec!["watch".into()],
+    };
+    let wire = serde_json::to_value(&caps).unwrap();
+    assert_eq!(wire, json!({"capabilities":["watch"]}));
+    assert!(is_documents_selector("Capabilities"));
 }
