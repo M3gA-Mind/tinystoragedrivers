@@ -93,11 +93,13 @@ impl Blocking {
     /// Run `future` on the bridge thread and wait for its output.
     ///
     /// The calling thread blocks until the future completes. The future runs
-    /// on the bridge's own runtime, so it must not wait on work that only the
-    /// caller's thread can drive: from inside a current-thread runtime, a
-    /// future that awaits a task spawned on *that* runtime never completes.
-    /// Port futures from any driver in this repository are self-contained and
-    /// safe to run here.
+    /// on the bridge's own runtime, but it may still wait on tasks of the
+    /// caller's runtime: the MongoDB driver's connection pool, for one, runs
+    /// on the runtime that built the client. On a multi-thread runtime's
+    /// worker the wait goes through [`tokio::task::block_in_place`], so the
+    /// runtime keeps driving those tasks on another thread. From inside a
+    /// current-thread runtime nothing can, and a future that awaits a task
+    /// spawned on *that* runtime never completes.
     ///
     /// # Errors
     ///
@@ -122,10 +124,29 @@ impl Blocking {
         self.jobs
             .send(job)
             .map_err(|_| StorageError::backend("the blocking bridge has stopped"))?;
-        wait.recv().map_err(|_| {
-            StorageError::backend("the blocking bridge dropped the call (did it panic?)")
-        })
+        let receive = || {
+            wait.recv().map_err(|_| {
+                StorageError::backend("the blocking bridge dropped the call (did it panic?)")
+            })
+        };
+        // On a multi-thread runtime's worker, hand the worker's other tasks to
+        // another thread while this one waits. A driver's future may depend on
+        // them: MongoDB's connection pool runs as a task on the runtime that
+        // built the client, and with this worker blocked (or the runtime's only
+        // one) the call would never complete.
+        if on_multi_thread_worker() {
+            tokio::task::block_in_place(receive)
+        } else {
+            receive()
+        }
     }
+}
+
+/// Whether the current thread runs inside a multi-thread tokio runtime,
+/// where [`tokio::task::block_in_place`] is allowed.
+fn on_multi_thread_worker() -> bool {
+    tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
 /// Map an I/O failure while starting the bridge to a backend error.
