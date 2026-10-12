@@ -98,6 +98,22 @@ Independent review of 7602308 found no blocking authority, CAS or source issue.
 TinyBus is pinned to canonical 1f255765 (0.1.4); PR59 is not a dependency and
 its pending lifecycle correction is not claimed by this CRUD transport.
 
+## Hosted source policy
+
+PR27's first Supply chain job failed because the existing unknown-Git denial
+correctly rejected the newly introduced canonical TinyBus source. A local
+`cargo deny check sources` reproduced that refusal before changing policy.
+
+The fix allows exactly https://github.com/tinyhumansai/tinybus and requires
+revision-based Git specifications. Unknown Git repositories and registries
+remain denied. Both workspace manifests were checked for the exact canonical
+full 40-character revision. The revision-spec setting alone does not validate
+the length of a revision; the checked manifests contain the full commit.
+
+Fresh `cargo deny check sources` and `cargo deny check all` then passed, with
+advisories, bans, licenses and sources all accepted. No Rust source or native
+admission changed. Hosted checks must finish on the resulting policy head.
+
 Original logs live under target/gates; this durable record survives build-output
 cleanup. The proof establishes this document callback boundary. It does not
 establish module business persistence, legacy import authority, read-fencing
