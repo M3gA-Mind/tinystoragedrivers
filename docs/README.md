@@ -43,3 +43,10 @@ land and consumers move onto them is
   place.
 - Write a specification before a plan: the spec defines the outcome and
   constraints, while the plan defines the implementation sequence.
+# Design documents
+
+- [Storage ports](specs/storage-ports.md) and the accepted [storage bus
+  contract](specs/storage-bus.md).
+- [Storage bus implementation plan](plans/storage-bus.md).
+- Existing callback details: [document callback spec](specs/document-callback.md)
+  and [implementation plan](plans/document-callback.md).
