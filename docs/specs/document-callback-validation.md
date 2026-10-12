@@ -1,8 +1,8 @@
 # Document callback validation record
 
-This records scoped behavior evidence. Full canonical workspace acceptance,
-coverage and Rust 1.88 validation are still pending; this is not publication
-readiness or a TinyMemes persistence completion claim.
+This records executed behavior and canonical workspace acceptance at source
+checkpoint 760230812e260fcfed9594dbf40dc06fbc9d4c6e. It establishes the confined
+document transport, not TinyMemes business persistence or a host migration.
 
 ## Native forwarding baseline
 
@@ -57,10 +57,46 @@ Zero-test doctest groups were not counted as evidence.
 
 Strict two-crate Clippy and rustdoc passed after narrow corrections to doc
 backticks, borrowed error mapping and empty-vector assertions. No lint or test
-was disabled. Those changes are checkpoint b8ee8ec. Behavior reruns on that
-checkpoint, full workspace gates, per-file coverage, MSRV and upstream review
-remain required before publication. Actual artifact coverage here is local
+was disabled. Those changes are checkpoint b8ee8ec. The final 7602308 checkpoint
+also supplies compiled documentation examples and runs the locked actual module
+proof in the existing Linux CI job. Actual artifact evidence here is local
 Linux, not evidence of every platform's dynamic-loader behavior.
+
+## Final canonical acceptance
+
+Fresh final-head gates passed, one build at a time:
+
+- scoped bus6 + adapter10, plus two compiled doctests;
+- locked rebuilt/hash-verified SDK module proof: four passed, none ignored;
+- all-feature workspace: 676 unit/integration tests and 29 doctests;
+- default workspace: 635 unit/integration tests and 28 doctests;
+- strict all-target/all-feature workspace Clippy and full build;
+- all-feature workspace rustdoc with warnings denied;
+- Rust 1.88 all-target/all-feature workspace build;
+- strict all-target/all-feature Clippy in the excluded proof workspace;
+- root/proof formatting and diff whitespace checks;
+- canonical coverage gate: 676 instrumented tests, profile helper two tests,
+  eight actual injected native I/O failures, concurrent key publication probe
+  and isolated admitted Secret Service probe, all passed.
+
+All 90 production files exceeded the required 90% line threshold. New files:
+client 100% (20/20), inline JSON 91.67% (11/12), wire types 100% (3/3), adapter
+96.97% (128/132). The excluded ABI proof is executed separately; its source is
+not included in the native workspace's coverage denominator.
+
+The workspace suites and coverage used an owned loopback MongoDB 7 replica set
+and verified local MinIO, including the 500 MiB streaming roundtrip. True
+standalone MongoDB was not enabled; native Windows/macOS probes remain their
+existing CI responsibility. No production endpoint or real credential was used.
+
+The first full suite stopped with three MinIO connection-refused failures after
+the setup shell's background fixture process disappeared. Its log is preserved.
+The same verified binary was restarted in a persistent tool session; the entire
+fresh suite then passed. No product code, test, timeout or assertion changed.
+
+Independent review of 7602308 found no blocking authority, CAS or source issue.
+TinyBus is pinned to canonical 1f255765 (0.1.4); PR59 is not a dependency and
+its pending lifecycle correction is not claimed by this CRUD transport.
 
 Original logs live under target/gates; this durable record survives build-output
 cleanup. The proof establishes this document callback boundary. It does not
