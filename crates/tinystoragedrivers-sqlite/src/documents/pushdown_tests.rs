@@ -63,14 +63,14 @@ fn leaves_everything_else_to_rust() {
 fn seeks_by_nullable_mixed_direction_sort_and_id() {
     let position = CursorPosition {
         id: "last".into(),
-        values: vec![json!(2), Value::Null],
+        values: vec![json!(2), json!("queued")],
     };
     let pushed = after(&position, &[Sort::asc("rank"), Sort::desc("state")]).unwrap();
     assert!(pushed.sql.contains("json_type(doc, '$.\"rank\"')"));
     assert!(pushed.sql.contains("json_type(doc, '$.\"state\"')"));
     assert!(pushed.sql.contains("json_extract(doc, '$.\"rank\"') >= ?"));
     assert!(pushed.sql.contains("json_extract(doc, '$.\"state\"') <= ?"));
-    assert!(pushed.sql.ends_with("id > ?))"));
+    assert!(pushed.sql.ends_with("id > ?)"));
     assert_eq!(pushed.params.last(), Some(&SqlValue::Text("last".into())));
 
     let null = CursorPosition {

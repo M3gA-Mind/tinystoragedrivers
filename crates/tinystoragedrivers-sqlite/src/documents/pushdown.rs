@@ -107,7 +107,7 @@ pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause>
                 return None;
             }
             let (rank_expression, expression) = expressions(&key.field)?;
-            terms.push(format!("({rank_expression} = ? AND {expression} IS ?)",));
+            terms.push(format!("({rank_expression} = ? AND {expression} IS ?)"));
             params.push(SqlValue::Integer(rank(value)));
             params.push(sql_value(value)?);
         }

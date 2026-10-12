@@ -324,7 +324,10 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
         let value_name = format!("_tsd_k{index}");
         let rank_name = format!("_tsd_r{index}");
         let value_ref = format!("${value_name}");
-        add_fields.insert(&value_name, source.as_str());
+        // The core treats missing and explicit null as the same sort value.
+        // Normalize Mongo's `missing` aggregation value before both sorting
+        // and keyset equality checks so a page boundary keeps tied rows.
+        add_fields.insert(&value_name, doc! {"$ifNull": [source.as_str(), Bson::Null]});
         add_fields.insert(&rank_name, rank(&source));
         complex.push(doc! {"$in": [{"$type": value_ref}, ["array", "object"]]});
         let direction = match key.direction {

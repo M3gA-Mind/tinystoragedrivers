@@ -34,8 +34,26 @@ fn seek_expression_flattens_ties_and_treats_cursor_values_as_literals() {
         panic!("tie alternative must use conjunction terms");
     };
     assert_eq!(tie_terms.len(), 5);
-    assert!(tie_terms.iter().all(Bson::is_document));
+    assert!(tie_terms.iter().all(|term| term.as_document().is_some()));
     let encoded = Bson::Document(root);
     assert!(has_literal(&encoded, "$field"));
     assert!(has_literal(&encoded, "$$ROOT"));
+}
+
+#[test]
+fn deleted_complex_cursor_positions_keep_the_reference_sort_path() {
+    for value in [
+        serde_json::json!([1]),
+        serde_json::json!({"key": 1}),
+        serde_json::json!(u64::MAX),
+    ] {
+        assert!(!cursor_is_scalar_bson_position(&CursorPosition {
+            id: "last".into(),
+            values: vec![value],
+        }));
+    }
+    assert!(cursor_is_scalar_bson_position(&CursorPosition {
+        id: "last".into(),
+        values: vec![serde_json::json!("scalar")],
+    }));
 }

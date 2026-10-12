@@ -75,6 +75,9 @@ impl MongoDocuments {
         if translated.exact
             && let Some(plan) = translate::sort_plan(sort)
         {
+            let cursor_needs_reference_sort = position
+                .as_ref()
+                .is_some_and(|position| !cursor_is_scalar_bson_position(position));
             let complex = if sort.is_empty() {
                 false
             } else {
@@ -90,7 +93,7 @@ impl MongoDocuments {
                     )
                     .await
                     .map_err(errors::failed("inspect sort values"))?;
-                !found.is_empty()
+                cursor_needs_reference_sort || !found.is_empty()
             };
             if !complex {
                 let mut stages = Vec::new();
@@ -297,6 +300,18 @@ impl MongoDocuments {
         hits.truncate(limit);
         Ok(hits)
     }
+}
+
+/// Whether every cursor sort value can use Mongo's scalar BSON seek ordering.
+/// The current rows may no longer contain the complex or unrepresentable
+/// value that produced the cursor (for example, after that row was deleted).
+fn cursor_is_scalar_bson_position(position: &CursorPosition) -> bool {
+    position.values.iter().all(|value| {
+        !matches!(
+            value,
+            serde_json::Value::Array(_) | serde_json::Value::Object(_)
+        ) && to_bson(value).is_ok()
+    })
 }
 
 #[cfg(test)]

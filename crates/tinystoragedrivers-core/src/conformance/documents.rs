@@ -493,6 +493,12 @@ async fn keyset_ties_follow_total_sort_order(storage: &ScopedStorage) {
         );
     }
 
+    assert_mixed_keyset_values(storage).await;
+    assert_literal_keyset_values(storage).await;
+}
+
+async fn assert_mixed_keyset_values(storage: &ScopedStorage) {
+    let docs = storage.documents();
     let mixed = unique("keyset_mixed_values");
     for (id, body) in [
         ("a", json!({})),
@@ -528,7 +534,10 @@ async fn keyset_ties_follow_total_sort_order(storage: &ScopedStorage) {
         }
         assert_eq!(ids, expected, "nullable mixed JSON ordering is stable");
     }
+}
 
+async fn assert_literal_keyset_values(storage: &ScopedStorage) {
+    let docs = storage.documents();
     let literals = unique("keyset_literal_values");
     for (id, value) in [
         ("$$ID", "$$ROOT"),
