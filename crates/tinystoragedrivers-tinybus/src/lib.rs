@@ -4,6 +4,19 @@
 //! It never opens a backend or declares schema. Native storage owns atomic
 //! conditions, validation, leases and generations. Native messages and source
 //! chains never cross this wire boundary.
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use tinybus::module::HostCallbackBinding;
+//! use tinystoragedrivers_core::DocumentStore;
+//! use tinystoragedrivers_tinybus::serve_collection;
+//! # async fn register(binding: &HostCallbackBinding, store: Arc<dyn DocumentStore>) -> tinybus::Result<()> {
+//! // The host already selected this store's scope, admission and schema.
+//! serve_collection(binding, "/documents".parse()?, store, "learned").await?;
+//! // Load the verified module with this same binding before it can call back.
+//! # Ok(())
+//! # }
+//! ```
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
