@@ -41,6 +41,14 @@ its client, host adapter and shared conformance pass.
    across compiled module boundaries. Run fmt, clippy, all-feature build/tests,
    docs and coverage. Update README and public docs alongside each step.
 
+## Progress
+
+Step 1 (Documents) and the Streams, Blobs and Secrets wire contracts plus
+size limits and `CONTRACT_VERSION` are in `tinystoragedrivers-bus`. Clients,
+host servers, conformance over the bus, the S3 feature and the port gaps
+(Vector spec, FTS reindex, keyset cursors, TTL, claim/CAS, blob tree view) are
+later slices of tinyhumansai/openhuman#7635.
+
 ## Current step
 
 Step 1 introduces data types and tests only. It does not claim that the
