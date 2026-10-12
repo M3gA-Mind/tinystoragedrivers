@@ -647,7 +647,10 @@ async fn live_existing_schema_validation_refuses_retired_generation_after_purge(
         .await
         .unwrap();
     cleanup_fixture(&storage, &prefix).await;
-    assert_eq!(outcome.err().map(|e| e.kind()), Some(ErrorKind::Fenced));
+    assert_eq!(
+        outcome.err().map(|e| e.kind()),
+        Some(ErrorKind::ScopeGenerationRejected)
+    );
 }
 
 #[tokio::test]

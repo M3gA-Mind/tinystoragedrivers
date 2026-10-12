@@ -120,7 +120,7 @@ pub trait ScopePurge: Send + Sync + fmt::Debug {
     /// Erase the bound scope and revoke its old handles.
     ///
     /// # Errors
-    /// Unsupported guarantees, stale generation or native fence, invalid input,
+    /// Unsupported guarantees, rejected scope generation or native fence, invalid input,
     /// or backend failure. Partial staged failures never return Complete.
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt>;
     /// Read the bound scope's durable receipt without starting a new reset.

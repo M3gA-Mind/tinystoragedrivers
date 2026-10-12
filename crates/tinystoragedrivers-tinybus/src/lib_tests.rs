@@ -275,6 +275,10 @@ fn every_native_failure_category_has_a_content_free_wire_mapping() {
         (ErrorKind::Unavailable, StorageKind::Unavailable),
         (ErrorKind::Backend, StorageKind::Backend),
         (ErrorKind::Fenced, StorageKind::Fenced),
+        (
+            ErrorKind::ScopeGenerationRejected,
+            StorageKind::ScopeGenerationRejected,
+        ),
     ] {
         let error = StorageError::new(kind, "private credential and user document")
             .with_source(std::io::Error::other("private backend cause"));
@@ -282,6 +286,76 @@ fn every_native_failure_category_has_a_content_free_wire_mapping() {
         assert_eq!(failure.kind, expected);
         assert!(!serde_json::to_string(&failure).unwrap().contains("private"));
     }
+}
+
+#[tokio::test]
+async fn generation_rejection_wire_mapping_does_not_claim_native_lease_loss() {
+    use tinystoragedrivers_core::{
+        Fence, GuardDatabase, Precondition, PurgeMode, PurgeRequest, PurgeStatus,
+    };
+    let storage = MemoryStorage::new();
+    let owner = Scope::new("generation_owner").unwrap();
+    let guard_scope = Scope::new("generation_guard").unwrap();
+    let guard = storage.for_scope(&guard_scope).unwrap();
+    guard
+        .documents()
+        .put("leases", "active", json!({"epoch":1}), Precondition::None)
+        .await
+        .unwrap();
+    let fence = Fence::epoch(guard_scope, "leases", "active", "epoch", 1);
+    let old = storage
+        .for_scope_fenced_in_database(&owner, &fence, &GuardDatabase::Default)
+        .unwrap();
+    let (_binding, captured) = service(old.documents().clone(), "learned").await;
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "private-reset-operation".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.status, PurgeStatus::Complete);
+    let fresh = storage
+        .for_scope_fenced_in_database_generation(
+            &owner,
+            receipt.generation,
+            &fence,
+            &GuardDatabase::Default,
+        )
+        .unwrap();
+    fresh
+        .documents()
+        .put(
+            "learned",
+            "index",
+            json!({"private":"stored payload"}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let wire = captured
+        .dispatch(&"Get".parse().unwrap(), json!([{"document_id":"index"}]))
+        .await
+        .unwrap();
+    let failure = serde_json::from_value::<Outcome<Option<Versioned>>>(wire.clone())
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(wire, json!({"Err":{"kind":failure.kind}}));
+    assert!(!wire.to_string().contains("private"));
+    assert!(
+        fresh
+            .documents()
+            .get("learned", "index")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(failure.kind, StorageKind::ScopeGenerationRejected);
+    assert_ne!(
+        failure.kind,
+        StorageKind::Fenced,
+        "captured retired generation must not report loss of its still-valid native lease"
+    );
 }
 
 #[tokio::test]

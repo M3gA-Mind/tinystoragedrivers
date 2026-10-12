@@ -397,11 +397,11 @@ async fn retired_generation_never_uses_a_cached_dek_or_replacement_secret() {
         .unwrap();
     assert_eq!(
         keys.data_key_async(&scope).await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         secret.get("token").await.unwrap_err().kind(),
-        ErrorKind::Fenced
+        ErrorKind::ScopeGenerationRejected
     );
     keys.invalidate(&scope).unwrap();
 }
