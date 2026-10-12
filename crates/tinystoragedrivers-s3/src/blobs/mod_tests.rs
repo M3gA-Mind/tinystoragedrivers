@@ -462,7 +462,7 @@ async fn blob_lifetimes_follow_the_clock_and_are_stored_as_object_metadata() {
     assert!(blobs.head("k").await.unwrap().is_none());
     assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
     assert!(blobs.get_stream("k").await.unwrap().is_none());
-    assert!(blobs.list("").await.unwrap().is_empty());
+    assert_eq!(blobs.list("").await.unwrap().len(), 0);
     assert!(!blobs.delete("k").await.unwrap());
     assert!(
         objects.head(&blobs.path("k").unwrap()).await.is_err(),

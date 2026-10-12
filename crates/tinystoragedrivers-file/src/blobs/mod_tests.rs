@@ -169,7 +169,7 @@ async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
     assert!(blobs.get("k").await.unwrap().is_none());
     assert!(blobs.head("k").await.unwrap().is_none());
     assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
-    assert!(blobs.list("").await.unwrap().is_empty());
+    assert_eq!(blobs.list("").await.unwrap().len(), 0);
     assert!(data.exists(), "reads leave reclamation to the next write");
     assert!(
         !blobs.delete("k").await.unwrap(),
