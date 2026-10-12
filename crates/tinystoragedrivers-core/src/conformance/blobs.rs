@@ -324,6 +324,13 @@ async fn expiry(storage: &ScopedStorage) {
         [4]
     );
 
+    expiry_streamed(storage, &key).await;
+}
+
+/// The streamed form and a lapsing lifetime; removes `key` when done.
+async fn expiry_streamed(storage: &ScopedStorage, key: &str) {
+    let blobs = storage.blobs();
+    let day = Duration::from_secs(86_400);
     // The streamed form honours the same lifetimes.
     let streamed = format!("{}/stream.bin", unique("ttl"));
     let meta = ok(
@@ -366,7 +373,7 @@ async fn expiry(storage: &ScopedStorage) {
     std::thread::sleep(Duration::from_millis(400));
     assert_absent(storage, &brief, "lapsed lifetime").await;
 
-    for left in [&key, &streamed] {
+    for left in [key, streamed.as_str()] {
         ok(blobs.delete(left).await, "cleanup");
     }
 }
