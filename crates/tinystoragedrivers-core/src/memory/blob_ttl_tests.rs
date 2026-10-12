@@ -30,7 +30,7 @@ async fn a_blob_expires_exactly_when_its_lifetime_has_elapsed() {
     assert!(blobs.head("k").await.unwrap().is_none());
     assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
     assert!(blobs.get_stream("k").await.unwrap().is_none());
-    assert!(blobs.list("").await.unwrap().is_empty());
+    assert_eq!(blobs.list("").await.unwrap().len(), 0);
     assert!(!blobs.delete("k").await.unwrap());
 }
 
