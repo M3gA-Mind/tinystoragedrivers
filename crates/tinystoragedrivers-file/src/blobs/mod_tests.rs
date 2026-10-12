@@ -96,6 +96,7 @@ fn a_missing_data_file_has_no_meta() {
     let sidecar = Sidecar {
         key: "k".into(),
         content_type: None,
+        expires_at_ms: None,
     };
     assert!(
         meta(&dir.path().join("missing"), sidecar.clone())
@@ -128,4 +129,70 @@ async fn a_symlinked_payload_is_refused_for_whole_and_ranged_reads() {
         blobs.get_range("a", 0..2).await.unwrap_err().kind(),
         ErrorKind::Backend
     );
+}
+
+fn open_driven() -> (
+    tempfile::TempDir,
+    FileStorage,
+    Arc<dyn BlobStore>,
+    Arc<std::sync::atomic::AtomicU64>,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(10_000));
+    let reading = Arc::clone(&now);
+    let storage =
+        FileStorage::open_with_clock(dir.path(), Arc::new(move || reading.load(Ordering::SeqCst)))
+            .unwrap();
+    let blobs = Arc::clone(storage.for_scope(&Scope::local()).unwrap().blobs());
+    (dir, storage, blobs, now)
+}
+
+#[tokio::test]
+async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
+    use std::sync::atomic::Ordering;
+    let (_dir, storage, blobs, now) = open_driven();
+    blobs
+        .put_expiring("k", vec![1, 2, 3], Some("a/b"), Duration::from_millis(250))
+        .await
+        .unwrap();
+    let (data, meta) = files(&storage, "k");
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    assert_eq!(sidecar["expires_at_ms"], 10_250);
+
+    now.store(10_249, Ordering::SeqCst);
+    assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [1, 2, 3]);
+    assert_eq!(blobs.list("").await.unwrap().len(), 1);
+
+    now.store(10_250, Ordering::SeqCst);
+    assert!(blobs.get("k").await.unwrap().is_none());
+    assert!(blobs.head("k").await.unwrap().is_none());
+    assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
+    assert_eq!(blobs.list("").await.unwrap().len(), 0);
+    assert!(data.exists(), "reads leave reclamation to the next write");
+    assert!(
+        !blobs.delete("k").await.unwrap(),
+        "a lapsed blob is not deleted"
+    );
+    assert!(
+        !data.exists() && !meta.exists(),
+        "delete reclaims the files"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_put_clears_the_deadline() {
+    use std::sync::atomic::Ordering;
+    let (_dir, storage, blobs, now) = open_driven();
+    blobs
+        .put_expiring("k", vec![1], None, Duration::from_millis(10))
+        .await
+        .unwrap();
+    blobs.put("k", vec![2], None).await.unwrap();
+    let (_, meta) = files(&storage, "k");
+    let sidecar: serde_json::Value = serde_json::from_slice(&std::fs::read(meta).unwrap()).unwrap();
+    assert!(sidecar.get("expires_at_ms").is_none());
+    now.store(u64::MAX / 2, Ordering::SeqCst);
+    assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [2]);
 }

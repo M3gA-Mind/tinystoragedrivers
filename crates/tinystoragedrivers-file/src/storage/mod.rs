@@ -60,7 +60,8 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::ConditionalStreamAppend)
     .with(Capability::CollectionEnumeration)
     .with(Capability::ExistingSchema)
-    .with(Capability::CollectionValidation);
+    .with(Capability::CollectionValidation)
+    .with(Capability::BlobTtl);
 
 fn system_clock() -> u64 {
     SystemTime::now()

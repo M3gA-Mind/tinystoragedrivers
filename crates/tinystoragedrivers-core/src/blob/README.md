@@ -20,3 +20,13 @@ Fencing support is separate. A driver advertising streaming or presigned
 URLs does not imply it can fence blob writes atomically with document writes.
 An object-store adapter should publish blobs first, fence the document
 reference afterward, and collect orphaned objects.
+
+## Lifetimes
+
+put_expiring and put_stream_expiring write a blob that reads as absent once
+its lifetime, counted from the write, has elapsed. Every read (get, get_range,
+head, get_stream, list) honours it, a zero lifetime is expired on arrival, and a
+plain put of the key clears any lifetime. Only handles reporting BlobTtl accept
+a lifetime; the default refuses with Unsupported(BlobTtl). Reclaiming an expired
+blob's storage is the driver's choice, so callers rely only on its being
+invisible.

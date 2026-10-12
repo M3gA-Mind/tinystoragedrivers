@@ -18,9 +18,11 @@ fn blob_messages_roundtrip() {
         key: "k".into(),
         len: 1 << 30,
         content_type: None,
+        ttl_ms: Some(60_000),
     };
     let wire = serde_json::to_value(&put).unwrap();
     assert!(wire.get("content_type").is_none());
+    assert_eq!(wire["ttl_ms"], 60_000);
     assert_eq!(
         serde_json::from_value::<PutBlobStreamRequest>(wire).unwrap(),
         put
@@ -37,6 +39,7 @@ fn blob_messages_roundtrip() {
     );
     let caps = BlobCapabilities {
         presigned_urls: true,
+        ttl: true,
         max_key_len: 1024,
     };
     let wire = serde_json::to_value(caps).unwrap();
@@ -65,4 +68,18 @@ fn blob_selectors_are_fixed() {
     assert_eq!(BLOBS_SELECTORS.len(), 11);
     assert!(is_blobs_selector("GetRange"));
     assert!(!is_blobs_selector("Arbitrary"));
+}
+
+#[test]
+fn a_write_without_a_lifetime_omits_it_and_old_capabilities_default_it_off() {
+    let put = PutBlobRequest {
+        key: "k".into(),
+        bytes: vec![1],
+        content_type: None,
+        ttl_ms: None,
+    };
+    assert!(serde_json::to_value(&put).unwrap().get("ttl_ms").is_none());
+    let caps: BlobCapabilities =
+        serde_json::from_value(json!({"presigned_urls": false, "max_key_len": 7})).unwrap();
+    assert!(!caps.ttl, "a server from before lifetimes reports none");
 }

@@ -39,6 +39,7 @@ fn all_holds_every_capability() {
             Capability::ScopePurge,
             Capability::AtomicScopePurge,
             Capability::Watch,
+            Capability::BlobTtl,
         ]
     );
 }

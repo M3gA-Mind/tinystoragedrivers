@@ -1,9 +1,11 @@
 //! Blob port checks.
 
-use super::{fails, ok, unique};
+use super::{empty, fails, ok, unique};
 use crate::backend::ScopedStorage;
 use crate::blob::{TreeEntry, TreeFile};
 use crate::error::ErrorKind;
+use crate::{BlobReader, Capability};
+use std::time::Duration;
 
 pub(super) async fn run(storage: &ScopedStorage) {
     let blobs = storage.blobs();
@@ -69,6 +71,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
 
     key_limits(storage).await;
     tree(storage).await;
+    expiry(storage).await;
 
     for bad in ["", "/abs", "a//b", "a/../b", "a/./b"] {
         fails(
@@ -212,4 +215,165 @@ async fn tree(storage: &ScopedStorage) {
         "deleting `a` leaves `ab` alone"
     );
     assert_eq!(ok(blobs.delete_tree(&sibling).await, "cleanup"), 1);
+}
+
+fn reader(bytes: &[u8]) -> BlobReader {
+    Box::pin(std::io::Cursor::new(bytes.to_vec()))
+}
+
+/// Every read of `key` finds nothing, and `list` omits it.
+async fn assert_absent(storage: &ScopedStorage, key: &str, check: &str) {
+    let blobs = storage.blobs();
+    assert!(ok(blobs.get(key).await, check).is_none(), "{check}: get");
+    assert!(ok(blobs.head(key).await, check).is_none(), "{check}: head");
+    assert!(
+        ok(blobs.get_range(key, 0..1).await, check).is_none(),
+        "{check}: get_range"
+    );
+    assert!(
+        ok(blobs.get_stream(key).await, check).is_none(),
+        "{check}: get_stream"
+    );
+    let listed = ok(blobs.list(key).await, check);
+    empty(&listed, &format!("{check}: list"));
+}
+
+/// Blob lifetimes: an expired blob reads absent everywhere, a plain write
+/// clears a lifetime, and a driver without the capability refuses.
+async fn expiry(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    let key = format!("{}/ttl.bin", unique("ttl"));
+    let day = Duration::from_secs(86_400);
+    if !blobs.capabilities().contains(Capability::BlobTtl) {
+        fails(
+            blobs.put_expiring(&key, vec![1], None, day).await,
+            ErrorKind::Unsupported(Capability::BlobTtl),
+            "put_expiring without the capability",
+        );
+        fails(
+            blobs
+                .put_stream_expiring(&key, reader(&[1]), 1, None, day)
+                .await,
+            ErrorKind::Unsupported(Capability::BlobTtl),
+            "put_stream_expiring without the capability",
+        );
+        assert_absent(storage, &key, "refused write stored nothing").await;
+        return;
+    }
+
+    // A lifetime far away leaves the blob readable everywhere.
+    let meta = ok(
+        blobs
+            .put_expiring(&key, b"hello world".to_vec(), Some("text/plain"), day)
+            .await,
+        "put_expiring",
+    );
+    assert_eq!(
+        (meta.len, meta.content_type.as_deref()),
+        (11, Some("text/plain"))
+    );
+    assert_eq!(ok(blobs.head(&key).await, "head live"), Some(meta.clone()));
+    assert_eq!(
+        ok(blobs.get(&key).await, "get live").expect("live").bytes,
+        b"hello world"
+    );
+    assert_eq!(
+        ok(blobs.get_range(&key, 6..11).await, "range live").as_deref(),
+        Some(&b"world"[..])
+    );
+    assert!(ok(blobs.get_stream(&key).await, "stream live").is_some());
+    assert_eq!(ok(blobs.list(&key).await, "list live"), [meta]);
+
+    // A zero lifetime is expired on arrival, and replaces what was there.
+    let meta = ok(
+        blobs
+            .put_expiring(&key, vec![9], None, Duration::ZERO)
+            .await,
+        "zero lifetime",
+    );
+    assert_eq!(meta.len, 1, "the write still reports what it stored");
+    assert_absent(storage, &key, "zero lifetime").await;
+    assert!(
+        !ok(blobs.delete(&key).await, "delete expired"),
+        "an expired blob does not exist"
+    );
+
+    // A plain write after an expiring one is permanent.
+    ok(
+        blobs.put_expiring(&key, vec![1], None, day).await,
+        "expiring again",
+    );
+    ok(blobs.put(&key, vec![2, 2], None).await, "plain overwrite");
+    assert_eq!(
+        ok(blobs.get(&key).await, "plain after expiring")
+            .expect("permanent")
+            .bytes,
+        [2, 2]
+    );
+    // And an expired key can be written again.
+    ok(
+        blobs
+            .put_expiring(&key, vec![3], None, Duration::ZERO)
+            .await,
+        "expire the permanent blob",
+    );
+    assert_absent(storage, &key, "replaced by an expired write").await;
+    ok(blobs.put(&key, vec![4], None).await, "reuse expired key");
+    assert_eq!(
+        ok(blobs.get(&key).await, "reused").expect("live").bytes,
+        [4]
+    );
+
+    expiry_streamed(storage, &key).await;
+}
+
+/// The streamed form and a lapsing lifetime; removes `key` when done.
+async fn expiry_streamed(storage: &ScopedStorage, key: &str) {
+    let blobs = storage.blobs();
+    let day = Duration::from_secs(86_400);
+    // The streamed form honours the same lifetimes.
+    let streamed = format!("{}/stream.bin", unique("ttl"));
+    let meta = ok(
+        blobs
+            .put_stream_expiring(&streamed, reader(b"abc"), 3, Some("x/y"), day)
+            .await,
+        "put_stream_expiring",
+    );
+    assert_eq!((meta.len, meta.content_type.as_deref()), (3, Some("x/y")));
+    assert_eq!(
+        ok(blobs.get(&streamed).await, "streamed live")
+            .expect("live")
+            .bytes,
+        b"abc"
+    );
+    fails(
+        blobs
+            .put_stream_expiring(&streamed, reader(b"ab"), 3, None, day)
+            .await,
+        ErrorKind::InvalidInput,
+        "a short body fails before publishing",
+    );
+    ok(
+        blobs
+            .put_stream_expiring(&streamed, reader(b"abc"), 3, None, Duration::ZERO)
+            .await,
+        "streamed zero lifetime",
+    );
+    assert_absent(storage, &streamed, "streamed zero lifetime").await;
+
+    // A short real lifetime lapses. Only the direction is asserted: once the
+    // lifetime has elapsed the blob is gone, however late the read.
+    let brief = format!("{}/brief.bin", unique("ttl"));
+    ok(
+        blobs
+            .put_expiring(&brief, vec![1], None, Duration::from_millis(50))
+            .await,
+        "brief lifetime",
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_absent(storage, &brief, "lapsed lifetime").await;
+
+    for left in [key, streamed.as_str()] {
+        ok(blobs.delete(left).await, "cleanup");
+    }
 }

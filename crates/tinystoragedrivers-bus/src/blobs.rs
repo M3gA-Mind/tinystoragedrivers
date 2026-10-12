@@ -4,6 +4,16 @@
 //! use `PutStream` / `GetStream`, whose bytes ride a `TinyBus` stream passed as
 //! a separate call argument bound to the caller grant and one operation. The
 //! messages here carry only metadata for those calls.
+//!
+//! Over a real bus the two streamed calls are:
+//!
+//! * `PutStream`: positional arguments `[PutBlobStreamRequest, StreamRef]`.
+//!   The caller opens the stream on the host, writes exactly `len` bytes while
+//!   the call is outstanding, and the reply is a [`BlobInfo`].
+//! * `GetStream`: positional arguments `[BlobKeyRequest]`. The reply is
+//!   `null` for an absent blob, otherwise `[BlobStreamHead, StreamRef]`: the
+//!   host opens the stream on the *caller* and writes the body, which the caller
+//!   accepts by the reference.
 use serde::{Deserialize, Serialize};
 
 /// Blobs object name under [`crate::STORAGE_INTERFACE`].
@@ -52,6 +62,11 @@ pub struct PutBlobRequest {
     /// MIME type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// Lifetime in milliseconds from the write; absent for a permanent blob.
+    /// A server whose blob handle lacks `ttl` in [`BlobCapabilities`] refuses
+    /// the write as `Unsupported`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
 }
 /// Streamed write metadata; the body is a `TinyBus` stream argument of exactly
 /// `len` bytes. A mismatch fails before the object is published.
@@ -65,6 +80,9 @@ pub struct PutBlobStreamRequest {
     /// MIME type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// Lifetime in milliseconds from the write; see [`PutBlobRequest::ttl_ms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
 }
 /// Request addressing one blob (`Get`, `GetStream`, `Head`, `Delete`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +153,9 @@ impl std::fmt::Debug for PresignedUrl {
 pub struct BlobCapabilities {
     /// Whether `PresignGet` / `PresignPut` are available.
     pub presigned_urls: bool,
+    /// Whether writes may carry `ttl_ms` (native blob expiry).
+    #[serde(default)]
+    pub ttl: bool,
     /// Maximum logical key length in UTF-8 bytes.
     pub max_key_len: usize,
 }

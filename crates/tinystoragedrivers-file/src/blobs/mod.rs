@@ -8,6 +8,11 @@
 //! the sidecar first. The sidecar decides existence, so a crash mid-put leaves
 //! either the old blob, or (when replacing) the new bytes under the old
 //! content type, never a blob without bytes.
+//!
+//! A blob written with a lifetime records `expires_at_ms` in its sidecar (the
+//! database clock, milliseconds since the epoch). From that instant every read
+//! treats it as absent; its files are removed by the next `delete` or write of
+//! the key.
 
 use crate::storage::Fencing;
 
@@ -15,11 +20,13 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Result, Scope, StorageError, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
+    validate_blob_key,
 };
 
 use crate::documents::guard;
@@ -38,6 +45,15 @@ struct Sidecar {
     key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content_type: Option<String>,
+    /// The instant the blob stops existing; absent for a permanent blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at_ms: Option<u64>,
+}
+
+impl Sidecar {
+    fn expired(&self, now: u64) -> bool {
+        self.expires_at_ms.is_some_and(|at| at <= now)
+    }
 }
 
 /// File-backed blobs bound to one scope.
@@ -53,6 +69,8 @@ pub struct FileBlobs {
 struct Paths {
     data: PathBuf,
     meta: PathBuf,
+    /// The database clock when the operation started.
+    now: u64,
 }
 
 impl FileBlobs {
@@ -100,6 +118,7 @@ impl FileBlobs {
                     let paths = Paths {
                         data: dir.join(&stem),
                         meta: dir.join(format!("{stem}{META_SUFFIX}")),
+                        now: db.now(),
                     };
                     work(&paths, &key)
                 },
@@ -111,6 +130,7 @@ impl FileBlobs {
 /// The blob's metadata, `None` when it does not exist.
 fn head(paths: &Paths, key: &str) -> Result<Option<BlobMeta>> {
     match read_json::<Sidecar>(&paths.meta)? {
+        Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now) => Ok(None),
         Some(sidecar) if sidecar.key == key => meta(&paths.data, sidecar),
         Some(_) => Err(collision()),
         None => Ok(None),
@@ -143,11 +163,21 @@ fn collision() -> StorageError {
     StorageError::backend("file storage name hash collision; refusing to touch another blob")
 }
 
-#[async_trait]
-impl BlobStore for FileBlobs {
-    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+impl FileBlobs {
+    async fn store(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Option<Duration>,
+    ) -> Result<BlobMeta> {
         let content_type = content_type.map(str::to_owned);
         self.write(key, move |paths, key| {
+            let expires_at_ms = ttl.map(|ttl| {
+                paths
+                    .now
+                    .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+            });
             if let Some(existing) = read_json::<Sidecar>(&paths.meta)?
                 && existing.key != key
             {
@@ -157,6 +187,7 @@ impl BlobStore for FileBlobs {
             let sidecar = Sidecar {
                 key: key.to_owned(),
                 content_type,
+                expires_at_ms,
             };
             write_json(&paths.meta, &sidecar)?;
             Ok(BlobMeta {
@@ -166,6 +197,27 @@ impl BlobStore for FileBlobs {
             })
         })
         .await
+    }
+}
+
+#[async_trait]
+impl BlobStore for FileBlobs {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none().with(Capability::BlobTtl)
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None).await
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, Some(ttl)).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
@@ -210,12 +262,17 @@ impl BlobStore for FileBlobs {
 
     async fn delete(&self, key: &str) -> Result<bool> {
         self.write(key, |paths, key| {
-            if head(paths, key)?.is_none() {
+            // A lapsed blob is not there to delete, but its files go too.
+            let lapsed = matches!(
+                read_json::<Sidecar>(&paths.meta)?,
+                Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now)
+            );
+            if !lapsed && head(paths, key)?.is_none() {
                 return Ok(false);
             }
             remove_optional(&paths.meta)?;
             remove_optional(&paths.data)?;
-            Ok(true)
+            Ok(!lapsed)
         })
         .await
     }
@@ -225,12 +282,13 @@ impl BlobStore for FileBlobs {
         self.db
             .run(move |db| {
                 let dir = Self::dir(db, &scope);
+                let now = db.now();
                 let mut out = Vec::new();
                 for path in files_with_suffix(&dir, META_SUFFIX)? {
                     let Some(sidecar) = read_json::<Sidecar>(&path)? else {
                         continue;
                     };
-                    if !sidecar.key.starts_with(&prefix) {
+                    if !sidecar.key.starts_with(&prefix) || sidecar.expired(now) {
                         continue;
                     }
                     let data = dir.join(file_stem(&sidecar.key));

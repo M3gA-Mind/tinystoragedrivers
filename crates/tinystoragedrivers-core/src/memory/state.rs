@@ -53,7 +53,8 @@ pub(super) struct DbState {
     pub(super) purge_receipts: BTreeMap<ScopedKey, crate::ScopeGeneration>,
     pub(super) docs: BTreeMap<ScopedKey, BTreeMap<String, StoredDoc>>,
     pub(super) streams: BTreeMap<ScopedKey, StoredStream>,
-    pub(super) blobs: BTreeMap<ScopedKey, (BlobMeta, Vec<u8>)>,
+    /// Meta, bytes, and the epoch-millisecond instant a blob expires at.
+    pub(super) blobs: BTreeMap<ScopedKey, (BlobMeta, Vec<u8>, Option<u64>)>,
     /// The last version of every removed document, so a recreated id
     /// continues its version sequence and a stale compare-and-swap from
     /// before the removal still fails.

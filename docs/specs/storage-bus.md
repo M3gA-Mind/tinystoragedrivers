@@ -100,7 +100,7 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 2` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 3` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
@@ -159,6 +159,50 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
 `WatchOpen` replies with `WatchOpenResponse { watch_id }`; `Capabilities`
 replies with `CapabilitiesReply`. Adding that selector made the contract
 version 2.
+
+### Blob lifetimes
+
+`BlobStore::put_expiring` and `put_stream_expiring` write a blob with a
+lifetime counted from the write (`Capability::BlobTtl`). From that instant
+every read (`get`, `get_range`, `head`, `get_stream`, `list`) treats the blob
+as absent; a zero lifetime is expired on arrival; a plain `put` of the key
+clears the lifetime; reclaiming the storage is the driver's business. The
+memory, SQLite, file and S3 drivers provide it (S3 as `x-amz-meta-` user
+metadata, so `list` already pays one HEAD per object); MongoDB does not and
+answers `Unsupported(BlobTtl)`, which the conformance suite asserts. On the
+wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
+`BlobCapabilities` gains `ttl`; adding them made the contract version 3. A
+SQLite database written by an earlier release gains the `expires_at_ms` column
+on the next migrating open; a read-only `existing_schema` open refuses the old
+layout like any other schema drift.
+
+## Real TinyBus transport
+
+`tinystoragedrivers-busproxy` is the `TinyBus` half that `-client` leaves out:
+
+- **Module side.** `connect_storage(connection)` returns the module's
+  `BusStorage` over a `BusTransport`: ordinary calls are proxy calls to
+  `/ai/tinyhumans/tinystorage/<Object>` (`Secrets` on the confidential route),
+  `PutStream` opens a bus stream on the host and writes the body in
+  `BLOB_STREAM_CHUNK_BYTES` chunks while the call is outstanding, `GetStream`
+  accepts the stream the host opens on the caller, and watch invalidations
+  arrive as `WatchChanged` signals.
+- **Host side.** `serve(connection, endpoint)` registers the four objects,
+  claims `ai.tinyhumans.tinystorage.Storage` and hands every call, with the
+  broker-authenticated sender, to a `StorageEndpoint`. The endpoint owns the
+  decisions (who the caller is, scope, grant, fence, audit);
+  `PerCallerEndpoint` is the ready-made one that binds each caller to its own
+  `StorageServer`. Failures cross as `MethodFailed` errors named
+  `ai.tinyhumans.tinystorage.Error.Denied` (a content-free label) or
+  `...Error.Storage` (a snake_case `StorageKind`).
+- **Signals.** Watch ids are minted per caller binding, so a host emits each
+  caller's signals on `/ai/tinyhumans/tinystorage/Watch/<caller>` (derived from
+  the caller's unique name) and a module accepts them only from the host's
+  unique name.
+
+Known limits of the bus underneath: `Connection::accept_stream` does not bind a
+stream to the peer that opened it, and a signal is broadcast to every matching
+subscriber. Both belong in `tinybus`; the crate documents them.
 
 ## Acceptance
 

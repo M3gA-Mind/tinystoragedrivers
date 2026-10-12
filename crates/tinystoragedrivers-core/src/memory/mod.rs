@@ -348,3 +348,7 @@ mod schema_tests;
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod generation_tests;
+
+#[cfg(test)]
+#[path = "blob_ttl_tests.rs"]
+mod blob_ttl_tests;

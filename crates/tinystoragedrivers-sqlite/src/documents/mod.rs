@@ -47,6 +47,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::CollectionEnumeration)
         .with(Capability::ExistingSchema)
         .with(Capability::CollectionValidation)
+        .with(Capability::BlobTtl)
 }
 
 /// SQLite documents bound to one scope.

@@ -35,6 +35,74 @@ impl BusBlobs {
             .call(Object::Blobs, selector, request, unsupported_as)
             .await
     }
+
+    /// An inline write, or a streamed one when the body is over the inline cap.
+    /// A write with a lifetime on a server without `ttl` fails before any I/O.
+    async fn write(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.require_ttl(ttl_ms)?;
+        if bytes.len() as u64 > inline_limit() {
+            let len = bytes.len() as u64;
+            return self
+                .write_stream(
+                    key,
+                    Box::pin(std::io::Cursor::new(bytes)),
+                    len,
+                    content_type,
+                    ttl_ms,
+                )
+                .await;
+        }
+        let request = wire::PutBlobRequest {
+            key: key.to_owned(),
+            bytes,
+            content_type: content_type.map(str::to_owned),
+            ttl_ms,
+        };
+        Ok(meta(
+            self.call("Put", &request, ttl_ms.map(|_| Capability::BlobTtl))
+                .await?,
+        ))
+    }
+
+    async fn write_stream(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl_ms: Option<u64>,
+    ) -> Result<BlobMeta> {
+        self.require_ttl(ttl_ms)?;
+        let head = wire::PutBlobStreamRequest {
+            key: key.to_owned(),
+            len,
+            content_type: content_type.map(str::to_owned),
+            ttl_ms,
+        };
+        let reply = self
+            .wire
+            .transport()
+            .put_blob_stream(head, reader)
+            .await
+            .map_err(|error| wire_error(error, ttl_ms.map(|_| Capability::BlobTtl)))?;
+        Ok(meta(serde_json::from_value(reply)?))
+    }
+
+    fn require_ttl(&self, ttl_ms: Option<u64>) -> Result<()> {
+        if ttl_ms.is_some() && !self.server.ttl {
+            return Err(StorageError::unsupported(
+                Capability::BlobTtl,
+                "the storage host's blob handle cannot expire blobs",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn meta(info: wire::BlobInfo) -> BlobMeta {
@@ -51,6 +119,11 @@ fn key(key: &str) -> wire::BlobKeyRequest {
     }
 }
 
+/// A lifetime on the wire: whole milliseconds, saturating.
+fn ttl_ms(ttl: Duration) -> u64 {
+    u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn inline_limit() -> u64 {
     MAX_INLINE_BLOB_BYTES as u64
 }
@@ -62,32 +135,29 @@ impl BlobStore for BusBlobs {
     }
 
     fn capabilities(&self) -> Capabilities {
-        let capabilities = Capabilities::none().with(Capability::StreamingBlobs);
+        let mut capabilities = Capabilities::none().with(Capability::StreamingBlobs);
         if self.server.presigned_urls {
-            capabilities.with(Capability::PresignedUrls)
-        } else {
-            capabilities
+            capabilities = capabilities.with(Capability::PresignedUrls);
         }
+        if self.server.ttl {
+            capabilities = capabilities.with(Capability::BlobTtl);
+        }
+        capabilities
     }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        if bytes.len() as u64 > inline_limit() {
-            let len = bytes.len() as u64;
-            return self
-                .put_stream(
-                    key,
-                    Box::pin(std::io::Cursor::new(bytes)),
-                    len,
-                    content_type,
-                )
-                .await;
-        }
-        let request = wire::PutBlobRequest {
-            key: key.to_owned(),
-            bytes,
-            content_type: content_type.map(str::to_owned),
-        };
-        Ok(meta(self.call("Put", &request, None).await?))
+        self.write(key, bytes, content_type, None).await
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.write(key, bytes, content_type, Some(ttl_ms(ttl)))
+            .await
     }
 
     async fn put_stream(
@@ -97,18 +167,20 @@ impl BlobStore for BusBlobs {
         len: u64,
         content_type: Option<&str>,
     ) -> Result<BlobMeta> {
-        let head = wire::PutBlobStreamRequest {
-            key: key.to_owned(),
-            len,
-            content_type: content_type.map(str::to_owned),
-        };
-        let reply = self
-            .wire
-            .transport()
-            .put_blob_stream(head, reader)
+        self.write_stream(key, reader, len, content_type, None)
             .await
-            .map_err(|error| wire_error(error, None))?;
-        Ok(meta(serde_json::from_value(reply)?))
+    }
+
+    async fn put_stream_expiring(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.write_stream(key, reader, len, content_type, Some(ttl_ms(ttl)))
+            .await
     }
 
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
