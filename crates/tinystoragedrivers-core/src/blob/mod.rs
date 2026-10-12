@@ -114,6 +114,72 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         self.put(key, bytes, content_type).await
     }
 
+    /// Store `bytes` under `key` with a lifetime, replacing any previous blob.
+    ///
+    /// `ttl` runs from the write. Once it has passed the blob reads as absent
+    /// through every read (`get`, `get_range`, `head`, `get_stream`, `list`),
+    /// and a later `put` of the same key is an ordinary replacement. A zero
+    /// `ttl` is already expired: the write succeeds and the blob is never
+    /// visible. A plain [`put`](Self::put) of a key clears any lifetime it had.
+    ///
+    /// The driver decides when an expired blob's storage is reclaimed; callers
+    /// may only rely on it being invisible.
+    ///
+    /// # Errors
+    ///
+    /// [`Capability::BlobTtl`] unsupported (the default), an invalid key, or a
+    /// backend error.
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        let _ = (key, bytes, content_type, ttl);
+        Err(StorageError::unsupported(
+            Capability::BlobTtl,
+            "this blob driver cannot expire blobs",
+        ))
+    }
+
+    /// [`put_stream`](Self::put_stream) with a lifetime; see
+    /// [`put_expiring`](Self::put_expiring). The default buffers the body like
+    /// `put_stream` does and calls `put_expiring`.
+    ///
+    /// # Errors
+    ///
+    /// As [`put_stream`](Self::put_stream), or [`Capability::BlobTtl`]
+    /// unsupported.
+    async fn put_stream_expiring(
+        &self,
+        key: &str,
+        mut reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        validate_blob_key(key)?;
+        if !self.capabilities().contains(Capability::BlobTtl) {
+            return Err(StorageError::unsupported(
+                Capability::BlobTtl,
+                "this blob driver cannot expire blobs",
+            ));
+        }
+        let mut bytes = Vec::new();
+        (&mut reader)
+            .take(len.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| StorageError::backend("blob reader failed").with_source(error))?;
+        if bytes.len() as u64 != len {
+            return Err(StorageError::invalid_input(
+                "blob reader length differs from declared length",
+            ));
+        }
+        self.put_expiring(key, bytes, content_type, ttl).await
+    }
+
     /// Read a blob incrementally. The default wraps the existing buffered getter.
     ///
     /// # Errors

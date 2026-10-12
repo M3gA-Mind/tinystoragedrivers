@@ -3,10 +3,12 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Result, Scope, async_trait, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, async_trait, clamp_range,
+    validate_blob_key,
 };
 
 use crate::connection::Db;
@@ -106,7 +108,63 @@ impl SqliteBlobs {
     fn table(&self) -> String {
         ident(&self.tables.blobs)
     }
+
+    /// Write a blob, optionally with a lifetime counted from now.
+    async fn store(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Option<Duration>,
+    ) -> Result<BlobMeta> {
+        validate_blob_key(key)?;
+        let sql = format!(
+            "INSERT INTO {} (scope, key, content_type, bytes, expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, bytes = excluded.bytes, expires_at_ms = excluded.expires_at_ms",
+            self.table()
+        );
+        let sweep = format!(
+            "DELETE FROM {} WHERE scope = ?1 AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?2",
+            self.table()
+        );
+        let described = BlobMeta {
+            key: key.to_owned(),
+            len: bytes.len() as u64,
+            content_type: content_type.map(str::to_owned),
+        };
+        // A plain write clears any lifetime the key had.
+        let now = now_ms();
+        let expires_at = ttl.map(|ttl| {
+            now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX))
+        });
+        let (scope, row) = (self.scope.clone(), described.clone());
+        self.write(move |conn| {
+            if expires_at.is_some() {
+                // Lapsed blobs are invisible; reclaim them where a lifetime
+                // write already pays for the clock.
+                conn.execute(&sweep, params![scope.as_str(), now])
+                    .map_err(during("sweep expired blobs"))?;
+            }
+            conn.execute(
+                &sql,
+                params![scope.as_str(), row.key, row.content_type, bytes, expires_at],
+            )
+            .map_err(during("put blob"))
+        })
+        .await?;
+        Ok(described)
+    }
 }
+
+/// Milliseconds since the Unix epoch.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Visible rows: no lifetime, or one still in the future.
+const LIVE: &str = "(expires_at_ms IS NULL OR expires_at_ms > ?";
 
 fn meta(key: String, len: i64, content_type: Option<String>) -> BlobMeta {
     BlobMeta {
@@ -118,40 +176,34 @@ fn meta(key: String, len: i64, content_type: Option<String>) -> BlobMeta {
 
 #[async_trait]
 impl BlobStore for SqliteBlobs {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none().with(Capability::BlobTtl)
+    }
+
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
-        let sql = format!(
-            "INSERT INTO {} (scope, key, content_type, bytes) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, bytes = excluded.bytes",
-            self.table()
-        );
-        let described = BlobMeta {
-            key: key.to_owned(),
-            len: bytes.len() as u64,
-            content_type: content_type.map(str::to_owned),
-        };
-        let (scope, row) = (self.scope.clone(), described.clone());
-        self.write(move |conn| {
-            conn.execute(
-                &sql,
-                params![scope.as_str(), row.key, row.content_type, bytes],
-            )
-            .map_err(during("put blob"))
-        })
-        .await?;
-        Ok(described)
+        self.store(key, bytes, content_type, None).await
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, Some(ttl)).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_blob_key(key)?;
         let sql = format!(
-            "SELECT content_type, bytes FROM {} WHERE scope = ?1 AND key = ?2",
+            "SELECT content_type, bytes FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
         );
-        let (scope, key) = (self.scope.clone(), key.to_owned());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.read(move |conn| {
             let row: Option<(Option<String>, Vec<u8>)> = conn
-                .query_row(&sql, params![scope.as_str(), key], |row| {
+                .query_row(&sql, params![scope.as_str(), key, now], |row| {
                     Ok((row.get(0)?, row.get(1)?))
                 })
                 .optional()
@@ -174,14 +226,14 @@ impl BlobStore for SqliteBlobs {
         // blob), so a concurrent replace cannot mix two versions of it.
         clamp_range(&range, 0)?;
         let sql = format!(
-            "SELECT substr(bytes, ?3, ?4) FROM {} WHERE scope = ?1 AND key = ?2",
+            "SELECT substr(bytes, ?3, ?4) FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}5)",
             self.table()
         );
         let start = i64::try_from(range.start.saturating_add(1)).unwrap_or(i64::MAX);
         let count = i64::try_from(range.end - range.start).unwrap_or(i64::MAX);
-        let (scope, key) = (self.scope.clone(), key.to_owned());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.read(move |conn| {
-            conn.query_row(&sql, params![scope.as_str(), key, start, count], |row| {
+            conn.query_row(&sql, params![scope.as_str(), key, start, count, now], |row| {
                 row.get::<_, Vec<u8>>(0)
             })
             .optional()
@@ -193,13 +245,13 @@ impl BlobStore for SqliteBlobs {
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
         validate_blob_key(key)?;
         let sql = format!(
-            "SELECT content_type, length(bytes) FROM {} WHERE scope = ?1 AND key = ?2",
+            "SELECT content_type, length(bytes) FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
         );
-        let (scope, key) = (self.scope.clone(), key.to_owned());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.read(move |conn| {
             let row: Option<(Option<String>, i64)> = conn
-                .query_row(&sql, params![scope.as_str(), key], |row| {
+                .query_row(&sql, params![scope.as_str(), key, now], |row| {
                     Ok((row.get(0)?, row.get(1)?))
                 })
                 .optional()
@@ -211,26 +263,37 @@ impl BlobStore for SqliteBlobs {
 
     async fn delete(&self, key: &str) -> Result<bool> {
         validate_blob_key(key)?;
-        let sql = format!("DELETE FROM {} WHERE scope = ?1 AND key = ?2", self.table());
-        let (scope, key) = (self.scope.clone(), key.to_owned());
+        let sql = format!(
+            "DELETE FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
+            self.table()
+        );
+        let expired = format!(
+            "DELETE FROM {} WHERE scope = ?1 AND key = ?2",
+            self.table()
+        );
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
         self.write(move |conn| {
-            conn.execute(&sql, params![scope.as_str(), key])
-                .map(|removed| removed > 0)
-                .map_err(during("delete blob"))
+            let live = conn
+                .execute(&sql, params![scope.as_str(), key, now])
+                .map_err(during("delete blob"))?;
+            // A lapsed row is not a blob, but its storage can go with the call.
+            conn.execute(&expired, params![scope.as_str(), key])
+                .map_err(during("delete expired blob"))?;
+            Ok(live > 0)
         })
         .await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         let sql = format!(
-            "SELECT key, length(bytes), content_type FROM {} WHERE scope = ?1 ORDER BY key",
+            "SELECT key, length(bytes), content_type FROM {} WHERE scope = ?1 AND {LIVE}2) ORDER BY key",
             self.table()
         );
-        let (scope, prefix) = (self.scope.clone(), prefix.to_owned());
+        let (scope, prefix, now) = (self.scope.clone(), prefix.to_owned(), now_ms());
         self.read(move |conn| {
             let mut statement = conn.prepare(&sql).map_err(during("list blobs"))?;
             let rows: Vec<(String, i64, Option<String>)> = statement
-                .query_map(params![scope.as_str()], |row| {
+                .query_map(params![scope.as_str(), now], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .map_err(during("list blobs"))?

@@ -2,12 +2,15 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use super::MemoryFence;
 use super::state::DbState;
 use super::{Clock, MemoryDb};
+use crate::Capabilities;
+use crate::Capability;
 use crate::blob::{Blob, BlobMeta, BlobStore, clamp_range, validate_blob_key};
 use crate::error::Result;
 use crate::scope::Scope;
@@ -66,11 +69,15 @@ impl MemoryBlobs {
     fn key(&self, key: &str) -> (String, String) {
         (self.scope.as_str().to_owned(), key.to_owned())
     }
-}
 
-#[async_trait]
-impl BlobStore for MemoryBlobs {
-    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+    /// Store a blob that expires `ttl` after the clock's current reading.
+    fn store(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Option<Duration>,
+    ) -> Result<BlobMeta> {
         validate_blob_key(key)?;
         let meta = BlobMeta {
             key: key.to_owned(),
@@ -79,15 +86,68 @@ impl BlobStore for MemoryBlobs {
         };
         let mut state = self.db.lock()?;
         self.guard(&state)?;
-        state.blobs.insert(self.key(key), (meta.clone(), bytes));
+        // A plain write never reads the clock; only a lifetime needs it.
+        let expires_at = ttl.map(|ttl| {
+            (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+        });
+        if let Some(at) = expires_at {
+            // Expired blobs are invisible; drop them where a lifetime write
+            // already reads the clock so they do not accumulate.
+            let now = (self.clock)();
+            state
+                .blobs
+                .retain(|_, (_, _, expiry)| expiry.is_none_or(|expires| expires > now));
+            if at <= now {
+                // A zero lifetime is expired on arrival: replace, then vanish.
+                state.blobs.remove(&self.key(key));
+                return Ok(meta);
+            }
+        }
+        state
+            .blobs
+            .insert(self.key(key), (meta.clone(), bytes, expires_at));
         Ok(meta)
+    }
+
+    /// The live entry for `key`, judged against the clock.
+    fn live<'a>(
+        &self,
+        state: &'a DbState,
+        key: &str,
+    ) -> Option<&'a (BlobMeta, Vec<u8>, Option<u64>)> {
+        let now = (self.clock)();
+        state
+            .blobs
+            .get(&self.key(key))
+            .filter(|(_, _, expiry)| expiry.is_none_or(|at| at > now))
+    }
+}
+
+#[async_trait]
+impl BlobStore for MemoryBlobs {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none().with(Capability::BlobTtl)
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None)
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, Some(ttl))
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
-        Ok(state.blobs.get(&self.key(key)).map(|(meta, bytes)| Blob {
+        Ok(self.live(&state, key).map(|(meta, bytes, _)| Blob {
             meta: meta.clone(),
             bytes: bytes.clone(),
         }))
@@ -97,7 +157,7 @@ impl BlobStore for MemoryBlobs {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
-        let Some((_, bytes)) = state.blobs.get(&self.key(key)) else {
+        let Some((_, bytes, _)) = self.live(&state, key) else {
             return Ok(None);
         };
         let range = clamp_range(&range, bytes.len())?;
@@ -110,27 +170,33 @@ impl BlobStore for MemoryBlobs {
         validate_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
-        Ok(state
-            .blobs
-            .get(&self.key(key))
-            .map(|(meta, _)| meta.clone()))
+        Ok(self.live(&state, key).map(|(meta, _, _)| meta.clone()))
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
         validate_blob_key(key)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
-        Ok(state.blobs.remove(&self.key(key)).is_some())
+        // Only a blob with a lifetime needs the clock to say it still exists.
+        Ok(state
+            .blobs
+            .remove(&self.key(key))
+            .is_some_and(|(_, _, expiry)| expiry.is_none_or(|at| at > (self.clock)())))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
+        let now = (self.clock)();
         Ok(state
             .blobs
             .iter()
-            .filter(|((scope, key), _)| scope == self.scope.as_str() && key.starts_with(prefix))
-            .map(|(_, (meta, _))| meta.clone())
+            .filter(|((scope, key), (_, _, expiry))| {
+                scope == self.scope.as_str()
+                    && key.starts_with(prefix)
+                    && expiry.is_none_or(|at| at > now)
+            })
+            .map(|(_, (meta, _, _))| meta.clone())
             .collect())
     }
 }

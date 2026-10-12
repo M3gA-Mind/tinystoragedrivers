@@ -1,6 +1,10 @@
 //! Scoped S3 blobs, with bounded multipart writes and incremental reads.
 
-use std::{ops::Range, sync::Arc, time::Duration};
+use std::{
+    ops::Range,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -19,6 +23,18 @@ use tokio_util::io::StreamReader;
 /// Fixed multipart chunk size (8 MiB); at most one part is in flight.
 const PART_SIZE: usize = 8 * 1024 * 1024;
 const HEX: &[u8; 16] = b"0123456789abcdef";
+/// User metadata holding a blob's expiry as epoch milliseconds. S3 prefixes it
+/// with `x-amz-meta-` on the wire.
+const EXPIRES_AT: &str = "tsd-expires-at-ms";
+
+/// Milliseconds since the Unix epoch.
+fn system_clock() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
 
 /// S3 bucket, endpoint and object-key prefix. Credentials come from the
 /// standard AWS environment/credential provider chain, never from the URL.
@@ -168,7 +184,9 @@ impl S3Storage {
 
 impl BlobBackend for S3Storage {
     fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::none().with(Capability::StreamingBlobs);
+        let caps = Capabilities::none()
+            .with(Capability::StreamingBlobs)
+            .with(Capability::BlobTtl);
         if self.signer.is_some() {
             caps.with(Capability::PresignedUrls)
         } else {
@@ -204,6 +222,7 @@ pub struct S3Blobs {
     store: Arc<dyn ObjectStore>,
     signer: Option<Arc<dyn Signer>>,
     prefix: String,
+    clock: fn() -> u64,
 }
 
 impl S3Blobs {
@@ -254,7 +273,16 @@ impl S3Blobs {
             store,
             signer,
             prefix,
+            clock: system_clock,
         })
+    }
+
+    /// Read blob lifetimes against `clock` (milliseconds since the Unix
+    /// epoch) instead of the system clock, so tests can drive expiry.
+    #[must_use]
+    pub fn with_clock(mut self, clock: fn() -> u64) -> Self {
+        self.clock = clock;
+        self
     }
 
     fn path(&self, key: &str) -> Result<Path> {
@@ -286,12 +314,27 @@ impl S3Blobs {
     }
 }
 
-fn attributes(content_type: Option<&str>) -> Attributes {
+fn attributes(content_type: Option<&str>, expires_at: Option<u64>) -> Attributes {
     let mut attributes = Attributes::default();
     if let Some(value) = content_type {
         attributes.insert(Attribute::ContentType, value.to_owned().into());
     }
+    if let Some(at) = expires_at {
+        attributes.insert(
+            Attribute::Metadata(EXPIRES_AT.into()),
+            at.to_string().into(),
+        );
+    }
     attributes
+}
+
+/// Whether the object these attributes came from has outlived its lifetime.
+/// Unreadable metadata counts as no lifetime: the writer always emits digits.
+fn lapsed(attributes: &Attributes, now: u64) -> bool {
+    attributes
+        .get(&Attribute::Metadata(EXPIRES_AT.into()))
+        .and_then(|value| value.as_ref().parse::<u64>().ok())
+        .is_some_and(|at| at <= now)
 }
 
 fn metadata(key: &str, len: u64, attributes: &Attributes) -> BlobMeta {
@@ -352,40 +395,22 @@ fn multipart_reader_error(error: std::io::Error) -> StorageError {
     StorageError::new(kind, "blob reader failed before declared length").with_source(error)
 }
 
-#[async_trait]
-impl BlobStore for S3Blobs {
-    fn max_key_len(&self) -> usize {
-        1024 - self.prefix.len()
-    }
-    fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::none().with(Capability::StreamingBlobs);
-        if self.signer.is_some() {
-            caps.with(Capability::PresignedUrls)
-        } else {
-            caps
-        }
-    }
-
-    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        let len = bytes.len() as u64;
-        self.put_stream(
-            key,
-            Box::pin(std::io::Cursor::new(bytes)),
-            len,
-            content_type,
-        )
-        .await
-    }
-
-    async fn put_stream(
+impl S3Blobs {
+    /// Upload exactly `len` bytes, bounded by [`PART_SIZE`], optionally with a
+    /// lifetime counted from now.
+    async fn store(
         &self,
         key: &str,
         mut reader: BlobReader,
         len: u64,
         content_type: Option<&str>,
+        ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
         let path = self.path(key)?;
-        let attrs = attributes(content_type);
+        let expires_at = ttl.map(|ttl| {
+            (self.clock)().saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+        });
+        let attrs = attributes(content_type, expires_at);
         if len <= PART_SIZE as u64 {
             let mut data = Vec::new();
             (&mut reader)
@@ -464,6 +489,74 @@ impl BlobStore for S3Blobs {
         }
         Ok(metadata(key, len, &attrs))
     }
+}
+
+#[async_trait]
+impl BlobStore for S3Blobs {
+    fn max_key_len(&self) -> usize {
+        1024 - self.prefix.len()
+    }
+    fn capabilities(&self) -> Capabilities {
+        let caps = Capabilities::none()
+            .with(Capability::StreamingBlobs)
+            .with(Capability::BlobTtl);
+        if self.signer.is_some() {
+            caps.with(Capability::PresignedUrls)
+        } else {
+            caps
+        }
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+        let len = bytes.len() as u64;
+        self.store(
+            key,
+            Box::pin(std::io::Cursor::new(bytes)),
+            len,
+            content_type,
+            None,
+        )
+        .await
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        let len = bytes.len() as u64;
+        self.store(
+            key,
+            Box::pin(std::io::Cursor::new(bytes)),
+            len,
+            content_type,
+            Some(ttl),
+        )
+        .await
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.store(key, reader, len, content_type, None).await
+    }
+
+    async fn put_stream_expiring(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, reader, len, content_type, Some(ttl)).await
+    }
 
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
         let path = self.path(key)?;
@@ -472,6 +565,9 @@ impl BlobStore for S3Blobs {
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(map_error(error)),
         };
+        if lapsed(&result.attributes, (self.clock)()) {
+            return Ok(None);
+        }
         let meta = metadata(key, result.meta.size, &result.attributes);
         let stream = result
             .into_stream()
@@ -514,6 +610,9 @@ impl BlobStore for S3Blobs {
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(map_error(error)),
         };
+        if lapsed(&result.attributes, (self.clock)()) {
+            return Ok(None);
+        }
         Ok(Some(metadata(key, result.meta.size, &result.attributes)))
     }
 
@@ -540,11 +639,24 @@ impl BlobStore for S3Blobs {
 
     async fn delete(&self, key: &str) -> Result<bool> {
         let path = self.path(key)?;
-        if self.head(key).await?.is_none() {
-            return Ok(false);
-        }
+        let found = match self
+            .store
+            .get_opts(
+                &path,
+                object_store::GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(found) => found,
+            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_error(error)),
+        };
         self.store.delete(&path).await.map_err(map_error)?;
-        Ok(true)
+        // A lapsed blob is not there to delete, but its object goes too.
+        Ok(!lapsed(&found.attributes, (self.clock)()))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {

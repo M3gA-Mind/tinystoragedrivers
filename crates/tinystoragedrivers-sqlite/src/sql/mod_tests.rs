@@ -55,3 +55,38 @@ fn creates_prefixed_tables_idempotently() {
     assert_eq!(count, 7);
     assert_eq!(Tables::new("").prefix, "");
 }
+
+#[test]
+fn a_blob_table_from_before_lifetimes_gains_the_column_and_validates() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new("old__");
+    tables.ensure(&conn).unwrap();
+    // Recreate the blob table as the previous release declared it.
+    conn.execute_batch(&format!(
+        "DROP TABLE {blobs};
+         CREATE TABLE {blobs} (
+             scope TEXT NOT NULL,
+             key TEXT NOT NULL,
+             content_type TEXT,
+             bytes BLOB NOT NULL,
+             PRIMARY KEY (scope, key)
+         ) WITHOUT ROWID;
+         INSERT INTO {blobs} (scope, key, bytes) VALUES ('s', 'k', x'01');",
+        blobs = ident(&tables.blobs)
+    ))
+    .unwrap();
+    assert!(
+        tables.validate(&conn).is_err(),
+        "a read-only open refuses a table that has not been migrated"
+    );
+    tables.ensure(&conn).unwrap();
+    tables.validate(&conn).unwrap();
+    let expiry: Option<i64> = conn
+        .query_row(
+            &format!("SELECT expires_at_ms FROM {}", ident(&tables.blobs)),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(expiry, None, "existing blobs keep no lifetime");
+}

@@ -128,6 +128,7 @@ impl Tables {
                  key TEXT NOT NULL,
                  content_type TEXT,
                  bytes BLOB NOT NULL,
+                 expires_at_ms INTEGER,
                  PRIMARY KEY (scope, key)
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS {tombstones} (
@@ -152,11 +153,42 @@ impl Tables {
     pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(&self.declaration_sql())
             .map_err(during("create tables"))?;
+        self.migrate_blob_expiry(conn)?;
         conn.execute_batch(&format!(
             "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
             ident(&self.purge_receipts), ident(&self.admissions),
         )).map_err(during("migrate purge receipts"))
     }
+    /// Add the blob lifetime column to a table created before it existed.
+    ///
+    /// SQLite places an added column ahead of the table constraints, so the
+    /// stored declaration matches a fresh one and [`Self::validate`] accepts
+    /// it. A table that has not been through a migrating open is refused by
+    /// `validate` like any other schema drift.
+    fn migrate_blob_expiry(&self, conn: &Connection) -> Result<()> {
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = 'expires_at_ms'",
+                [&self.blobs],
+                |row| row.get(0),
+            )
+            .map_err(during("inspect blob table"))?;
+        if !has_column {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN expires_at_ms INTEGER",
+                ident(&self.blobs)
+            ))
+            .map_err(during("add blob expiry column"))?;
+        }
+        // Lets a lifetime write find lapsed rows without reading every blob.
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} (expires_at_ms) WHERE expires_at_ms IS NOT NULL",
+            ident(&format!("{}_expiry", self.blobs)),
+            ident(&self.blobs)
+        ))
+        .map_err(during("index blob expiry"))
+    }
+
     /// Inspect the exact driver layout without creating or migrating tables.
     pub(crate) fn validate(&self, conn: &Connection) -> Result<()> {
         let names = [
@@ -193,7 +225,8 @@ impl Tables {
                     .filter(|ch| !ch.is_whitespace())
                     .collect::<String>()
             };
-            if normalize(&stored) != normalize(expected) {
+            if normalize(&stored) != normalize(expected)
+            {
                 return Err(StorageError::invalid_input(
                     "existing driver table has incompatible schema",
                 ));

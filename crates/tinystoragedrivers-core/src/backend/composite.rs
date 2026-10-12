@@ -40,7 +40,11 @@ impl BlobBackend for BackendBlobs {
     fn capabilities(&self) -> Capabilities {
         let source = self.0.capabilities();
         let mut caps = Capabilities::none();
-        for cap in [Capability::StreamingBlobs, Capability::PresignedUrls] {
+        for cap in [
+            Capability::StreamingBlobs,
+            Capability::PresignedUrls,
+            Capability::BlobTtl,
+        ] {
             if source.contains(cap) {
                 caps = caps.with(cap);
             }
@@ -106,8 +110,13 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::ScopePurge)
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
-            .without(Capability::StreamingBlobs);
-        for cap in [Capability::StreamingBlobs, Capability::PresignedUrls] {
+            .without(Capability::StreamingBlobs)
+            .without(Capability::BlobTtl);
+        for cap in [
+            Capability::StreamingBlobs,
+            Capability::PresignedUrls,
+            Capability::BlobTtl,
+        ] {
             if self.blobs.capabilities().contains(cap) {
                 caps = caps.with(cap);
             }
@@ -163,8 +172,28 @@ impl BlobStore for FencedBlobs {
             .without(Capability::ScopePurge)
             .without(Capability::AtomicScopePurge)
             .without(Capability::PresignedUrls)
+            .without(Capability::BlobTtl)
     }
     async fn put(&self, _: &str, _: Vec<u8>, _: Option<&str>) -> Result<BlobMeta> {
+        Err(unfenceable())
+    }
+    async fn put_expiring(
+        &self,
+        _: &str,
+        _: Vec<u8>,
+        _: Option<&str>,
+        _: Duration,
+    ) -> Result<BlobMeta> {
+        Err(unfenceable())
+    }
+    async fn put_stream_expiring(
+        &self,
+        _: &str,
+        _: BlobReader,
+        _: u64,
+        _: Option<&str>,
+        _: Duration,
+    ) -> Result<BlobMeta> {
         Err(unfenceable())
     }
     async fn put_stream(

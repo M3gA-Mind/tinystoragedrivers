@@ -51,10 +51,13 @@ pub enum Capability {
     AtomicScopePurge,
     /// Native scoped document invalidation subscriptions.
     Watch,
+    /// [`BlobStore::put_expiring`](crate::BlobStore::put_expiring): a blob
+    /// written with a lifetime reads as absent once it has passed.
+    BlobTtl,
 }
 
 impl Capability {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -70,6 +73,7 @@ impl Capability {
         Self::ScopePurge,
         Self::AtomicScopePurge,
         Self::Watch,
+        Self::BlobTtl,
     ];
 
     const fn bit(self) -> u32 {
@@ -89,6 +93,7 @@ impl Capability {
             Self::ScopePurge => 1 << 10,
             Self::AtomicScopePurge => 1 << 11,
             Self::Watch => 1 << 12,
+            Self::BlobTtl => 1 << 15,
         }
     }
 }
@@ -111,6 +116,7 @@ impl fmt::Display for Capability {
             Self::ScopePurge => "scope_purge",
             Self::AtomicScopePurge => "atomic_scope_purge",
             Self::Watch => "watch",
+            Self::BlobTtl => "blob_ttl",
         })
     }
 }
@@ -159,7 +165,8 @@ impl Capabilities {
                 | Capability::ValidatedBatch.bit()
                 | Capability::ScopePurge.bit()
                 | Capability::AtomicScopePurge.bit()
-                | Capability::Watch.bit(),
+                | Capability::Watch.bit()
+                | Capability::BlobTtl.bit(),
         )
     }
 

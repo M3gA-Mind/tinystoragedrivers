@@ -417,3 +417,92 @@ fn explicit_endpoint_overrides_inherited_service_endpoint() {
         config.endpoint.as_deref()
     );
 }
+
+static DRIVEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn driven_clock() -> u64 {
+    DRIVEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn blob_lifetimes_follow_the_clock_and_are_stored_as_object_metadata() {
+    use std::sync::atomic::Ordering;
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let blobs = handle(objects.clone(), "ttl").with_clock(driven_clock);
+    DRIVEN.store(5_000, Ordering::SeqCst);
+
+    blobs
+        .put_expiring("k", vec![1, 2, 3], Some("a/b"), Duration::from_millis(100))
+        .await
+        .unwrap();
+    let stored = objects
+        .get_opts(
+            &blobs.path("k").unwrap(),
+            object_store::GetOptions {
+                head: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stored
+            .attributes
+            .get(&Attribute::Metadata(EXPIRES_AT.into()))
+            .map(|value| value.as_ref().to_owned()),
+        Some("5100".to_owned())
+    );
+
+    DRIVEN.store(5_099, Ordering::SeqCst);
+    assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [1, 2, 3]);
+    assert_eq!(blobs.list("").await.unwrap().len(), 1);
+
+    DRIVEN.store(5_100, Ordering::SeqCst);
+    assert!(blobs.get("k").await.unwrap().is_none());
+    assert!(blobs.head("k").await.unwrap().is_none());
+    assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
+    assert!(blobs.get_stream("k").await.unwrap().is_none());
+    assert!(blobs.list("").await.unwrap().is_empty());
+    assert!(!blobs.delete("k").await.unwrap());
+    assert!(
+        objects.head(&blobs.path("k").unwrap()).await.is_err(),
+        "delete removes the lapsed object"
+    );
+}
+
+static DRIVEN_B: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn driven_clock_b() -> u64 {
+    DRIVEN_B.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_plain_put_replaces_a_lifetime_and_a_multipart_blob_can_expire() {
+    use std::sync::atomic::Ordering;
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let blobs = handle(objects, "ttl-b").with_clock(driven_clock_b);
+    DRIVEN_B.store(1_000, Ordering::SeqCst);
+    blobs
+        .put_expiring("k", vec![1], None, Duration::from_millis(10))
+        .await
+        .unwrap();
+    blobs.put("k", vec![2], None).await.unwrap();
+    DRIVEN_B.store(1_000_000, Ordering::SeqCst);
+    assert_eq!(blobs.get("k").await.unwrap().unwrap().bytes, [2]);
+
+    let big = vec![7u8; PART_SIZE + 1];
+    let len = big.len() as u64;
+    blobs
+        .put_stream_expiring(
+            "big",
+            Box::pin(std::io::Cursor::new(big)),
+            len,
+            None,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+    assert!(blobs.head("big").await.unwrap().is_some());
+    DRIVEN_B.store(1_000_011, Ordering::SeqCst);
+    assert!(blobs.head("big").await.unwrap().is_none());
+}
