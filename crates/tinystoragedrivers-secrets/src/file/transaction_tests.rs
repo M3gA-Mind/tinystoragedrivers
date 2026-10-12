@@ -92,6 +92,64 @@ fn present(result: Result<FileTransactionResult>, expected: &[u8]) {
     }
 }
 #[test]
+fn initial_publication_flushes_and_reads_back_before_acknowledgment() {
+    let (_dir, mut resource, key) = fixture();
+    let published = std::rc::Rc::new(std::cell::Cell::new(false));
+    let read_back = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed_publish = std::rc::Rc::clone(&published);
+    let observed_read = std::rc::Rc::clone(&read_back);
+    AFTER_PUBLISH.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            observed_publish.set(true);
+            AFTER_READ.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || observed_read.set(true)));
+            });
+        }));
+    });
+    let result = resource.execute(
+        &key,
+        FileTransactionOperation::Set("a", b"value"),
+        budget(),
+        &Guard,
+    );
+    // Remove an unused hook if publication failed before exact readback.
+    AFTER_READ.with(|slot| slot.borrow_mut().take());
+    assert!(published.get(), "P01");
+    assert!(matches!(result, Ok(FileTransactionResult::Set)), "P02");
+    assert!(read_back.get(), "P03");
+    assert!(!resource.fenced, "P04");
+    present(
+        resource.execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard),
+        b"value",
+    );
+    assert!(matches!(
+        resource.execute(
+            &key,
+            FileTransactionOperation::Set("a", b"replacement"),
+            budget(),
+            &Guard
+        ),
+        Ok(FileTransactionResult::Set)
+    ));
+    present(
+        resource.execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard),
+        b"replacement",
+    );
+    assert!(matches!(
+        resource.execute(
+            &key,
+            FileTransactionOperation::Delete("a"),
+            budget(),
+            &Guard
+        ),
+        Ok(FileTransactionResult::Delete(true))
+    ));
+    assert!(matches!(
+        resource.execute(&key, FileTransactionOperation::Get("a"), budget(), &Guard),
+        Ok(FileTransactionResult::Get(None))
+    ));
+}
+#[test]
 fn get_set_delete_preserve_existing_raw_codec_and_readback() {
     let (dir, mut resource, key) = fixture();
     assert!(matches!(

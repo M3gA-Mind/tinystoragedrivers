@@ -371,7 +371,10 @@ impl FileTransactionResource {
                 "published transaction identity changed",
             ));
         }
-        published
+        // The retained writable handle names the published object after rename;
+        // Windows requires write access to flush it.
+        staged
+            .file
             .sync_all()
             .map_err(|e| io_error("flush the published transaction", e))?;
         #[cfg(unix)]
