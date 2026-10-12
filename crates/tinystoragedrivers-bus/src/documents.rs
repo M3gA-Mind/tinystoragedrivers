@@ -12,7 +12,7 @@ pub const STORAGE_INTERFACE: &str = "ai.tinyhumans.tinystorage.Storage";
 /// Documents object name under [`STORAGE_INTERFACE`].
 pub const DOCUMENTS_OBJECT: &str = "Documents";
 /// Finite selector set; servers must reject every other selector.
-pub const DOCUMENTS_SELECTORS: [&str; 16] = [
+pub const DOCUMENTS_SELECTORS: [&str; 17] = [
     "Get",
     "Put",
     "Delete",
@@ -29,6 +29,7 @@ pub const DOCUMENTS_SELECTORS: [&str; 16] = [
     "Collections",
     "WatchOpen",
     "WatchClose",
+    "Capabilities",
 ];
 
 /// Return whether `selector` belongs to the fixed Documents selector set.
@@ -417,6 +418,24 @@ pub struct WatchOpenRequest {
     /// Maximum quiet wait in milliseconds, between 1 and 60,000 inclusive.
     pub interval_ms: u64,
 }
+/// Reply to `WatchOpen`: the handle that later `WatchChanged` signals carry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchOpenResponse {
+    /// Host-issued watch handle, scoped to this caller binding.
+    pub watch_id: String,
+}
+/// Reply to `Capabilities`: the optional port capabilities the admitted
+/// backend provides to this caller, by their stable lowercase names
+/// (`full_text`, `transactions`, `watch`, ...). Host-only capabilities such as
+/// fencing and scope purge are never listed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesReply {
+    /// Capability names.
+    pub capabilities: Vec<String>,
+}
+
 /// Close a host-owned watch subscription.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

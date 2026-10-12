@@ -100,12 +100,12 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 1` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 2` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
-| `Documents` | 16, see `DOCUMENTS_SELECTORS` | private |
+| `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
 | `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
@@ -128,6 +128,37 @@ stream argument bound to one operation, whose length must equal the declared
 with the returned cursor or last offset plus one. `Secrets` messages redact
 `Debug` output; presigned URLs are credentials and are likewise never printed.
 Watch signals are `WatchChanged` (Documents) and carry no payload.
+
+## Client and reference server
+
+`tinystoragedrivers-client` holds both ends, with no `TinyBus` dependency:
+
+- `BusStorage` implements `StorageBackend`; its `ScopedStorage` hands out
+  `BusDocuments` (`DocumentStore`), `BusStreams` (`StreamStore`) and
+  `BusBlobs` (`BlobStore`), and `BusStorage::secrets()` is a `SecretStore`.
+  Calls go through the `StorageTransport` trait (`call`, `put_blob_stream`,
+  `get_blob_stream`, `signals`); a `TinyBus` proxy is one implementation.
+- The caller is bound to one host-chosen scope. `for_scope` accepts only that
+  scope, `database` and the fenced or generation variants are refused, and
+  host-only capabilities (fencing, scope purge, existing-schema) are never
+  reported. `Documents.Capabilities` and `Blobs.Capabilities` tell the client
+  what the admitted backend provides; an `Unsupported` refusal is attributed to
+  the capability the call needs, since the wire carries only the category.
+- Large values: blobs over `MAX_INLINE_BLOB_BYTES` use `PutStream` / `GetStream`
+  and `GetRange` is split into inline spans, so a blob above the 16 MiB frame
+  works; windows and batches above their caps are rejected or continued as
+  described under Wire reference.
+- `StorageServer` is the reference host adapter: generic over a `ScopedStorage`
+  the host already bound, it enforces the limits before native I/O, answers
+  `Secrets` only to `Admission::Confidential` callers, and projects native
+  watches to `WatchChanged` signals (at most 64 per binding). `Loopback` joins
+  a client to a server in one process through JSON text frames capped at
+  `MAX_FRAME_BYTES`, so the shared `conformance::run_ports` suite runs against
+  the client exactly as against a native driver.
+
+`WatchOpen` replies with `WatchOpenResponse { watch_id }`; `Capabilities`
+replies with `CapabilitiesReply`. Adding that selector made the contract
+version 2.
 
 ## Acceptance
 

@@ -1,0 +1,25 @@
+[package]
+name = "tinystoragedrivers-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage-bus client implementing the storage ports over a transport, and the reference host-side server adapter with an in-process loopback."
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tinystoragedrivers-bus.workspace = true
+tinystoragedrivers-core.workspace = true
+tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
+tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
+
+[dev-dependencies]
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
+
+[lints]
+workspace = true

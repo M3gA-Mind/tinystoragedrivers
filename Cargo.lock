@@ -3247,6 +3247,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-client"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tinystoragedrivers-bus",
+ "tinystoragedrivers-core",
+ "tinystoragedrivers-secrets",
+ "tokio",
+]
+
+[[package]]
 name = "tinystoragedrivers-core"
 version = "0.5.0"
 dependencies = [

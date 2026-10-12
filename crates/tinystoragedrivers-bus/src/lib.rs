@@ -30,13 +30,13 @@ pub use blobs::{
 };
 pub use client::DocumentClient;
 pub use documents::{
-    BatchRequest, BatchResponse, ClaimRequest, CollectionRequest, CollectionSpec,
-    CollectionsRequest, CountRequest, DOCUMENTS_OBJECT, DOCUMENTS_SELECTORS, DeleteDocumentRequest,
-    DeleteWhereRequest, Direction, EnsureCollectionRequest, ExpectedDocument, Filter,
-    GetDocumentRequest, IndexSpec, PutDocumentRequest, Query, QueryRequest, QueryResponse,
-    ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest, SearchSpec, Sort,
-    ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest,
-    WatchReset, WriteOp, WriteResult, is_documents_selector,
+    BatchRequest, BatchResponse, CapabilitiesReply, ClaimRequest, CollectionRequest,
+    CollectionSpec, CollectionsRequest, CountRequest, DOCUMENTS_OBJECT, DOCUMENTS_SELECTORS,
+    DeleteDocumentRequest, DeleteWhereRequest, Direction, EnsureCollectionRequest,
+    ExpectedDocument, Filter, GetDocumentRequest, IndexSpec, PutDocumentRequest, Query,
+    QueryRequest, QueryResponse, ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest,
+    SearchSpec, Sort, ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice,
+    WatchOpenRequest, WatchOpenResponse, WatchReset, WriteOp, WriteResult, is_documents_selector,
 };
 pub use limits::{
     BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,
