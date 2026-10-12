@@ -170,6 +170,9 @@ jobs:
       - name: Test default features
         run: cargo test
 
+      - name: Verify confidential document callbacks through a real module
+        run: bash scripts/test-document-callback.sh
+
       # `tinystoragedrivers-core` defines the ports every driver and consumer
       # compiles against. A database library arriving there transitively would
       # force SQLite or MongoDB onto every host, so it is asserted rather than

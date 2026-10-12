@@ -8,7 +8,7 @@ members = ["crates/*"]
 # `worktrees/` holds `git worktree` checkouts of this same repository; each
 # contains a full copy of this manifest and every crate under it, so without
 # this entry cargo walks into them and reports duplicate packages.
-exclude = ["worktrees"]
+exclude = ["worktrees", "proof-workspaces/document-callback"]
 
 # Shared package metadata. A member inherits a field with `field.workspace =
 # true`, so the version the release workflow bumps is written in exactly one
@@ -21,6 +21,9 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+# Minimal document wire clients and confined host callbacks; never linked by core.
+tinybus = { git = "https://github.com/tinyhumansai/tinybus", rev = "1f2557657db97470cd4efb7e1fc2f374f36fdd22", default-features = false }
+tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 # SHA-256 binds Mongo watch cursors and protects native secret key identities.
 sha2 = "0.10"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
