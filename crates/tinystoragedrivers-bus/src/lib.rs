@@ -16,9 +16,19 @@
 //! # Ok::<(), serde_json::Error>(())
 //! ```
 mod client;
+mod documents;
 mod inline_json;
 mod types;
 pub use client::DocumentClient;
+pub use documents::{
+    BatchRequest, BatchResponse, ClaimRequest, CollectionRequest, CollectionSpec,
+    CollectionsRequest, CountRequest, DOCUMENTS_OBJECT, DOCUMENTS_SELECTORS, DeleteDocumentRequest,
+    DeleteWhereRequest, Direction, EnsureCollectionRequest, ExpectedDocument, Filter,
+    GetDocumentRequest, IndexSpec, PutDocumentRequest, Query, QueryRequest, QueryResponse,
+    ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest, SearchSpec, Sort,
+    ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice, WatchOpenRequest,
+    WatchReset, WriteOp, WriteResult, is_documents_selector,
+};
 pub use types::{
     DeleteRequest, GetRequest, Precondition, PutRequest, StorageFailure, StorageKind, Version,
     Versioned,
