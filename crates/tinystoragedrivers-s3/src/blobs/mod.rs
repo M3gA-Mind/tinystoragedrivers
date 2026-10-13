@@ -551,6 +551,10 @@ impl S3Blobs {
 
 #[async_trait]
 impl BlobStore for S3Blobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        S3Blobs::sweep_expired(self).await
+    }
+
     fn max_key_len(&self) -> usize {
         1024 - self.prefix.len()
     }

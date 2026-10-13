@@ -264,6 +264,24 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// A backend error.
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>>;
 
+    /// Reclaim every blob of this scope whose lifetime has passed and return
+    /// how many went, for a periodic sweeper.
+    ///
+    /// Reads already treat a lapsed blob as absent; this only frees the space.
+    /// The default reclaims nothing and returns `0`: drivers whose lapsed blobs
+    /// are removed by other means (or that have none) need not override it, and
+    /// a bus client leaves reclaiming to the host that owns the data. Drivers
+    /// with [`Capability::BlobTtl`] that keep lapsed blobs until swept override
+    /// it, so a host holding only an `Arc<dyn StorageBackend>` can schedule the
+    /// sweep (see [`StorageBackend::sweep_expired_blobs`](crate::StorageBackend::sweep_expired_blobs)).
+    ///
+    /// # Errors
+    ///
+    /// A backend error.
+    async fn sweep_expired(&self) -> Result<u64> {
+        Ok(0)
+    }
+
     /// The directory-like children of `dir` (`""` is the root): blobs directly
     /// inside it and the sub-directories that hold more blobs, sorted by name.
     ///

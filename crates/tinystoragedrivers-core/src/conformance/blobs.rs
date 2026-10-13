@@ -373,6 +373,17 @@ async fn expiry_streamed(storage: &ScopedStorage, key: &str) {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_absent(storage, &brief, "lapsed lifetime").await;
 
+    // The sweep hook reclaims lapsed blobs and never touches a live one. The
+    // count is not asserted: a read may already have reclaimed the lapsed blob,
+    // and a bus client leaves reclaiming to the host that owns the data.
+    ok(blobs.put(&brief, vec![9], None).await, "revive after lapse");
+    ok(blobs.sweep_expired().await, "sweep expired");
+    assert!(
+        ok(blobs.get(&brief).await, "get after sweep").is_some(),
+        "a live blob survives the sweep"
+    );
+    ok(blobs.delete(&brief).await, "cleanup revived");
+
     for left in [key, streamed.as_str()] {
         ok(blobs.delete(left).await, "cleanup");
     }

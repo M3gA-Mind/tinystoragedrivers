@@ -242,6 +242,10 @@ impl FileBlobs {
 
 #[async_trait]
 impl BlobStore for FileBlobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        FileBlobs::sweep_expired(self).await
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::none().with(Capability::BlobTtl)
     }

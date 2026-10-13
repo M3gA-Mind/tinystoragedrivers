@@ -124,7 +124,8 @@ beyond the supplied native port's contract, or PR59 lifecycle drain behavior.
 
 The dependency-only follow-up from canonical TSD `d2f85b2` aligns the
 production adapter and the excluded native proof with merged TinyBus
-`40814a8279ff71b8fb411f9f29362c8ec0be51e2` (PR60). This includes the host
+`40814a8279ff71b8fb411f9f29362c8ec0be51e2` (PR60), now pinned by the
+released tag `v0.1.5` that contains it. This includes the host
 callback lifecycle accounting from PR59 and the SDK diagnostic ownership fix.
 It changes neither the document callback contract nor storage implementation.
 The root graph has one TinyBus identity; the native proof has one TinyBus and
