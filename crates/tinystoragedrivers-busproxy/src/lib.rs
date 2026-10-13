@@ -44,17 +44,14 @@
 //! * Failures are `MethodFailed` errors named [`ERROR_DENIED`] (a label, no
 //!   content) or [`ERROR_STORAGE`] (a `snake_case` `StorageKind`).
 //!
-//! ## Known limits of the bus underneath
+//! ## Peer binding
 //!
-//! * `Connection::accept_stream` takes a stream by id without checking which
-//!   peer opened it, so a module that guessed another module's in-flight upload
-//!   id could have the host read it as its own. Streams are short-lived and
-//!   ids are issued in sequence; binding the accept to the caller belongs in
-//!   `tinybus` and this crate will use it when it exists.
-//! * A signal is broadcast to every matching subscriber. Watch signals carry no
-//!   payload and are addressed to a per-caller path, but a peer that knows
-//!   another caller's unique name can subscribe to that path and see that
-//!   something changed.
+//! * Streams are taken with `Connection::accept_stream_from`: the host reads an
+//!   upload only from the authenticated caller that opened it, and a client
+//!   reads a download only from the host's unique name. A guessed stream id of
+//!   another peer is refused and stays available to its owner.
+//! * Watch signals are unicast with `Connection::emit_to` to the subscribing
+//!   caller, so a peer that matches the same path or interface never sees them.
 mod chunks;
 mod host;
 mod names;
