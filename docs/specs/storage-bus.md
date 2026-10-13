@@ -205,9 +205,11 @@ layout like any other schema drift.
   the caller's unique name) and a module accepts them only from the host's
   unique name.
 
-Known limits of the bus underneath: `Connection::accept_stream` does not bind a
-stream to the peer that opened it, and a signal is broadcast to every matching
-subscriber. Both belong in `tinybus`; the crate documents them.
+Peer binding. Streams are taken with `Connection::accept_stream_from`: the host
+reads an upload only from the authenticated caller that opened it, and a client
+reads a download only from the host's unique name. Watch signals are unicast
+with `Connection::emit_to` to the subscribing caller, so another peer matching
+the same path or interface never receives them.
 
 ## Acceptance
 
