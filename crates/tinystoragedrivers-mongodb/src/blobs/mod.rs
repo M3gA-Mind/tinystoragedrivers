@@ -75,7 +75,9 @@ pub(crate) fn lapsed(file: &FilesCollectionDocument, now: u64) -> bool {
 /// still alive at `now`, plus the ids of every lapsed file seen.
 ///
 /// A key whose newest file has lapsed reads as absent, so its older files are
-/// not surfaced either; only lapsed files are reported for reclaim.
+/// not surfaced either, and they are reported for reclaim with it: otherwise
+/// reclaiming the lapsed file alone would let the next read resurrect an older
+/// version.
 pub(crate) fn live_newest(
     files: Vec<FilesCollectionDocument>,
     now: u64,
@@ -83,13 +85,15 @@ pub(crate) fn live_newest(
     let mut live = Vec::new();
     let mut dead = Vec::new();
     let mut last: Option<String> = None;
+    let mut key_gone = false;
     for file in files {
         let key = file.filename.clone().unwrap_or_default();
         let newest = last.as_deref() != Some(key.as_str());
-        let gone = lapsed(&file, now);
         if newest {
             last = Some(key);
+            key_gone = lapsed(&file, now);
         }
+        let gone = key_gone || lapsed(&file, now);
         if gone {
             dead.push(file.id);
         } else if newest {
@@ -227,7 +231,7 @@ impl MongoBlobs {
     ) -> Result<Option<FilesCollectionDocument>> {
         let files = self.files(bucket, doc! {"filename": key}).await?;
         let now = self.shared.now();
-        let (live, dead) = live_newest(files.into_iter().take(1).collect(), now);
+        let (live, dead) = live_newest(files, now);
         if !dead.is_empty() {
             self.reclaim(bucket, dead).await;
         }

@@ -167,9 +167,14 @@ lifetime counted from the write (`Capability::BlobTtl`). From that instant
 every read (`get`, `get_range`, `head`, `get_stream`, `list`) treats the blob
 as absent; a zero lifetime is expired on arrival; a plain `put` of the key
 clears the lifetime; reclaiming the storage is the driver's business. The
-memory, SQLite, file and S3 drivers provide it (S3 as `x-amz-meta-` user
-metadata, so `list` already pays one HEAD per object); MongoDB does not and
-answers `Unsupported(BlobTtl)`, which the conformance suite asserts. On the
+memory, SQLite, file, MongoDB and S3 drivers provide it (S3 as `x-amz-meta-`
+user metadata, so `list` already pays one HEAD per object; MongoDB as
+`metadata.expires_at_ms` on the GridFS file). Reclaiming is each driver's
+business: file and MongoDB reclaim the lapsed blob on the read that notices it
+(and expose `sweep_expired_blobs` / `sweep_expired_blobs_generation` for a
+sweeper), S3 only reclaims through `S3Blobs::sweep_expired` because object
+deletes cannot be conditional. The conformance suite asserts expiry on every
+driver that claims the capability. On the
 wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
 `BlobCapabilities` gains `ttl`; adding them made the contract version 3. A
 SQLite database written by an earlier release gains the `expires_at_ms` column

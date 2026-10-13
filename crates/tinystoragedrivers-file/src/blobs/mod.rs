@@ -164,8 +164,11 @@ fn head(paths: &Paths, key: &str) -> Result<Option<BlobMeta>> {
             // Reclaim on read: the database lock is held, so no writer can
             // have replaced the lapsed blob between the check and the removal.
             // Failure only delays the reclaim; the blob already reads absent.
-            let _ = remove_optional(&paths.meta);
-            let _ = remove_optional(&paths.data);
+            // The data file goes first: if that fails the sidecar stays, so a
+            // later read or sweep can retry instead of orphaning the data.
+            if remove_optional(&paths.data).is_ok() {
+                let _ = remove_optional(&paths.meta);
+            }
             Ok(None)
         }
         Some(sidecar) if sidecar.key == key => meta(&paths.data, sidecar),

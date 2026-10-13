@@ -360,13 +360,25 @@ impl MongoStorage {
     ///
     /// A backend error.
     pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
-        crate::purge::check(
-            &self.shared,
+        self.sweep_expired_blobs_generation(
             scope,
             tinystoragedrivers_core::ScopeGeneration::default(),
-            None,
         )
-        .await?;
+        .await
+    }
+
+    /// [`sweep_expired_blobs`](Self::sweep_expired_blobs) through an explicitly
+    /// issued scope generation, for a scope that has been reset.
+    ///
+    /// # Errors
+    ///
+    /// A retired generation, a pending reset, or a backend error.
+    pub async fn sweep_expired_blobs_generation(
+        &self,
+        scope: &Scope,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Result<u64> {
+        crate::purge::check(&self.shared, scope, generation, None).await?;
         MongoBlobs::new(Arc::clone(&self.shared), scope.clone(), false)
             .sweep_expired()
             .await

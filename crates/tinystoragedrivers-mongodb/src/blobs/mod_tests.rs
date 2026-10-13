@@ -55,7 +55,16 @@ fn a_lapsed_newest_file_hides_its_key_and_older_versions() {
     let keys: Vec<_> = live.iter().map(|f| f.filename.clone().unwrap()).collect();
     assert_eq!(keys, ["b"]);
     assert_eq!(live[0].id, Bson::Int32(5));
-    assert_eq!(dead, [Bson::Int32(9), Bson::Int32(4), Bson::Int32(7)]);
+    // Older versions of a lapsed key are reclaimed too, so they cannot resurface.
+    assert_eq!(
+        dead,
+        [
+            Bson::Int32(9),
+            Bson::Int32(3),
+            Bson::Int32(4),
+            Bson::Int32(7)
+        ]
+    );
 }
 
 #[test]
