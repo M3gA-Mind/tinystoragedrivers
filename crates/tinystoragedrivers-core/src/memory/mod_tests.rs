@@ -13,6 +13,53 @@ async fn passes_the_conformance_suite() {
 }
 
 #[tokio::test]
+async fn the_backend_sweep_hook_reclaims_only_lapsed_blobs_of_the_scope() {
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock_now = Arc::clone(&now);
+    let storage = MemoryStorage::with_clock(Arc::new(move || clock_now.load(Ordering::SeqCst)));
+    let other = Scope::new("other").unwrap();
+    let blobs = storage.for_scope(&Scope::local()).unwrap().blobs().clone();
+    let foreign = storage.for_scope(&other).unwrap().blobs().clone();
+    for store in [&blobs, &foreign] {
+        store
+            .put_expiring("old", vec![1], None, std::time::Duration::from_millis(5))
+            .await
+            .unwrap();
+    }
+    blobs
+        .put_expiring(
+            "young",
+            vec![2],
+            None,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    blobs.put("forever", vec![3], None).await.unwrap();
+    now.store(1_100, Ordering::SeqCst);
+
+    let dynamic: Arc<dyn StorageBackend> = Arc::new(storage.clone());
+    assert_eq!(
+        dynamic.sweep_expired_blobs(&Scope::local()).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        dynamic.sweep_expired_blobs(&Scope::local()).await.unwrap(),
+        0
+    );
+    let kept: Vec<String> = blobs
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.key)
+        .collect();
+    assert_eq!(kept, ["forever", "young"]);
+    // The other scope's lapsed blob was not touched by this scope's sweep.
+    assert_eq!(dynamic.sweep_expired_blobs(&other).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn expiry_follows_the_injected_clock() {
     let now = Arc::new(AtomicU64::new(1_000));
     let clock_now = Arc::clone(&now);

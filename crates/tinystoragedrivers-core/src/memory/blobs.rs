@@ -125,6 +125,18 @@ impl MemoryBlobs {
 
 #[async_trait]
 impl BlobStore for MemoryBlobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        let mut state = self.db.lock()?;
+        self.guard(&state)?;
+        let now = (self.clock)();
+        let scope = self.scope.as_str();
+        let before = state.blobs.len();
+        state.blobs.retain(|(owner, _), (_, _, expiry)| {
+            owner != scope || expiry.is_none_or(|expires| expires > now)
+        });
+        Ok((before - state.blobs.len()) as u64)
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::none().with(Capability::BlobTtl)
     }

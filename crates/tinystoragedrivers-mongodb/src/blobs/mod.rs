@@ -410,6 +410,13 @@ impl MongoBlobs {
 
 #[async_trait]
 impl BlobStore for MongoBlobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        crate::purge::admitted!(self, {
+            self.writable("a blob sweep")?;
+            MongoBlobs::sweep_expired(self).await
+        })
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::none().with(Capability::BlobTtl)
     }

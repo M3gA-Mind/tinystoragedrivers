@@ -573,8 +573,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.1.4"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=40814a8279ff71b8fb411f9f29362c8ec0be51e2#40814a8279ff71b8fb411f9f29362c8ec0be51e2"
+version = "0.1.5"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=e92325198840182f2a6f8188c43097d8771e6a8e#e92325198840182f2a6f8188c43097d8771e6a8e"
 dependencies = [
  "async-trait",
  "flate2",
@@ -594,8 +594,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus-module"
-version = "0.1.4"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=40814a8279ff71b8fb411f9f29362c8ec0be51e2#40814a8279ff71b8fb411f9f29362c8ec0be51e2"
+version = "0.1.5"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=e92325198840182f2a6f8188c43097d8771e6a8e#e92325198840182f2a6f8188c43097d8771e6a8e"
 dependencies = [
  "async-trait",
  "serde",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-tinybus"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "serde",

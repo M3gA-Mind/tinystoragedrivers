@@ -211,6 +211,9 @@ impl BlobStore for FencedBlobs {
     async fn presign_put(&self, _: &str, _: Duration) -> Result<String> {
         Err(unfenceable())
     }
+    async fn sweep_expired(&self) -> Result<u64> {
+        Err(unfenceable())
+    }
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         self.0.get(key).await
     }

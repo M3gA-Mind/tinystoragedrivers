@@ -183,6 +183,20 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
     /// invalid name (see [`validate_database`]), or a backend error.
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>>;
+
+    /// Reclaim the lapsed blobs of `scope` (see [`BlobStore::sweep_expired`])
+    /// and return how many went.
+    ///
+    /// This is the hook a host schedules when it holds only an
+    /// `Arc<dyn StorageBackend>`. It reaches the scope's blob view, so a
+    /// backend without expiring blobs answers `0`.
+    ///
+    /// # Errors
+    ///
+    /// The scope's [`for_scope`](Self::for_scope) error, or a backend error.
+    async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        self.for_scope(scope)?.blobs().sweep_expired().await
+    }
 }
 
 /// Validate a database name: 1 to 64 ASCII lowercase letters, digits, `_` or

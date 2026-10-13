@@ -91,24 +91,28 @@ impl FileBlobs {
     ///
     /// A filesystem error.
     pub async fn sweep_expired(&self) -> Result<u64> {
-        let scope = self.scope.clone();
+        let (scope, fence) = (self.scope.clone(), self.fence.clone());
         self.db
-            .run(move |db| {
-                let dir = Self::dir(db, &scope);
-                let now = db.now();
-                let mut swept = 0;
-                for path in files_with_suffix(&dir, META_SUFFIX)? {
-                    let Some(sidecar) = read_json::<Sidecar>(&path)? else {
-                        continue;
-                    };
-                    if sidecar.expired(now) {
-                        remove_optional(&dir.join(file_stem(&sidecar.key)))?;
-                        remove_optional(&path)?;
-                        swept += 1;
+            .run_with_guard(
+                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
+                move |db| {
+                    guard(db, fence.as_deref())?;
+                    let dir = Self::dir(db, &scope);
+                    let now = db.now();
+                    let mut swept = 0;
+                    for path in files_with_suffix(&dir, META_SUFFIX)? {
+                        let Some(sidecar) = read_json::<Sidecar>(&path)? else {
+                            continue;
+                        };
+                        if sidecar.expired(now) {
+                            remove_optional(&dir.join(file_stem(&sidecar.key)))?;
+                            remove_optional(&path)?;
+                            swept += 1;
+                        }
                     }
-                }
-                Ok(swept)
-            })
+                    Ok(swept)
+                },
+            )
             .await
     }
 
@@ -242,6 +246,10 @@ impl FileBlobs {
 
 #[async_trait]
 impl BlobStore for FileBlobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        FileBlobs::sweep_expired(self).await
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::none().with(Capability::BlobTtl)
     }

@@ -177,6 +177,21 @@ fn meta(key: String, len: i64, content_type: Option<String>) -> BlobMeta {
 
 #[async_trait]
 impl BlobStore for SqliteBlobs {
+    async fn sweep_expired(&self) -> Result<u64> {
+        let sweep = format!(
+            "DELETE FROM {} WHERE scope = ?1 AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?2",
+            self.table()
+        );
+        let (scope, now) = (self.scope.clone(), now_ms());
+        let removed = self
+            .write(move |conn| {
+                conn.execute(&sweep, params![scope.as_str(), now])
+                    .map_err(during("sweep expired blobs"))
+            })
+            .await?;
+        Ok(removed as u64)
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities::none().with(Capability::BlobTtl)
     }
