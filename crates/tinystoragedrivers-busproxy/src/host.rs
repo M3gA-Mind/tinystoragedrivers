@@ -154,6 +154,7 @@ impl Shared {
         }
         let (interface, member) = (interface(), member(WATCH_MEMBER));
         let connection = self.connection.clone();
+        let recipient = sender.clone();
         let task = tokio::spawn(async move {
             loop {
                 match signals.recv().await {
@@ -161,8 +162,16 @@ impl Shared {
                         let Some(connection) = connection.upgrade() else {
                             return;
                         };
+                        // Unicast: a peer that subscribed to this path (or the
+                        // whole interface) never sees another caller's signal.
                         let emitted = connection
-                            .emit(path.clone(), interface.clone(), member.clone(), (signal,))
+                            .emit_to(
+                                recipient.clone(),
+                                path.clone(),
+                                interface.clone(),
+                                member.clone(),
+                                (signal,),
+                            )
                             .await;
                         if emitted.is_err() {
                             return;
@@ -242,9 +251,14 @@ impl ObjectService {
         if stream.len.is_some_and(|declared| declared != head.len) {
             return Err(invalid());
         }
+        // The body is read only from a stream the authenticated caller opened,
+        // so a guessed stream id of another peer is refused.
+        let Some(caller) = sender else {
+            return Err(HostFailure::Denied("unauthenticated-caller"));
+        };
         let reader = self
             .connection()?
-            .accept_stream(&stream)
+            .accept_stream_from(&stream, caller)
             .map_err(|_| invalid())?;
         self.shared
             .endpoint

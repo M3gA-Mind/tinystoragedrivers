@@ -109,7 +109,6 @@ async fn a_call_without_a_proven_sender_is_refused_on_every_path() {
         json!([{"bad": 1}, {"id": "s9"}]),
         json!([{"key": "k", "len": 1}, {"bad": 1}]),
         json!([{"key": "k", "len": 1}, {"id": "s9", "len": 2}]),
-        json!([{"key": "k", "len": 1}, {"id": "no-such-stream", "len": 1}]),
     ] {
         let error = blobs
             .call_with_context(&member("PutStream"), args, &context)
@@ -121,6 +120,20 @@ async fn a_call_without_a_proven_sender_is_refused_on_every_path() {
             "{error:?}"
         );
     }
+    // A well-formed upload without a proven sender is refused before any
+    // stream is accepted: the stream must be bound to its opener.
+    let error = blobs
+        .call_with_context(
+            &member("PutStream"),
+            json!([{"key": "k", "len": 1}, {"id": "no-such-stream", "len": 1}]),
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, tinybus::Error::MethodFailed { name, message }
+        if name == ERROR_DENIED && message == "unauthenticated-caller")
+    );
     let error = blobs
         .call_with_context(&member("GetStream"), json!({"not": "an array"}), &context)
         .await

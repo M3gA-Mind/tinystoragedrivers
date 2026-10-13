@@ -481,3 +481,93 @@ async fn the_native_watch_fake_delegates_every_document_operation() {
     assert_eq!(docs.delete_where("c", &Filter::All).await.unwrap(), 1);
     docs.drop_collection("c").await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_peer_cannot_consume_another_peers_upload_stream() {
+    use crate::names::{host_name, interface};
+    use tinybus::StreamDescriptor;
+    let rig = rig().await;
+    let (victim, _) = rig.module("victim").await;
+    let (intruder, _) = rig.module("intruder").await;
+
+    // The victim opens an upload stream on the host but has not called yet.
+    let mut writer = victim
+        .open_stream(&host_name(), StreamDescriptor::with_len(4))
+        .await
+        .unwrap();
+    let stream = writer.stream_ref();
+    let head = json!({"key": "k", "len": 4, "content_type": null, "ttl_ms": null});
+
+    // Another bound peer replays the victim's stream handle in its own call.
+    let proxy = |connection: &Connection| {
+        connection
+            .proxy(
+                host_name().as_str(),
+                object_path(tinystoragedrivers_client::Object::Blobs).as_str(),
+                interface().as_str(),
+            )
+            .unwrap()
+            .with_timeout(Duration::from_secs(5))
+    };
+    let stolen = proxy(&intruder)
+        .call::<serde_json::Value>("PutStream", (head.clone(), stream.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&stolen, tinybus::Error::MethodFailed { message, .. } if message == "invalid_input"),
+        "the replayed handle is refused like an unknown stream: {stolen:?}"
+    );
+
+    // The refusal left the stream with its owner, who can still use it.
+    let victim_proxy = proxy(&victim);
+    let calling = victim_proxy.call::<serde_json::Value>("PutStream", (head, stream));
+    let sending = async {
+        writer.write(b"mine").await.unwrap();
+        writer.finish().await.unwrap();
+    };
+    let (reply, ()) = tokio::join!(calling, sending);
+    reply.expect("the owner's own upload still completes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_matching_all_watch_signals_does_not_receive_another_callers() {
+    use crate::names::{host_name, interface, member};
+    let rig = rig().await;
+    let (_a, alpha, alpha_source) = watching_module(&rig, "alpha").await;
+    let spy = Connection::connect(rig.bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let owner = spy.name_owner(HOST_NAME).await.unwrap().unwrap();
+    assert_eq!(host_name().as_str(), HOST_NAME);
+    // No path filter: broad enough to catch any caller's signal if broadcast.
+    let mut eavesdrop = spy
+        .add_match(
+            tinybus::MatchRule::new()
+                .signals()
+                .sender(owner)
+                .interface(interface())
+                .member(member(WATCH_MEMBER)),
+        )
+        .await
+        .unwrap();
+    let options = WatchOptions {
+        interval: Duration::from_millis(5),
+        ..WatchOptions::default()
+    };
+    let mut watch = alpha
+        .documents()
+        .watch("things", &Filter::All, &options)
+        .await
+        .unwrap();
+    alpha_source.0.lock().unwrap()[0]
+        .send(Some(WatchNotice::Invalidated { cursor: None }))
+        .unwrap();
+    let notice = tokio::time::timeout(Duration::from_secs(5), watch.next())
+        .await
+        .expect("the subscriber still gets its signal")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(notice, WatchNotice::Invalidated { .. }));
+    let overheard = tokio::time::timeout(Duration::from_millis(300), eavesdrop.recv()).await;
+    assert!(overheard.is_err(), "the eavesdropper saw a unicast signal");
+}

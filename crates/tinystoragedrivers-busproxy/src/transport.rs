@@ -47,6 +47,9 @@ pub fn module_scope_label() -> Scope {
 pub struct BusTransport {
     connection: Connection,
     host: BusName,
+    /// The unique name of the peer that owns [`HOST_NAME`]; streams are
+    /// accepted only from it.
+    owner: BusName,
     timeout: Duration,
     signals: broadcast::Sender<WatchChanged>,
     forwarder: JoinHandle<()>,
@@ -82,7 +85,7 @@ impl BusTransport {
             .ok_or_else(|| tinybus::Error::failed("the connection has no unique name"))?;
         let mut rule = MatchRule::new()
             .signals()
-            .sender(owner)
+            .sender(owner.clone())
             .interface(interface())
             .member(member(WATCH_MEMBER));
         rule.path = Some(watch_path(&me)?);
@@ -107,6 +110,7 @@ impl BusTransport {
         Ok(Self {
             connection,
             host: host_name(),
+            owner,
             timeout: CALL_TIMEOUT,
             signals,
             forwarder,
@@ -262,7 +266,7 @@ impl StorageTransport for BusTransport {
         };
         let reader = self
             .connection
-            .accept_stream(&stream)
+            .accept_stream_from(&stream, &self.owner)
             .map_err(|error| transport_error(&error))?;
         Ok(Some((head, blob_reader(reader))))
     }
