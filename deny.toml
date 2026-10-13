@@ -58,6 +58,6 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # The separate transport crates use the canonical TinyBus callback contract.
-# Cargo.toml pins a released tag (or a full commit); other Git sources stay denied.
+# Cargo.toml pins its full 40-character commit; other Git sources stay denied.
 allow-git = ["https://github.com/tinyhumansai/tinybus"]
-required-git-spec = "tag"
+required-git-spec = "rev"
