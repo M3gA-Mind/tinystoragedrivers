@@ -140,3 +140,46 @@ async fn a_dropped_connection_makes_the_host_unavailable_not_a_panic() {
         }))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let backend = MemoryStorage::new();
+    let endpoint = Arc::new(PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(
+            backend.for_scope(&Scope::local()).unwrap(),
+        ))
+    }));
+    let shared = Shared {
+        connection: connection.downgrade(),
+        endpoint: Arc::clone(&endpoint) as Arc<dyn StorageEndpoint>,
+        forwarders: Mutex::new(HashMap::new()),
+    };
+    let caller = BusName::new(":1.7").unwrap();
+    let epoch_of = || {
+        shared
+            .forwarders
+            .lock()
+            .unwrap()
+            .get(&caller)
+            .map(|(e, _)| *e)
+    };
+
+    shared.forward_watch_signals(&caller);
+    let first = epoch_of().expect("a forwarder is started");
+    shared.forward_watch_signals(&caller);
+    assert_eq!(
+        epoch_of(),
+        Some(first),
+        "the same binding keeps its forwarder"
+    );
+
+    assert!(endpoint.release(&caller));
+    shared.forward_watch_signals(&caller);
+    let second = epoch_of().expect("the rebound caller is forwarded");
+    assert_ne!(first, second, "the stale forwarder is replaced on rebind");
+}
