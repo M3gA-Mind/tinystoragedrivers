@@ -201,3 +201,44 @@ fn unrelated_database_roots_have_independent_native_locks() {
         "an unrelated directory must not wait for this root"
     );
 }
+
+#[tokio::test]
+async fn a_fenced_handle_that_lost_its_lease_cannot_sweep_blobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let guard_scope = Scope::new("cluster").unwrap();
+    let lease = |epoch: u64| {
+        let root = &root;
+        let guard_scope = guard_scope.clone();
+        async move {
+            root.for_scope(&guard_scope)
+                .unwrap()
+                .documents()
+                .put(
+                    "leases",
+                    "l",
+                    serde_json::json!({"epoch": epoch}),
+                    tinystoragedrivers_core::Precondition::None,
+                )
+                .await
+                .unwrap();
+        }
+    };
+    lease(1).await;
+    let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
+    let held = root.for_scope_fenced(&scope, &fence).unwrap();
+    held.blobs()
+        .put_expiring("old", vec![1], None, std::time::Duration::from_millis(1))
+        .await
+        .unwrap();
+    lease(2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        held.blobs().sweep_expired().await.unwrap_err().kind(),
+        ErrorKind::Fenced
+    );
+    // The refused sweep removed nothing: an unfenced sweep still finds it.
+    assert_eq!(root.sweep_expired_blobs(&scope).await.unwrap(), 1);
+}
