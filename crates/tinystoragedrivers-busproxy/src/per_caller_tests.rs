@@ -117,9 +117,16 @@ async fn a_released_caller_is_rebound_on_its_next_call() {
     endpoint.call(call(Some(&caller))).await.unwrap();
     endpoint.call(call(Some(&caller))).await.unwrap();
     assert_eq!(bound.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let first = endpoint.watch_epoch(&caller);
+    assert_eq!(first, endpoint.watch_epoch(&caller), "stable while bound");
 
     assert!(endpoint.release(&caller));
     assert!(!endpoint.release(&caller), "nothing left to release");
     endpoint.call(call(Some(&caller))).await.unwrap();
     assert_eq!(bound.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_ne!(
+        first,
+        endpoint.watch_epoch(&caller),
+        "a rebind changes the epoch so the host replaces its signal forwarder"
+    );
 }

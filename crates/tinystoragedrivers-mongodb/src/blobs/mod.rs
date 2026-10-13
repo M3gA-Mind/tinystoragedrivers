@@ -254,12 +254,22 @@ impl MongoBlobs {
     pub(crate) async fn sweep_expired(&self) -> Result<u64> {
         let bucket = self.bucket().await?;
         let now = i64::try_from(self.shared.now()).unwrap_or(i64::MAX);
-        let ids: Vec<Bson> = self
+        let lapsed = self
             .files(&bucket, doc! {"metadata.expires_at_ms": {"$lte": now}})
-            .await?
-            .into_iter()
-            .map(|file| file.id)
+            .await?;
+        // A key whose newest version lapsed loses its older versions with it,
+        // or the next read would resurface one of them.
+        let mut keys: Vec<String> = lapsed
+            .iter()
+            .map(|file| file.filename.clone().unwrap_or_default())
             .collect();
+        keys.sort();
+        keys.dedup();
+        let mut ids: Vec<Bson> = Vec::new();
+        for key in keys {
+            let files = self.files(&bucket, doc! {"filename": key}).await?;
+            ids.extend(live_newest(files, self.shared.now()).1);
+        }
         let count = ids.len() as u64;
         self.remove(&bucket, ids).await?;
         Ok(count)

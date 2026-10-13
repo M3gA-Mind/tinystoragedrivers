@@ -329,8 +329,11 @@ impl BlobStore for FileBlobs {
                         continue;
                     };
                     if sidecar.expired(now) {
-                        let _ = remove_optional(&dir.join(file_stem(&sidecar.key)));
-                        let _ = remove_optional(&path);
+                        // Sidecar last, and only once the payload is gone, so a
+                        // failed removal stays discoverable for the next pass.
+                        if remove_optional(&dir.join(file_stem(&sidecar.key))).is_ok() {
+                            let _ = remove_optional(&path);
+                        }
                         continue;
                     }
                     if !sidecar.key.starts_with(&prefix) {
