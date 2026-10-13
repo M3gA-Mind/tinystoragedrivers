@@ -100,3 +100,23 @@ fn ranges_map_to_the_chunks_they_touch() {
     assert_eq!(chunk_span(&(8..12), 4), (2, 2, 0));
     assert_eq!(chunk_span(&(5..6), 0), (5, 5, 0));
 }
+
+#[test]
+fn the_blob_indexes_cover_the_lookups_gridfs_makes() {
+    assert_eq!(
+        standard_file_index().keys,
+        doc! {"filename": 1, "uploadDate": 1}
+    );
+    let scoped = file_index();
+    assert_eq!(scoped.keys, doc! {FILE_SCOPE: 1, "filename": 1, "_id": -1});
+    assert_eq!(
+        scoped.options.and_then(|options| options.name).as_deref(),
+        Some(BLOB_KEY_INDEX)
+    );
+    let chunks = chunk_index();
+    assert_eq!(chunks.keys, doc! {"files_id": 1, "n": 1});
+    assert_eq!(
+        chunks.options.and_then(|options| options.unique),
+        Some(true)
+    );
+}

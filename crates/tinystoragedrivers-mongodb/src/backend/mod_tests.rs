@@ -1,7 +1,7 @@
 //! Topology detection, declarations, and connection failures without a
 //! server.
 
-use super::specs::{REFRESH, decode_meta, index_models, scope_key_model, text_model};
+use super::specs::{decode_meta, index_models, scope_key_model, text_model, REFRESH};
 use super::*;
 use tinystoragedrivers_core::{CollectionSpec, ErrorKind, IndexSpec, SearchSpec};
 
@@ -68,11 +68,9 @@ fn text_indexes_cover_declared_fields_without_stemming() {
     let options = model.options.unwrap();
     assert_eq!(options.default_language.as_deref(), Some("none"));
     assert_eq!(options.name.as_deref(), Some("_tsd_text"));
-    assert!(
-        text_model(&SearchSpec { fields: vec![] })
-            .unwrap()
-            .is_none()
-    );
+    assert!(text_model(&SearchSpec { fields: vec![] })
+        .unwrap()
+        .is_none());
     for fields in [
         vec!["$x".to_owned()],
         vec!["ok".to_owned(), "a.$y".to_owned()],
@@ -378,11 +376,9 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         return;
     };
     assert!(backend.capabilities().contains(Capability::ScopePurge));
-    assert!(
-        !backend
-            .capabilities()
-            .contains(Capability::AtomicScopePurge)
-    );
+    assert!(!backend
+        .capabilities()
+        .contains(Capability::AtomicScopePurge));
     let owner = Scope::new(unique("purge_owner")).unwrap();
     let other = Scope::new(unique("purge_keep")).unwrap();
     let target = backend.for_scope(&owner).unwrap();
@@ -401,14 +397,12 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         target.purge(&atomic).await.unwrap_err().kind(),
         ErrorKind::Unsupported(Capability::AtomicScopePurge)
     );
-    assert!(
-        target
-            .documents()
-            .get("purge_records", "one")
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(target
+        .documents()
+        .get("purge_records", "one")
+        .await
+        .unwrap()
+        .is_some());
     let receipt = target.purge(&request).await.unwrap();
     assert_eq!(receipt.status, PurgeStatus::Complete);
     assert_eq!(receipt.generation, ScopeGeneration(1));
@@ -419,14 +413,12 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
     let fresh = backend
         .for_scope_generation(&owner, receipt.generation)
         .unwrap();
-    assert!(
-        fresh
-            .documents()
-            .get("purge_records", "one")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(fresh
+        .documents()
+        .get("purge_records", "one")
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(fresh.streams().len("purge_events").await.unwrap(), 0);
     assert!(fresh.blobs().get("purge_blob").await.unwrap().is_none());
     fresh
@@ -451,13 +443,12 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         .unwrap();
     assert_purge_retired(&target).await;
     assert_eq!(target.purge(&request).await.unwrap(), receipt);
-    assert!(
-        keep.documents()
-            .get("purge_records", "one")
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(keep
+        .documents()
+        .get("purge_records", "one")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(keep.streams().len("purge_events").await.unwrap(), 1);
     assert_eq!(
         keep.blobs()
@@ -507,4 +498,61 @@ async fn seed_purge_ports(bound: &ScopedStorage) {
         .put("purge_blob", vec![7; 600_000], None)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let Some(backend) =
+        live("live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest").await
+    else {
+        return;
+    };
+    let now = Arc::new(AtomicU64::new(1_000_000));
+    let clock = Arc::clone(&now);
+    let backend = backend.with_clock(Arc::new(move || clock.load(Ordering::Relaxed)));
+    let scope = Scope::new(unique("blobsweep")).unwrap();
+    let handle = backend.for_scope(&scope).unwrap();
+    let blobs = handle.blobs();
+
+    blobs
+        .put_expiring("gone", vec![1], None, Duration::from_millis(500))
+        .await
+        .unwrap();
+    blobs
+        .put_expiring("later", vec![2], None, Duration::from_secs(60))
+        .await
+        .unwrap();
+    blobs.put("kept", vec![3], None).await.unwrap();
+    assert_eq!(backend.sweep_expired_blobs(&scope).await.unwrap(), 0);
+
+    now.fetch_add(1_000, Ordering::Relaxed);
+    // A read of the lapsed key reads absent, twice (reclaim must not resurface it).
+    assert!(blobs.get("gone").await.unwrap().is_none());
+    assert!(blobs.head("gone").await.unwrap().is_none());
+    assert!(blobs.get("later").await.unwrap().is_some());
+    let listed: Vec<_> = blobs
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.key)
+        .collect();
+    assert_eq!(listed, ["kept", "later"]);
+
+    now.fetch_add(120_000, Ordering::Relaxed);
+    assert_eq!(
+        backend
+            .sweep_expired_blobs_generation(
+                &scope,
+                tinystoragedrivers_core::ScopeGeneration::default()
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(blobs.get("later").await.unwrap().is_none());
+    assert!(blobs.get("kept").await.unwrap().is_some());
 }
