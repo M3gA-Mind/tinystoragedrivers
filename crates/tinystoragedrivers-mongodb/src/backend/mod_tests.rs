@@ -508,3 +508,60 @@ async fn seed_purge_ports(bound: &ScopedStorage) {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let Some(backend) =
+        live("live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest").await
+    else {
+        return;
+    };
+    let now = Arc::new(AtomicU64::new(1_000_000));
+    let clock = Arc::clone(&now);
+    let backend = backend.with_clock(Arc::new(move || clock.load(Ordering::Relaxed)));
+    let scope = Scope::new(unique("blobsweep")).unwrap();
+    let handle = backend.for_scope(&scope).unwrap();
+    let blobs = handle.blobs();
+
+    blobs
+        .put_expiring("gone", vec![1], None, Duration::from_millis(500))
+        .await
+        .unwrap();
+    blobs
+        .put_expiring("later", vec![2], None, Duration::from_secs(60))
+        .await
+        .unwrap();
+    blobs.put("kept", vec![3], None).await.unwrap();
+    assert_eq!(backend.sweep_expired_blobs(&scope).await.unwrap(), 0);
+
+    now.fetch_add(1_000, Ordering::Relaxed);
+    // A read of the lapsed key reads absent, twice (reclaim must not resurface it).
+    assert!(blobs.get("gone").await.unwrap().is_none());
+    assert!(blobs.head("gone").await.unwrap().is_none());
+    assert!(blobs.get("later").await.unwrap().is_some());
+    let listed: Vec<_> = blobs
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.key)
+        .collect();
+    assert_eq!(listed, ["kept", "later"]);
+
+    now.fetch_add(120_000, Ordering::Relaxed);
+    assert_eq!(
+        backend
+            .sweep_expired_blobs_generation(
+                &scope,
+                tinystoragedrivers_core::ScopeGeneration::default()
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(blobs.get("later").await.unwrap().is_none());
+    assert!(blobs.get("kept").await.unwrap().is_some());
+}

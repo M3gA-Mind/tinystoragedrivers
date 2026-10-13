@@ -112,12 +112,21 @@ pub trait StorageEndpoint: Send + Sync + 'static {
     /// before it forwards a caller's first `WatchOpen`, so no signal is missed;
     /// `None` means the endpoint has no signals for that caller.
     fn watch_signals(&self, sender: &BusName) -> Option<broadcast::Receiver<WatchChanged>>;
+
+    /// Which binding `sender`'s signals currently come from. It must change
+    /// whenever the endpoint rebinds the caller (for example after a release),
+    /// so the host replaces a forwarder still relaying the old binding instead
+    /// of leaving the new one without signals. Endpoints that never rebind can
+    /// keep the default.
+    fn watch_epoch(&self, _sender: &BusName) -> u64 {
+        0
+    }
 }
 
 struct Shared {
     connection: WeakConnection,
     endpoint: Arc<dyn StorageEndpoint>,
-    forwarders: Mutex<HashMap<BusName, JoinHandle<()>>>,
+    forwarders: Mutex<HashMap<BusName, (u64, JoinHandle<()>)>>,
 }
 
 impl Shared {
@@ -126,8 +135,12 @@ impl Shared {
         let Ok(mut forwarders) = self.forwarders.lock() else {
             return;
         };
-        forwarders.retain(|_, task| !task.is_finished());
-        if forwarders.contains_key(sender) {
+        forwarders.retain(|_, (_, task)| !task.is_finished());
+        let epoch = self.endpoint.watch_epoch(sender);
+        if forwarders
+            .get(sender)
+            .is_some_and(|(held, _)| *held == epoch)
+        {
             return;
         }
         let (Some(mut signals), Ok(path)) =
@@ -135,6 +148,10 @@ impl Shared {
         else {
             return;
         };
+        // A forwarder for a binding that was released is replaced, not kept.
+        if let Some((_, stale)) = forwarders.remove(sender) {
+            stale.abort();
+        }
         let (interface, member) = (interface(), member(WATCH_MEMBER));
         let connection = self.connection.clone();
         let task = tokio::spawn(async move {
@@ -156,7 +173,7 @@ impl Shared {
                 }
             }
         });
-        forwarders.insert(sender.clone(), task);
+        forwarders.insert(sender.clone(), (epoch, task));
     }
 }
 
@@ -365,7 +382,7 @@ impl ServedStorage {
             self.connection.unserve(&object_path(object)).await;
         }
         if let Ok(mut forwarders) = self.shared.forwarders.lock() {
-            for (_, task) in forwarders.drain() {
+            for (_, (_, task)) in forwarders.drain() {
                 task.abort();
             }
         }

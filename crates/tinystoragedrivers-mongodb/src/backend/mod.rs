@@ -352,6 +352,38 @@ impl MongoStorage {
         .await
     }
 
+    /// Remove the blobs of `scope` whose lifetime has passed. Reads already
+    /// treat them as absent (and reclaim the one they touch); this reclaims the
+    /// rest, for a periodic sweeper. Returns how many files were removed.
+    ///
+    /// # Errors
+    ///
+    /// A backend error.
+    pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        self.sweep_expired_blobs_generation(
+            scope,
+            tinystoragedrivers_core::ScopeGeneration::default(),
+        )
+        .await
+    }
+
+    /// [`sweep_expired_blobs`](Self::sweep_expired_blobs) through an explicitly
+    /// issued scope generation, for a scope that has been reset.
+    ///
+    /// # Errors
+    ///
+    /// A retired generation, a pending reset, or a backend error.
+    pub async fn sweep_expired_blobs_generation(
+        &self,
+        scope: &Scope,
+        generation: tinystoragedrivers_core::ScopeGeneration,
+    ) -> Result<u64> {
+        crate::purge::check(&self.shared, scope, generation, None).await?;
+        MongoBlobs::new(Arc::clone(&self.shared), scope.clone(), false)
+            .sweep_expired()
+            .await
+    }
+
     /// Reclaim expired documents through an explicitly issued scope generation.
     ///
     /// # Errors
@@ -440,7 +472,8 @@ impl StorageBackend for MongoStorage {
             .with(Capability::Ttl)
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
-            .with(Capability::CollectionValidation);
+            .with(Capability::CollectionValidation)
+            .with(Capability::BlobTtl);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {

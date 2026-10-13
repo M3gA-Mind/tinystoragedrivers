@@ -506,3 +506,42 @@ async fn a_plain_put_replaces_a_lifetime_and_a_multipart_blob_can_expire() {
     DRIVEN_B.store(1_000_011, Ordering::SeqCst);
     assert!(blobs.head("big").await.unwrap().is_none());
 }
+
+static DRIVEN_C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn driven_clock_c() -> u64 {
+    DRIVEN_C.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn the_sweeper_deletes_only_lapsed_objects_of_its_scope() {
+    use std::sync::atomic::Ordering;
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let blobs = handle(objects.clone(), "sweep").with_clock(driven_clock_c);
+    let other = handle(objects.clone(), "sweep-other").with_clock(driven_clock_c);
+    DRIVEN_C.store(1_000, Ordering::SeqCst);
+    for store in [&blobs, &other] {
+        store
+            .put_expiring("old", vec![1], None, Duration::from_millis(10))
+            .await
+            .unwrap();
+    }
+    blobs
+        .put_expiring("young", vec![2], None, Duration::from_millis(1_000))
+        .await
+        .unwrap();
+    blobs.put("forever", vec![3], None).await.unwrap();
+
+    DRIVEN_C.store(1_500, Ordering::SeqCst);
+    assert_eq!(blobs.sweep_expired().await.unwrap(), 1);
+    assert!(
+        objects.head(&blobs.path("old").unwrap()).await.is_err(),
+        "the lapsed object is physically gone"
+    );
+    assert!(
+        objects.head(&other.path("old").unwrap()).await.is_ok(),
+        "another scope's lapsed object is left to its own sweep"
+    );
+    assert_eq!(blobs.list("").await.unwrap().len(), 2);
+    assert_eq!(blobs.sweep_expired().await.unwrap(), 0);
+}

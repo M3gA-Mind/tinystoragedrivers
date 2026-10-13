@@ -82,6 +82,36 @@ impl FileBlobs {
         db.scope_dir(scope).join("blobs")
     }
 
+    /// Remove every lapsed blob of this scope and return how many went.
+    ///
+    /// Reads already treat a lapsed blob as absent and reclaim the one they
+    /// touch; this reclaims the rest, for a periodic sweeper.
+    ///
+    /// # Errors
+    ///
+    /// A filesystem error.
+    pub async fn sweep_expired(&self) -> Result<u64> {
+        let scope = self.scope.clone();
+        self.db
+            .run(move |db| {
+                let dir = Self::dir(db, &scope);
+                let now = db.now();
+                let mut swept = 0;
+                for path in files_with_suffix(&dir, META_SUFFIX)? {
+                    let Some(sidecar) = read_json::<Sidecar>(&path)? else {
+                        continue;
+                    };
+                    if sidecar.expired(now) {
+                        remove_optional(&dir.join(file_stem(&sidecar.key)))?;
+                        remove_optional(&path)?;
+                        swept += 1;
+                    }
+                }
+                Ok(swept)
+            })
+            .await
+    }
+
     /// Run `work` under the database lock with this key's paths.
     async fn with<T, F>(&self, key: &str, work: F) -> Result<T>
     where
@@ -130,7 +160,17 @@ impl FileBlobs {
 /// The blob's metadata, `None` when it does not exist.
 fn head(paths: &Paths, key: &str) -> Result<Option<BlobMeta>> {
     match read_json::<Sidecar>(&paths.meta)? {
-        Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now) => Ok(None),
+        Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now) => {
+            // Reclaim on read: the database lock is held, so no writer can
+            // have replaced the lapsed blob between the check and the removal.
+            // Failure only delays the reclaim; the blob already reads absent.
+            // The data file goes first: if that fails the sidecar stays, so a
+            // later read or sweep can retry instead of orphaning the data.
+            if remove_optional(&paths.data).is_ok() {
+                let _ = remove_optional(&paths.meta);
+            }
+            Ok(None)
+        }
         Some(sidecar) if sidecar.key == key => meta(&paths.data, sidecar),
         Some(_) => Err(collision()),
         None => Ok(None),
@@ -288,7 +328,15 @@ impl BlobStore for FileBlobs {
                     let Some(sidecar) = read_json::<Sidecar>(&path)? else {
                         continue;
                     };
-                    if !sidecar.key.starts_with(&prefix) || sidecar.expired(now) {
+                    if sidecar.expired(now) {
+                        // Sidecar last, and only once the payload is gone, so a
+                        // failed removal stays discoverable for the next pass.
+                        if remove_optional(&dir.join(file_stem(&sidecar.key))).is_ok() {
+                            let _ = remove_optional(&path);
+                        }
+                        continue;
+                    }
+                    if !sidecar.key.starts_with(&prefix) {
                         continue;
                     }
                     let data = dir.join(file_stem(&sidecar.key));

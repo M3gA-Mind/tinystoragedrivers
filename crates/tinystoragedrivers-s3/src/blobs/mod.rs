@@ -285,6 +285,64 @@ impl S3Blobs {
         self
     }
 
+    /// Delete every object of this scope whose lifetime has passed and return
+    /// how many went, for a periodic sweeper.
+    ///
+    /// Reads already treat a lapsed blob as absent, but object storage cannot
+    /// delete conditionally, so a read does not reclaim: a writer replacing the
+    /// key between the read and the delete would lose its new object. The sweep
+    /// re-checks each object immediately before deleting it, which narrows but
+    /// cannot close that window; run it from one sweeper and keep a bucket
+    /// lifecycle rule as the backstop.
+    ///
+    /// # Errors
+    ///
+    /// A backend error.
+    pub async fn sweep_expired(&self) -> Result<u64> {
+        let root = Path::parse(self.prefix.trim_end_matches('/'))
+            .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+        let mut objects = self.store.list(Some(&root));
+        let mut swept = 0;
+        while let Some(object) = objects.try_next().await.map_err(map_error)? {
+            let found = match self.head_object(&object.location).await {
+                Ok(found) => found,
+                Err(object_store::Error::NotFound { .. }) => continue,
+                Err(error) => return Err(map_error(error)),
+            };
+            if !lapsed(&found.attributes, (self.clock)()) {
+                continue;
+            }
+            // Re-check right before the delete: a concurrent put may have
+            // replaced the object with a live one since the listing.
+            match self.head_object(&object.location).await {
+                Ok(again) if lapsed(&again.attributes, (self.clock)()) => {}
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => continue,
+                Err(error) => return Err(map_error(error)),
+            }
+            match self.store.delete(&object.location).await {
+                Ok(()) => swept += 1,
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(map_error(error)),
+            }
+        }
+        Ok(swept)
+    }
+
+    async fn head_object(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<object_store::GetResult, object_store::Error> {
+        self.store
+            .get_opts(
+                path,
+                object_store::GetOptions {
+                    head: true,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
     fn path(&self, key: &str) -> Result<Path> {
         validate_blob_key(key)?;
         if key.len() > self.max_key_len() {

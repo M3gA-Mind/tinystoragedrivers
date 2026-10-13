@@ -370,7 +370,7 @@ async fn expiry_streamed(storage: &ScopedStorage, key: &str) {
             .await,
         "brief lifetime",
     );
-    std::thread::sleep(Duration::from_millis(400));
+    tokio::time::sleep(Duration::from_millis(400)).await;
     assert_absent(storage, &brief, "lapsed lifetime").await;
 
     for left in [key, streamed.as_str()] {
