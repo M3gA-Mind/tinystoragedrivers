@@ -20,7 +20,7 @@ use crate::host::{HostFailure, StorageCall, StorageEndpoint};
 /// `bind` is the host's whole policy: it maps the broker-authenticated sender
 /// to a server over that caller's scope, grant and fence, or `None` to refuse.
 /// Servers are created on a caller's first call and kept, so a caller's watches
-/// and signals live as long as the endpoint.
+/// and signals live until [`PerCallerEndpoint::release`] drops it.
 pub struct PerCallerEndpoint<F> {
     bind: F,
     servers: Mutex<HashMap<BusName, Arc<StorageServer>>>,
@@ -43,6 +43,15 @@ where
             bind,
             servers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Drop the server bound to `caller`, for when it leaves the bus, and
+    /// return whether it had one. The caller's watches and signals end with
+    /// it; a later call from the same name binds afresh through `bind`.
+    pub fn release(&self, caller: &BusName) -> bool {
+        self.servers
+            .lock()
+            .is_ok_and(|mut servers| servers.remove(caller).is_some())
     }
 
     fn server(&self, sender: Option<&BusName>) -> Result<Arc<StorageServer>, HostFailure> {

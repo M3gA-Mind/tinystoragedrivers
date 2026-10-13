@@ -7,10 +7,55 @@ use mongodb::bson::DateTime;
 fn metadata_carries_scope_and_content_type() {
     let scope = Scope::new("alice").unwrap();
     assert_eq!(
-        file_metadata(&scope, Some("text/plain")),
+        file_metadata(&scope, Some("text/plain"), None),
         doc! {"_scope": "alice", "content_type": "text/plain"}
     );
-    assert_eq!(file_metadata(&scope, None), doc! {"_scope": "alice"});
+    assert_eq!(file_metadata(&scope, None, None), doc! {"_scope": "alice"});
+    assert_eq!(
+        file_metadata(&scope, None, Some(42)),
+        doc! {"_scope": "alice", "expires_at_ms": 42_i64}
+    );
+}
+
+fn file(id: i32, key: &str, expires_at_ms: Option<i64>) -> FilesCollectionDocument {
+    let mut metadata = doc! {"_scope": "s"};
+    if let Some(at) = expires_at_ms {
+        metadata.insert("expires_at_ms", at);
+    }
+    mongodb::bson::from_document(doc! {
+        "_id": id,
+        "length": 1_i64,
+        "chunkSize": 4,
+        "uploadDate": DateTime::now(),
+        "filename": key,
+        "metadata": metadata,
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_file_lapses_at_its_expiry_instant() {
+    assert!(!lapsed(&file(1, "a", None), 1_000));
+    assert!(!lapsed(&file(1, "a", Some(1_001)), 1_000));
+    assert!(lapsed(&file(1, "a", Some(1_000)), 1_000));
+    assert!(lapsed(&file(1, "a", Some(0)), 1_000));
+}
+
+#[test]
+fn a_lapsed_newest_file_hides_its_key_and_older_versions() {
+    // `files` orders by key, then newest first.
+    let files = vec![
+        file(9, "a", Some(10)),
+        file(3, "a", None),
+        file(5, "b", None),
+        file(4, "b", Some(10)),
+        file(7, "c", Some(10)),
+    ];
+    let (live, dead) = live_newest(files, 100);
+    let keys: Vec<_> = live.iter().map(|f| f.filename.clone().unwrap()).collect();
+    assert_eq!(keys, ["b"]);
+    assert_eq!(live[0].id, Bson::Int32(5));
+    assert_eq!(dead, [Bson::Int32(9), Bson::Int32(4), Bson::Int32(7)]);
 }
 
 #[test]

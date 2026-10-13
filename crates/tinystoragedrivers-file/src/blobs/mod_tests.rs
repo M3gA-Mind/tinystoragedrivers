@@ -170,14 +170,63 @@ async fn an_expiring_blob_records_its_deadline_and_vanishes_at_it() {
     assert!(blobs.head("k").await.unwrap().is_none());
     assert!(blobs.get_range("k", 0..1).await.unwrap().is_none());
     assert_eq!(blobs.list("").await.unwrap().len(), 0);
-    assert!(data.exists(), "reads leave reclamation to the next write");
+    assert!(
+        !data.exists() && !meta.exists(),
+        "a read that finds the blob lapsed reclaims its files"
+    );
     assert!(
         !blobs.delete("k").await.unwrap(),
         "a lapsed blob is not deleted"
     );
-    assert!(
-        !data.exists() && !meta.exists(),
-        "delete reclaims the files"
+}
+
+#[tokio::test]
+async fn a_list_reclaims_the_lapsed_blobs_it_passes() {
+    use std::sync::atomic::Ordering;
+    let (_dir, storage, blobs, now) = open_driven();
+    blobs
+        .put_expiring("gone", vec![1], None, Duration::from_millis(5))
+        .await
+        .unwrap();
+    blobs.put("kept", vec![2], None).await.unwrap();
+    now.store(10_005, Ordering::SeqCst);
+    let keys: Vec<_> = blobs
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.key)
+        .collect();
+    assert_eq!(keys, ["kept"]);
+    let (data, meta) = files(&storage, "gone");
+    assert!(!data.exists() && !meta.exists());
+}
+
+#[tokio::test]
+async fn the_sweeper_reclaims_only_lapsed_blobs_of_its_scope() {
+    use std::sync::atomic::Ordering;
+    let (_dir, storage, blobs, now) = open_driven();
+    blobs
+        .put_expiring("old", vec![1], None, Duration::from_millis(5))
+        .await
+        .unwrap();
+    blobs
+        .put_expiring("young", vec![2], None, Duration::from_millis(500))
+        .await
+        .unwrap();
+    blobs.put("forever", vec![3], None).await.unwrap();
+    now.store(10_100, Ordering::SeqCst);
+    assert_eq!(
+        storage.sweep_expired_blobs(&Scope::local()).await.unwrap(),
+        1
+    );
+    let (data, meta) = files(&storage, "old");
+    assert!(!data.exists() && !meta.exists());
+    assert!(files(&storage, "young").0.exists());
+    assert!(files(&storage, "forever").0.exists());
+    assert_eq!(
+        storage.sweep_expired_blobs(&Scope::local()).await.unwrap(),
+        0
     );
 }
 

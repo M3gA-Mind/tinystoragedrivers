@@ -275,6 +275,19 @@ impl FileStorage {
         )
     }
 
+    /// Remove the blobs of `scope` whose lifetime has passed and return how
+    /// many went. Reads already hide them and reclaim the one they touch; this
+    /// reclaims the rest, for a periodic sweeper.
+    ///
+    /// # Errors
+    ///
+    /// A filesystem error.
+    pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        FileBlobs::new(Arc::clone(&self.db), scope.clone(), None)
+            .sweep_expired()
+            .await
+    }
+
     /// The directory this store keeps its root database in.
     #[must_use]
     pub fn dir(&self) -> &Path {

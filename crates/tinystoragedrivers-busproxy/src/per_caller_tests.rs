@@ -101,3 +101,25 @@ async fn a_known_caller_is_served_from_one_stable_binding() {
         .unwrap();
     assert_eq!(found.unwrap().0.meta.len, 2);
 }
+
+#[tokio::test]
+async fn a_released_caller_is_rebound_on_its_next_call() {
+    let bound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&bound);
+    let backend = MemoryStorage::new();
+    let endpoint = PerCallerEndpoint::new(move |_: &BusName| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(StorageServer::new(
+            backend.for_scope(&Scope::local()).unwrap(),
+        ))
+    });
+    let caller = BusName::new(":1.1").unwrap();
+    endpoint.call(call(Some(&caller))).await.unwrap();
+    endpoint.call(call(Some(&caller))).await.unwrap();
+    assert_eq!(bound.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    assert!(endpoint.release(&caller));
+    assert!(!endpoint.release(&caller), "nothing left to release");
+    endpoint.call(call(Some(&caller))).await.unwrap();
+    assert_eq!(bound.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

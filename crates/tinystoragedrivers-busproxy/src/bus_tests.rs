@@ -231,7 +231,7 @@ async fn a_caller_the_host_does_not_know_is_denied() {
         .unwrap();
     let error = connect_storage(stranger).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert!(error.to_string().contains("unavailable") || !error.to_string().is_empty());
+    assert!(!error.to_string().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

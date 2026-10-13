@@ -4,6 +4,11 @@
 //! is the blob key and its `metadata` is `{_scope, content_type}`; every
 //! lookup filters on `metadata._scope` through [`scoped_filter`].
 //!
+//! A blob written with a lifetime records `metadata.expires_at_ms`. Once the
+//! backend clock passes it the blob reads as absent through every read; the
+//! read that notices also reclaims the expired file, and
+//! [`MongoBlobs::sweep_expired`] reclaims all of a scope's lapsed files.
+//!
 //! A replacement uploads the new file first and then deletes every older file
 //! with the same key (by `_id`, which orders uploads), and two concurrent
 //! writers converge on the one with the greater id. A read picks the newest
@@ -16,6 +21,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
@@ -25,7 +31,7 @@ use mongodb::bson::{Bson, Document, doc};
 use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capability, Result, Scope, StorageError, clamp_range,
+    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
     validate_blob_key,
 };
 
@@ -38,13 +44,59 @@ use crate::scoped::scoped_filter;
 /// Where a file's scope lives.
 const FILE_SCOPE: &str = "metadata._scope";
 
+/// Where a file's expiry (epoch milliseconds) lives inside its metadata.
+const EXPIRES_AT: &str = "expires_at_ms";
+
 /// The metadata stored with a file.
-pub(crate) fn file_metadata(scope: &Scope, content_type: Option<&str>) -> Document {
+pub(crate) fn file_metadata(
+    scope: &Scope,
+    content_type: Option<&str>,
+    expires_at_ms: Option<u64>,
+) -> Document {
     let mut metadata = doc! {SCOPE: scope.as_str()};
     if let Some(content_type) = content_type {
         metadata.insert("content_type", content_type);
     }
+    if let Some(at) = expires_at_ms {
+        metadata.insert(EXPIRES_AT, i64::try_from(at).unwrap_or(i64::MAX));
+    }
     metadata
+}
+
+/// Whether `file` has outlived its lifetime at `now` (epoch milliseconds).
+pub(crate) fn lapsed(file: &FilesCollectionDocument, now: u64) -> bool {
+    file.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get_i64(EXPIRES_AT).ok())
+        .is_some_and(|at| at <= i64::try_from(now).unwrap_or(i64::MAX))
+}
+
+/// The first file of each key (the newest, as `files` orders them) that is
+/// still alive at `now`, plus the ids of every lapsed file seen.
+///
+/// A key whose newest file has lapsed reads as absent, so its older files are
+/// not surfaced either; only lapsed files are reported for reclaim.
+pub(crate) fn live_newest(
+    files: Vec<FilesCollectionDocument>,
+    now: u64,
+) -> (Vec<FilesCollectionDocument>, Vec<Bson>) {
+    let mut live = Vec::new();
+    let mut dead = Vec::new();
+    let mut last: Option<String> = None;
+    for file in files {
+        let key = file.filename.clone().unwrap_or_default();
+        let newest = last.as_deref() != Some(key.as_str());
+        let gone = lapsed(&file, now);
+        if newest {
+            last = Some(key);
+        }
+        if gone {
+            dead.push(file.id);
+        } else if newest {
+            live.push(file);
+        }
+    }
+    (live, dead)
 }
 
 /// A file's [`BlobMeta`].
@@ -173,11 +225,40 @@ impl MongoBlobs {
         bucket: &GridFsBucket,
         key: &str,
     ) -> Result<Option<FilesCollectionDocument>> {
-        Ok(self
-            .files(bucket, doc! {"filename": key})
+        let files = self.files(bucket, doc! {"filename": key}).await?;
+        let now = self.shared.now();
+        let (live, dead) = live_newest(files.into_iter().take(1).collect(), now);
+        if !dead.is_empty() {
+            self.reclaim(bucket, dead).await;
+        }
+        Ok(live.into_iter().next())
+    }
+
+    /// Best-effort removal of lapsed files. They already read as absent, so a
+    /// failure here only delays the reclaim to the next read or sweep.
+    async fn reclaim(&self, bucket: &GridFsBucket, ids: Vec<Bson>) {
+        // Ignored on purpose; see above.
+        let _ = self.remove(bucket, ids).await;
+    }
+
+    /// Remove every lapsed file of this scope, whether or not a newer file of
+    /// the same key exists. Returns how many files were removed.
+    ///
+    /// # Errors
+    ///
+    /// A backend error.
+    pub(crate) async fn sweep_expired(&self) -> Result<u64> {
+        let bucket = self.bucket().await?;
+        let now = i64::try_from(self.shared.now()).unwrap_or(i64::MAX);
+        let ids: Vec<Bson> = self
+            .files(&bucket, doc! {"metadata.expires_at_ms": {"$lte": now}})
             .await?
             .into_iter()
-            .next())
+            .map(|file| file.id)
+            .collect();
+        let count = ids.len() as u64;
+        self.remove(&bucket, ids).await?;
+        Ok(count)
     }
 
     async fn remove(&self, bucket: &GridFsBucket, ids: Vec<Bson>) -> Result<()> {
@@ -259,9 +340,20 @@ impl MongoBlobs {
     }
 }
 
-#[async_trait]
-impl BlobStore for MongoBlobs {
-    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+impl MongoBlobs {
+    /// Store `bytes`, expiring `ttl` after the backend clock's now when given.
+    async fn store(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Option<Duration>,
+    ) -> Result<BlobMeta> {
+        let expires_at_ms = ttl.map(|ttl| {
+            self.shared
+                .now()
+                .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+        });
         crate::purge::admitted!(self, {
             validate_blob_key(key)?;
             self.writable("a blob put")?;
@@ -274,7 +366,7 @@ impl BlobStore for MongoBlobs {
             let bucket = self.bucket().await?;
             let mut upload = bucket
                 .open_upload_stream(key)
-                .metadata(file_metadata(&self.scope, content_type))
+                .metadata(file_metadata(&self.scope, content_type, expires_at_ms))
                 .await
                 .map_err(errors::failed("store a blob"))?;
             upload
@@ -299,6 +391,27 @@ impl BlobStore for MongoBlobs {
                 content_type: content_type.map(str::to_owned),
             })
         })
+    }
+}
+
+#[async_trait]
+impl BlobStore for MongoBlobs {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none().with(Capability::BlobTtl)
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None).await
+    }
+
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, Some(ttl)).await
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
@@ -356,13 +469,10 @@ impl BlobStore for MongoBlobs {
             validate_blob_key(key)?;
             self.writable("a blob delete")?;
             let bucket = self.bucket().await?;
-            let ids: Vec<Bson> = self
-                .files(&bucket, doc! {"filename": key})
-                .await?
-                .into_iter()
-                .map(|file| file.id)
-                .collect();
-            let existed = !ids.is_empty();
+            let files = self.files(&bucket, doc! {"filename": key}).await?;
+            // A lapsed blob is not there to delete, but its files go too.
+            let existed = !live_newest(files.clone(), self.shared.now()).0.is_empty();
+            let ids: Vec<Bson> = files.into_iter().map(|file| file.id).collect();
             self.remove(&bucket, ids).await?;
             Ok(existed)
         })
@@ -374,15 +484,15 @@ impl BlobStore for MongoBlobs {
             let files = self
                 .files(&bucket, doc! {"filename": prefix_regex(prefix)})
                 .await?;
-            let mut out: Vec<BlobMeta> = Vec::new();
-            for file in &files {
-                let meta = blob_meta(file);
-                let fresh = out.last().is_none_or(|last| last.key != meta.key);
-                if fresh && meta.key.starts_with(prefix) {
-                    out.push(meta);
-                }
+            let (live, dead) = live_newest(files, self.shared.now());
+            if !dead.is_empty() {
+                self.reclaim(&bucket, dead).await;
             }
-            Ok(out)
+            Ok(live
+                .iter()
+                .map(blob_meta)
+                .filter(|meta| meta.key.starts_with(prefix))
+                .collect())
         })
     }
 }
