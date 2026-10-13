@@ -1,7 +1,7 @@
 //! Topology detection, declarations, and connection failures without a
 //! server.
 
-use super::specs::{decode_meta, index_models, scope_key_model, text_model, REFRESH};
+use super::specs::{REFRESH, decode_meta, index_models, scope_key_model, text_model};
 use super::*;
 use tinystoragedrivers_core::{CollectionSpec, ErrorKind, IndexSpec, SearchSpec};
 
@@ -68,9 +68,11 @@ fn text_indexes_cover_declared_fields_without_stemming() {
     let options = model.options.unwrap();
     assert_eq!(options.default_language.as_deref(), Some("none"));
     assert_eq!(options.name.as_deref(), Some("_tsd_text"));
-    assert!(text_model(&SearchSpec { fields: vec![] })
-        .unwrap()
-        .is_none());
+    assert!(
+        text_model(&SearchSpec { fields: vec![] })
+            .unwrap()
+            .is_none()
+    );
     for fields in [
         vec!["$x".to_owned()],
         vec!["ok".to_owned(), "a.$y".to_owned()],
@@ -376,9 +378,11 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         return;
     };
     assert!(backend.capabilities().contains(Capability::ScopePurge));
-    assert!(!backend
-        .capabilities()
-        .contains(Capability::AtomicScopePurge));
+    assert!(
+        !backend
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
     let owner = Scope::new(unique("purge_owner")).unwrap();
     let other = Scope::new(unique("purge_keep")).unwrap();
     let target = backend.for_scope(&owner).unwrap();
@@ -397,12 +401,14 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         target.purge(&atomic).await.unwrap_err().kind(),
         ErrorKind::Unsupported(Capability::AtomicScopePurge)
     );
-    assert!(target
-        .documents()
-        .get("purge_records", "one")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        target
+            .documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
     let receipt = target.purge(&request).await.unwrap();
     assert_eq!(receipt.status, PurgeStatus::Complete);
     assert_eq!(receipt.generation, ScopeGeneration(1));
@@ -413,12 +419,14 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
     let fresh = backend
         .for_scope_generation(&owner, receipt.generation)
         .unwrap();
-    assert!(fresh
-        .documents()
-        .get("purge_records", "one")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        fresh
+            .documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(fresh.streams().len("purge_events").await.unwrap(), 0);
     assert!(fresh.blobs().get("purge_blob").await.unwrap().is_none());
     fresh
@@ -443,12 +451,13 @@ async fn quiescent_scope_purge_erases_every_port_and_revokes_replacement_reads()
         .unwrap();
     assert_purge_retired(&target).await;
     assert_eq!(target.purge(&request).await.unwrap(), receipt);
-    assert!(keep
-        .documents()
-        .get("purge_records", "one")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        keep.documents()
+            .get("purge_records", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(keep.streams().len("purge_events").await.unwrap(), 1);
     assert_eq!(
         keep.blobs()
