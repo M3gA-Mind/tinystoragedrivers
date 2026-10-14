@@ -527,7 +527,7 @@ async fn the_sweeper_deletes_only_lapsed_objects_of_its_scope() {
             .unwrap();
     }
     blobs
-        .put_expiring("young", vec![2], None, Duration::from_millis(1_000))
+        .put_expiring("young", vec![2], None, Duration::from_secs(1))
         .await
         .unwrap();
     blobs.put("forever", vec![3], None).await.unwrap();

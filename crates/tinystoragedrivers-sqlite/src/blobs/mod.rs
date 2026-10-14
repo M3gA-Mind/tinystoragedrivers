@@ -3,12 +3,12 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, async_trait, clamp_range,
-    validate_blob_key,
+    Blob, BlobMeta, BlobStore, Capabilities, Capability, Clock, Result, Scope, async_trait,
+    clamp_range, validate_blob_key,
 };
 
 use crate::connection::Db;
@@ -23,6 +23,8 @@ pub struct SqliteBlobs {
     tables: Arc<Tables>,
     scope: Scope,
     generation: tinystoragedrivers_core::ScopeGeneration,
+    /// Milliseconds since the Unix epoch; every expiry check and sweep reads it.
+    clock: Clock,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
 }
@@ -41,6 +43,7 @@ impl SqliteBlobs {
         db: Arc<Db>,
         tables: Arc<Tables>,
         scope: Scope,
+        clock: Clock,
         fencing: Option<Arc<Fencing>>,
     ) -> Self {
         Self {
@@ -48,6 +51,7 @@ impl SqliteBlobs {
             tables,
             scope,
             generation: tinystoragedrivers_core::ScopeGeneration::default(),
+            clock,
             fencing,
         }
     }
@@ -105,6 +109,11 @@ impl SqliteBlobs {
             .await
     }
 
+    /// The injected clock's reading, as the signed value SQLite stores.
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.clock)()).unwrap_or(i64::MAX)
+    }
+
     fn table(&self) -> String {
         ident(&self.tables.blobs)
     }
@@ -133,7 +142,7 @@ impl SqliteBlobs {
             content_type: content_type.map(str::to_owned),
         };
         // A plain write clears any lifetime the key had.
-        let now = now_ms();
+        let now = self.now_ms();
         let expires_at =
             ttl.map(|ttl| now.saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)));
         let (scope, row) = (self.scope.clone(), described.clone());
@@ -155,15 +164,6 @@ impl SqliteBlobs {
     }
 }
 
-/// Milliseconds since the Unix epoch.
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-        })
-}
-
 /// Visible rows: no lifetime, or one still in the future.
 const LIVE: &str = "(expires_at_ms IS NULL OR expires_at_ms > ?";
 
@@ -182,7 +182,7 @@ impl BlobStore for SqliteBlobs {
             "DELETE FROM {} WHERE scope = ?1 AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?2",
             self.table()
         );
-        let (scope, now) = (self.scope.clone(), now_ms());
+        let (scope, now) = (self.scope.clone(), self.now_ms());
         let removed = self
             .write(move |conn| {
                 conn.execute(&sweep, params![scope.as_str(), now])
@@ -216,7 +216,7 @@ impl BlobStore for SqliteBlobs {
             "SELECT content_type, bytes FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
         );
-        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), self.now_ms());
         self.read(move |conn| {
             let row: Option<(Option<String>, Vec<u8>)> = conn
                 .query_row(&sql, params![scope.as_str(), key, now], |row| {
@@ -247,7 +247,7 @@ impl BlobStore for SqliteBlobs {
         );
         let start = i64::try_from(range.start.saturating_add(1)).unwrap_or(i64::MAX);
         let count = i64::try_from(range.end - range.start).unwrap_or(i64::MAX);
-        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), self.now_ms());
         self.read(move |conn| {
             conn.query_row(
                 &sql,
@@ -266,7 +266,7 @@ impl BlobStore for SqliteBlobs {
             "SELECT content_type, length(bytes) FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
         );
-        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), self.now_ms());
         self.read(move |conn| {
             let row: Option<(Option<String>, i64)> = conn
                 .query_row(&sql, params![scope.as_str(), key, now], |row| {
@@ -286,7 +286,7 @@ impl BlobStore for SqliteBlobs {
             self.table()
         );
         let expired = format!("DELETE FROM {} WHERE scope = ?1 AND key = ?2", self.table());
-        let (scope, key, now) = (self.scope.clone(), key.to_owned(), now_ms());
+        let (scope, key, now) = (self.scope.clone(), key.to_owned(), self.now_ms());
         self.write(move |conn| {
             let live = conn
                 .execute(&sql, params![scope.as_str(), key, now])
@@ -304,7 +304,7 @@ impl BlobStore for SqliteBlobs {
             "SELECT key, length(bytes), content_type FROM {} WHERE scope = ?1 AND {LIVE}2) ORDER BY key",
             self.table()
         );
-        let (scope, prefix, now) = (self.scope.clone(), prefix.to_owned(), now_ms());
+        let (scope, prefix, now) = (self.scope.clone(), prefix.to_owned(), self.now_ms());
         self.read(move |conn| {
             let mut statement = conn.prepare(&sql).map_err(during("list blobs"))?;
             let rows: Vec<(String, i64, Option<String>)> = statement
