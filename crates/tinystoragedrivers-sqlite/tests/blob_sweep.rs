@@ -69,5 +69,5 @@ async fn blob_reads_follow_the_injected_clock_not_real_time() {
     now.store(15_000, Ordering::SeqCst);
     assert!(blobs.get("k").await.unwrap().is_none());
     assert!(blobs.head("k").await.unwrap().is_none());
-    assert!(blobs.list("").await.unwrap().is_empty());
+    assert_eq!(blobs.list("").await.unwrap().len(), 0);
 }
