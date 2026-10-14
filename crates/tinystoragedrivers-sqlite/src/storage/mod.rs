@@ -159,7 +159,7 @@ impl SqliteStorage {
         }
     }
 
-    /// Read document expiry time from `clock` instead of the system clock.
+    /// Read document and blob expiry time from `clock` instead of the system clock.
     #[must_use]
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
@@ -214,6 +214,7 @@ impl SqliteStorage {
                     Arc::clone(&self.db),
                     Arc::clone(&self.tables),
                     scope.clone(),
+                    Arc::clone(&self.clock),
                     fencing.cloned(),
                 )
                 .with_generation(generation),
