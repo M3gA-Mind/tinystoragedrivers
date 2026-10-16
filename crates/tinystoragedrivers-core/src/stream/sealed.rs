@@ -28,9 +28,9 @@ use crate::error::{Result, StorageError};
 use crate::key::Key;
 
 /// The blob-key prefix reserved for sealed streams. Nothing else may write
-/// under it: the blob ports refuse it ([`validate_user_blob_key`]
-/// (crate::validate_user_blob_key)) and hide it from listings, and only a
-/// driver's own sealing code reaches it.
+/// under it: the blob ports refuse it
+/// ([`validate_user_blob_key`](crate::validate_user_blob_key)) and hide it from
+/// listings, and only a driver's own sealing code reaches it.
 pub const SEALED_BLOB_PREFIX: &str = "_tsd/sealed/";
 
 /// Whether `key` is under [`SEALED_BLOB_PREFIX`].

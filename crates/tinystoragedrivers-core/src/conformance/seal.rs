@@ -165,7 +165,18 @@ async fn sealing_loses_no_concurrent_append(storage: &ScopedStorage) {
         };
         let sealer = async {
             tokio::task::yield_now().await;
-            ok(streams.seal(&name).await, "seal during appends")
+            // A driver that cannot lock appends out retries a bounded number of
+            // times and may report a `Conflict` under sustained contention;
+            // sealing again then succeeds, once the appenders have stopped.
+            let mut last = None;
+            for _ in 0..200 {
+                match streams.seal(&name).await {
+                    Ok(outcome) => return outcome,
+                    Err(error) if error.kind() == ErrorKind::Conflict => last = Some(error),
+                    Err(error) => panic!("seal during appends: {error}"),
+                }
+            }
+            panic!("seal during appends kept conflicting: {last:?}")
         };
         let (a, b, c, outcome) = tokio::join!(appender(0), appender(1), appender(2), sealer);
         let stored: Vec<Value> = paged(streams.as_ref(), &name)

@@ -97,7 +97,7 @@ mod sealing {
                 .unwrap()
         }
 
-        async fn has_blob(&self, name: &str) -> bool {
+        fn has_blob(&self, name: &str) -> bool {
             self.blob_bytes(name).is_some()
         }
 
@@ -115,7 +115,7 @@ mod sealing {
         let f = fixture();
         let before = f.fill("j", 20).await;
         let written = f.streams.seal_write_blob("j").await.unwrap();
-        assert!(f.has_blob("j").await);
+        assert!(f.has_blob("j"));
 
         assert_eq!(
             f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
@@ -240,12 +240,12 @@ mod sealing {
         f.fill("j", 3).await;
         f.streams.seal_write_blob("j").await.unwrap();
         assert!(f.streams.delete_stream("j").await.unwrap());
-        assert!(!f.has_blob("j").await);
+        assert!(!f.has_blob("j"));
 
         f.fill("k", 3).await;
         f.streams.seal("k").await.unwrap();
         assert!(f.streams.delete_stream("k").await.unwrap());
-        assert!(!f.has_blob("k").await);
+        assert!(!f.has_blob("k"));
         assert_eq!(f.count(&f.tables.stream_heads), 0);
     }
 
@@ -266,6 +266,6 @@ mod sealing {
             f.streams.seal("j").await.unwrap_err().kind(),
             ErrorKind::Backend
         );
-        assert!(!f.has_blob("j").await, "nothing was written");
+        assert!(!f.has_blob("j"), "nothing was written");
     }
 }
