@@ -225,6 +225,14 @@ meta(key, value)                        registry snapshot, versions, layout
 
 The upgrade runs as one transaction, records `meta.layout = 2` and is not reversible. A backup copy is the host's responsibility.
 
+## Compatibility
+
+v2 ships as **v1.0.0** and is a breaking release on purpose:
+
+- **On-disk.** A SQLite file opened by v1.0.0 is upgraded in place to layout 2 and cannot be opened by v0.x again.
+- **Bus contract version 4.** Its wire types deny unknown fields, so a module built against contract 3 cannot decode a version-4 reply that carries `meta`. Every module re-pins onto v1.0.0 together with its host; mixed versions are unsupported. A module on contract 4 talking to an older host still works for default writes. An options-bearing write or `Seal` fails closed.
+- **`WriteOptions::created_ms` is host-only.** The bus refuses it with `InvalidInput`.
+
 ## Invariants
 
 1. Every record's scope parses under §1. Tenants never nest, and no tenant's scope is a prefix of another tenant's: `u:a` and `u:ab` are distinct because the tenant ends at `/`.
