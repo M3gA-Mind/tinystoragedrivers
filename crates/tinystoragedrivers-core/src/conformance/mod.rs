@@ -22,6 +22,7 @@ mod fencing;
 mod isolation;
 mod ledger;
 mod maintenance;
+mod primitives;
 mod purge;
 mod purge_history;
 mod schema;
@@ -57,6 +58,7 @@ pub async fn run_ports(storage: &ScopedStorage) {
     streams::run(storage).await;
     seal::run(storage).await;
     blobs::run(storage).await;
+    primitives::run(storage).await;
 }
 
 /// Run every check against `backend`.

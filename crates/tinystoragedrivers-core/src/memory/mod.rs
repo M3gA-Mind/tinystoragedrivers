@@ -40,7 +40,7 @@ use state::DbState;
 /// this so tests can drive document expiry deterministically.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
-fn system_clock() -> u64 {
+pub(crate) fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {

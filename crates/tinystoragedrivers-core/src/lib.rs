@@ -61,6 +61,7 @@ mod fence;
 mod filter;
 mod key;
 mod memory;
+pub mod primitives;
 mod scope;
 mod stream;
 pub mod value;
@@ -97,6 +98,7 @@ pub use filter::{
 };
 pub use key::Key;
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
+pub use primitives::{Counters, Kv, Lease, Leases, Repo, RetryPolicy};
 pub use scope::{
     AGENT_INFIX, CLUSTER, MAX_SCOPE_LEN, MAX_SEGMENT_LEN, MODULE_INFIX, ParsedScope, Principal,
     Scope, Tenant, USER_PREFIX,
