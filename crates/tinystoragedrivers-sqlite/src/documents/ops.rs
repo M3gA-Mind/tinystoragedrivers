@@ -14,7 +14,9 @@ use tinystoragedrivers_core::{
 };
 
 use super::pushdown;
+use crate::body;
 use crate::error::during;
+use crate::fields;
 use crate::sql::{Tables, ident, literal};
 
 /// Who is asking and when.
@@ -90,7 +92,9 @@ pub(crate) fn declare(
     );
     conn.execute(&sql, params![merged.name, serde_json::to_string(&merged)?])
         .map_err(during("declare collection"))?;
-    tables.create_indexes(conn, &merged)?;
+    if fields::projected(&existing) != fields::projected(&merged) {
+        fields::rebuild(conn, tables, &merged)?;
+    }
     if existing.search != merged.search {
         reindex(conn, tables, &merged)?;
     }
@@ -119,7 +123,7 @@ fn check_existing_unique(
         ident(&tables.docs)
     );
     let mut statement = conn.prepare(&sql).map_err(during("check unique"))?;
-    let rows: Vec<(String, String, Option<i64>)> = statement
+    let rows: Vec<(String, SqlValue, Option<i64>)> = statement
         .query_map([&merged.name], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
@@ -128,7 +132,7 @@ fn check_existing_unique(
         .map_err(during("check unique"))?;
     let mut docs = Vec::with_capacity(rows.len());
     for (scope, doc, expires_ms) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
+        let doc = body::decode(&doc)?;
         if !lapsed(merged, &doc, expires_ms, now_ms) {
             docs.push((scope, doc));
         }
@@ -173,7 +177,7 @@ fn reindex(conn: &Connection, tables: &Tables, spec: &CollectionSpec) -> Result<
         ident(&tables.docs)
     );
     let mut statement = conn.prepare(&sql).map_err(during("reindex"))?;
-    let rows: Vec<(String, String, String)> = statement
+    let rows: Vec<(String, String, SqlValue)> = statement
         .query_map([&spec.name], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
@@ -181,7 +185,7 @@ fn reindex(conn: &Connection, tables: &Tables, spec: &CollectionSpec) -> Result<
         .collect::<rusqlite::Result<_>>()
         .map_err(during("reindex"))?;
     for (scope, id, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
+        let doc = body::decode(&doc)?;
         index_text(conn, tables, spec, &scope, &id, &doc)?;
     }
     Ok(())
@@ -296,7 +300,7 @@ fn stored(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: &str) -> Result
          WHERE scope = ?1 AND coll = ?2 AND id = ?3",
         ident(&ctx.tables.docs)
     );
-    let row: Option<(i64, Meta, bool, String)> = conn
+    let row: Option<(i64, Meta, bool, SqlValue)> = conn
         .query_row(&sql, params![ctx.scope, collection, id], |row| {
             Ok((row.get(0)?, meta_at(row, 1)?, row.get(5)?, row.get(6)?))
         })
@@ -307,7 +311,7 @@ fn stored(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: &str) -> Result
             version: to_version(version),
             meta,
             deleted,
-            doc: serde_json::from_str(&body)?,
+            doc: body::decode(&body)?,
         })
     })
     .transpose()
@@ -380,20 +384,21 @@ pub(crate) fn matching_after(
         SqlValue::Text(ctx.scope.to_owned()),
         SqlValue::Integer(i64::try_from(ctx.now_ms).unwrap_or(i64::MAX)),
     ];
-    if let Some(clause) = pushdown::clause(filter) {
+    let projection = pushdown::Projection::new(ctx, &spec, collection);
+    if let Some(clause) = pushdown::clause(filter, &projection) {
         sql.push_str(" AND (");
         sql.push_str(&clause.sql);
         sql.push(')');
         params.extend(clause.params);
     }
-    if let Some(clause) = after.and_then(|position| pushdown::after(position, sort)) {
+    if let Some(clause) = after.and_then(|position| pushdown::after(position, sort, &projection)) {
         sql.push_str(" AND (");
         sql.push_str(&clause.sql);
         sql.push(')');
         params.extend(clause.params);
     }
     let mut statement = conn.prepare(&sql).map_err(during("query"))?;
-    let rows: Vec<(String, i64, Meta, String)> = statement
+    let rows: Vec<(String, i64, Meta, SqlValue)> = statement
         .query_map(params_from_iter(params), |row| {
             Ok((row.get(0)?, row.get(1)?, meta_at(row, 2)?, row.get(6)?))
         })
@@ -402,7 +407,7 @@ pub(crate) fn matching_after(
         .map_err(during("query"))?;
     let mut found = Vec::with_capacity(rows.len());
     for (id, version, meta, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
+        let doc = body::decode(&doc)?;
         if !expired(&spec, &doc, ctx.now_ms) && filter.matches_with(&id, &doc, &meta) {
             found.push(Versioned {
                 id,
@@ -539,10 +544,11 @@ pub(crate) fn put_with(
             created_ms,
             updated_ms,
             options.expires_ms,
-            serde_json::to_string(doc)?
+            body::encode(doc)?
         ],
     )
     .map_err(during("put"))?;
+    fields::write(conn, ctx.tables, &spec, ctx.scope, id, doc)?;
     unindex_text(conn, ctx, collection, Some(id))?;
     index_text(conn, ctx.tables, &spec, ctx.scope, id, doc)?;
     Ok(version)
@@ -563,7 +569,7 @@ fn bury(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: Option<&str>) -> 
         None => conn.execute(&sql, params![ctx.scope, collection]),
     }
     .map_err(during("delete"))?;
-    Ok(())
+    fields::remove(conn, ctx.tables, ctx.scope, collection, id)
 }
 
 /// Remove one document under `precondition`; report whether a live one went.
@@ -653,7 +659,7 @@ pub(crate) fn search(
         docs = ident(&ctx.tables.docs),
     );
     let mut statement = conn.prepare(&sql).map_err(during("search"))?;
-    let rows: Vec<(String, f64, String, Option<i64>)> = statement
+    let rows: Vec<(String, f64, SqlValue, Option<i64>)> = statement
         .query_map(params![query, ctx.scope, collection], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
@@ -662,7 +668,7 @@ pub(crate) fn search(
         .map_err(during("search"))?;
     let mut hits = Vec::new();
     for (id, rank, doc, expires_ms) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
+        let doc = body::decode(&doc)?;
         if !lapsed(&spec, &doc, expires_ms, ctx.now_ms) {
             // bm25 is lower-is-better; the port reports larger-is-better.
             hits.push((id, -rank));

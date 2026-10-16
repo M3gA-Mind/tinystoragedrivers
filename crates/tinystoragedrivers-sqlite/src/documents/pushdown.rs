@@ -4,17 +4,81 @@
 //! produced here only has to be a *superset* condition: it may let through rows
 //! the filter rejects, never the reverse. That keeps it to clauses whose SQL
 //! meaning is unambiguous: equality and membership on strings and booleans, and
-//! on the document id. Numbers are left to the Rust check, because SQLite's
-//! JSON functions turn very large integers into lossy floats.
+//! on the document id. Numbers are left to the Rust check, because SQLite
+//! turns very large integers into lossy floats.
+//!
+//! Body fields are answered from the `doc_fields` side table
+//! ([`crate::fields`]), because a large body is compressed and SQL cannot read
+//! it. Only the projected paths of the collection (its index and search
+//! fields) are pushed down; a term on any other path contributes nothing and
+//! the Rust check decides.
+
+use std::collections::BTreeSet;
 
 use rusqlite::types::Value as SqlValue;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CREATED_FIELD, CursorPosition, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort,
-    UPDATED_FIELD,
+    CREATED_FIELD, CollectionSpec, CursorPosition, Direction, EXPIRES_FIELD, Filter, ID_FIELD,
+    SCHEMA_FIELD, Sort, UPDATED_FIELD,
 };
 
-use crate::sql::{json_path, literal};
+use super::ops::Ctx;
+use crate::fields;
+use crate::sql::{ident, literal};
+
+/// Which body fields of one collection in one scope SQL can see, and where.
+#[derive(Debug, Clone)]
+pub(crate) struct Projection {
+    paths: BTreeSet<String>,
+    fields_table: String,
+    docs_table: String,
+    scope: String,
+    coll: String,
+}
+
+impl Projection {
+    pub(crate) fn new(ctx: Ctx<'_>, spec: &CollectionSpec, collection: &str) -> Self {
+        Self {
+            paths: fields::projected(spec),
+            fields_table: ident(&ctx.tables.fields),
+            docs_table: ident(&ctx.tables.docs),
+            scope: literal(ctx.scope),
+            coll: literal(collection),
+        }
+    }
+
+    /// The `doc_fields` rows of `field` in this collection and scope, as a
+    /// `FROM … WHERE` over alias `f` that still needs a closing condition.
+    fn rows(&self, field: &str) -> Option<String> {
+        self.paths.contains(field).then(|| {
+            format!(
+                "FROM {} AS f WHERE f.scope = {} AND f.coll = {} AND f.path = {}",
+                self.fields_table,
+                self.scope,
+                self.coll,
+                literal(field)
+            )
+        })
+    }
+
+    /// A condition on the document id: `id IN (…)` over the projected rows of
+    /// `field` whose value satisfies `test` (for example `= ?`).
+    fn ids_where(&self, field: &str, test: &str) -> Option<String> {
+        Some(format!(
+            "id IN (SELECT f.id {} AND f.value {test})",
+            self.rows(field)?
+        ))
+    }
+
+    /// The `kind` or `value` of `field` on the current row of `docs`.
+    fn of_row(&self, field: &str, column: &str) -> Option<String> {
+        Some(format!(
+            "(SELECT f.{column} {} AND f.id = {}.id)",
+            self.rows(field)?,
+            self.docs_table
+        ))
+    }
+}
 
 /// SQL text and its bound parameters.
 #[derive(Debug, Default, PartialEq)]
@@ -50,21 +114,18 @@ fn integer(value: &Value) -> Option<SqlValue> {
     value.as_i64().map(SqlValue::Integer)
 }
 
-/// The column expression for `field` and its parameters, or `None` when the
-/// path cannot be expressed in SQLite.
-fn column(field: &str) -> Option<(String, Vec<SqlValue>)> {
+/// The condition "`field` satisfies `test`" (for example `= ?`), or `None`
+/// when SQL cannot see the field.
+fn on_field(field: &str, test: &str, projection: &Projection) -> Option<String> {
     if field == ID_FIELD {
-        Some(("id".to_owned(), Vec::new()))
+        Some(format!("id {test}"))
     } else {
-        Some((
-            "json_extract(body, ?)".to_owned(),
-            vec![SqlValue::Text(json_path(field)?)],
-        ))
+        projection.ids_where(field, test)
     }
 }
 
 /// A superset condition for `filter`, or `None` when nothing can be pushed.
-pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
+pub(crate) fn clause(filter: &Filter, projection: &Projection) -> Option<Clause> {
     match filter {
         Filter::Eq { field, value } if meta_column(field).is_some() => Some(Clause {
             sql: format!("{} = ?", meta_column(field)?),
@@ -110,11 +171,9 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
             if field == ID_FIELD && !value.is_string() {
                 return None;
             }
-            let (expr, mut params) = column(field)?;
-            params.push(bound);
             Some(Clause {
-                sql: format!("{expr} = ?"),
-                params,
+                sql: on_field(field, "= ?", projection)?,
+                params: vec![bound],
             })
         }
         Filter::In { field, values } => {
@@ -122,16 +181,17 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
             if bound.is_empty() || (field == ID_FIELD && !values.iter().all(Value::is_string)) {
                 return None;
             }
-            let (expr, mut params) = column(field)?;
             let marks = vec!["?"; bound.len()].join(", ");
-            params.extend(bound);
             Some(Clause {
-                sql: format!("{expr} IN ({marks})"),
-                params,
+                sql: on_field(field, &format!("IN ({marks})"), projection)?,
+                params: bound,
             })
         }
         Filter::And { filters } => {
-            let parts: Vec<Clause> = filters.iter().filter_map(clause).collect();
+            let parts: Vec<Clause> = filters
+                .iter()
+                .filter_map(|part| clause(part, projection))
+                .collect();
             if parts.is_empty() {
                 return None;
             }
@@ -155,7 +215,11 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
 /// number as the cursor; the caller rechecks the exact JSON order in Rust.
 /// Arrays and objects are left to the Rust fallback because SQLite's JSON
 /// comparison does not implement the port's structural ordering.
-pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause> {
+pub(crate) fn after(
+    position: &CursorPosition,
+    sorts: &[Sort],
+    projection: &Projection,
+) -> Option<Clause> {
     let mut alternatives = Vec::with_capacity(sorts.len() + 1);
     for current in 0..sorts.len() {
         let mut terms = Vec::with_capacity(current + 1);
@@ -166,7 +230,7 @@ pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause>
             if matches!(value, Value::Array(_) | Value::Object(_)) {
                 return None;
             }
-            let (rank_expression, expression) = expressions(&key.field)?;
+            let (rank_expression, expression) = expressions(&key.field, projection)?;
             terms.push(format!("({rank_expression} = ? AND {expression} IS ?)"));
             params.push(SqlValue::Integer(rank(value)));
             params.push(sql_value(value)?);
@@ -176,7 +240,7 @@ pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause>
         if matches!(value, Value::Array(_) | Value::Object(_)) {
             return None;
         }
-        let (rank_expression, value_expression) = expressions(&key.field)?;
+        let (rank_expression, value_expression) = expressions(&key.field, projection)?;
         let cursor_rank = rank(value);
         let direction = match key.direction {
             Direction::Asc => ">",
@@ -209,7 +273,7 @@ pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause>
         if matches!(value, Value::Array(_) | Value::Object(_)) {
             return None;
         }
-        let (rank_expression, value_expression) = expressions(&key.field)?;
+        let (rank_expression, value_expression) = expressions(&key.field, projection)?;
         terms.push(format!(
             "({rank_expression} = ? AND {value_expression} IS ?)",
         ));
@@ -233,7 +297,7 @@ pub(crate) fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause>
     })
 }
 
-fn expressions(field: &str) -> Option<(String, String)> {
+fn expressions(field: &str, projection: &Projection) -> Option<(String, String)> {
     if field == ID_FIELD {
         return Some(("3".to_owned(), "id".to_owned()));
     }
@@ -246,36 +310,17 @@ fn expressions(field: &str) -> Option<(String, String)> {
         };
         return Some((rank, column.to_owned()));
     }
-    let path = literal(&json_path(field)?);
-    let kind = format!("json_type(body, {path})");
-    let rank = format!(
-        "CASE WHEN {kind} IS NULL OR {kind} = 'null' THEN 0 WHEN {kind} IN ('false', 'true') THEN 1 WHEN {kind} IN ('integer', 'real') THEN 2 WHEN {kind} = 'text' THEN 3 WHEN {kind} = 'array' THEN 4 ELSE 5 END"
-    );
-    Some((rank, format!("json_extract(body, {path})")))
-}
-
-fn rank(value: &Value) -> i64 {
-    match value {
-        Value::Null => 0,
-        Value::Bool(_) => 1,
-        Value::Number(_) => 2,
-        Value::String(_) => 3,
-        Value::Array(_) => 4,
-        Value::Object(_) => 5,
-    }
+    // A path with no row has no value and ranks with null.
+    let rank = format!("COALESCE({}, 0)", projection.of_row(field, "kind")?);
+    Some((rank, projection.of_row(field, "value")?))
 }
 
 fn sql_value(value: &Value) -> Option<SqlValue> {
-    match value {
-        Value::Null => Some(SqlValue::Null),
-        Value::Bool(value) => Some(SqlValue::Integer(i64::from(*value))),
-        Value::Number(number) => Some(match number.as_i64() {
-            Some(value) => SqlValue::Integer(value),
-            None => SqlValue::Real(number.as_f64()?),
-        }),
-        Value::String(value) => Some(SqlValue::Text(value.clone())),
-        Value::Array(_) | Value::Object(_) => None,
-    }
+    (!matches!(value, Value::Array(_) | Value::Object(_))).then(|| fields::sql_value(value))
+}
+
+fn rank(value: &Value) -> i64 {
+    fields::rank(value)
 }
 
 #[cfg(test)]

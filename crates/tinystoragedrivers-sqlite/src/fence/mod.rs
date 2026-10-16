@@ -134,7 +134,12 @@ impl Fencing {
             Some(text) => serde_json::from_str(&text)?,
             None => CollectionSpec::new(self.fence.collection()),
         };
-        let stored: Option<(String, i64, tinystoragedrivers_core::Meta, String)> = conn
+        let stored: Option<(
+            String,
+            i64,
+            tinystoragedrivers_core::Meta,
+            rusqlite::types::Value,
+        )> = conn
             .query_row(
                 &format!(
                     "SELECT id, version, schema, created_ms, updated_ms, expires_ms, body FROM {}
@@ -167,7 +172,7 @@ impl Fencing {
                 Ok(Versioned {
                     id,
                     version: Version(u64::try_from(version).unwrap_or(0)),
-                    doc: serde_json::from_str(&text)?,
+                    doc: crate::body::decode(&text)?,
                     meta,
                 })
             })

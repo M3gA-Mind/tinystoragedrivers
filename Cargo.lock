@@ -3370,6 +3370,7 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-core",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
