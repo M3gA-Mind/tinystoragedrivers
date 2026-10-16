@@ -163,15 +163,15 @@ Composition then runs `ensure_collection` once for each item, from trusted boots
 
 | Collection | API | Body |
 |---|---|---|
-| `tsd.leases` | `Leases::acquire(key, holder, ttl) / renew / release / current` | `{holder, epoch, expires_ms}`; `epoch` doubles as the write fence ([`write-fencing.md`](write-fencing.md)) |
+| `tsd.leases` | `Leases::acquire(owner, key, holder, ttl_ms) / renew / release / current`; `Lease::fence(scope)`; id `Key::of([owner, key])` | `{holder, epoch, expires_ms}`; `epoch` doubles as the write fence ([`write-fencing.md`](write-fencing.md)) |
 | `tsd.migrations` | used by the registry runner; `Migrations::done(owner, step)` for importers | `{owner, step, from, to, cursor, written, done}` |
-| `tsd.kv` | `Kv::ns(owner, ns).get/put/delete/list(prefix)` | the value itself; id `Key::of([owner, ns, key])` |
-| `tsd.counters` | `Counters::next(owner, name) -> u64` (atomic) | `{value}` |
+| `tsd.kv` | `Kv::ns(docs, owner, ns).get/put/delete/list(prefix)` | `{owner, ns, key, value}` (a body must be an object, so the value sits in a field); id `Key::of([owner, ns, key])`; index over `(owner, ns, key)` |
+| `tsd.counters` | `Counters::next(owner, name) -> u64` (atomic), `peek`, `set_at_least` | `{value}` |
 | `tsd.secrets` | `SecretStore` over documents (exists as `secrets`) | `{ciphertext}` |
 | `tsd.secret_keys` | KMS envelope (exists as `secret_keys`) | `{format, key_id, wrapped}` |
 
 Two shared helpers are not collections:
-- **`Repo<T>`** is a typed collection handle: `get`, `put`, `insert`, `update(id, f)` and `query`. `update` runs one compare-and-swap loop with a budget of 32 and jittered backoff. Every owner uses it instead of its own loop.
+- **`Repo<T>`** is a typed collection handle: `get`, `put`, `insert`, `update(id, f)` and `query`. `update` runs one compare-and-swap loop (budget and backoff in `RetryPolicy`, default 32 attempts, 1 to 8 ms jittered). The closure returns `Some(value)` to write or `None` to leave the record alone. A lease keeps its expiry in the body, not in `expires_ms`, because a takeover must read the lapsed record to continue its epoch. Every owner uses it instead of its own loop.
 - **The graph checkpointer** exists once, in tinyagents-graph (`graph.checkpoints`, `graph.threads`, `graph.writes`). Each user passes a namespace field instead of copying the checkpointer.
 
 ### 6. Streams: sealing and retention
