@@ -305,16 +305,15 @@ fn range(path: &str, bounds: &[(&str, &Option<Value>)]) -> Translated {
     }
     let mut condition = Document::new();
     for (op, bound) in &set {
-        match (bound, exact_bson(bound)) {
-            (Value::Bool(_) | Value::Number(_) | Value::String(_), Some(bson)) => {
-                condition.insert(*op, bson);
-            }
+        if let (Value::Bool(_) | Value::Number(_) | Value::String(_), Some(bson)) =
+            (bound, exact_bson(bound))
+        {
+            condition.insert(*op, bson);
+        } else {
             // Null bounds also match missing fields in Mongo; array and object
             // bounds compare differently. Check presence and let Rust decide.
-            _ => {
-                let translated = leaf(path, Leaf::Presence, present);
-                return zero_for_missing(path, true, translated);
-            }
+            let translated = leaf(path, Leaf::Presence, present);
+            return zero_for_missing(path, true, translated);
         }
     }
     let zero_matches = set.iter().all(|(op, bound)| zero_within(op, bound));

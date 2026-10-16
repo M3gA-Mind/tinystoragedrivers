@@ -337,13 +337,12 @@ impl StepRun<'_> {
         for (output, schema) in outputs.into_iter().zip(schemas) {
             let expires_ms = match output.expires {
                 Expiry::At(ms) => Some(ms),
-                Expiry::Never => None,
                 // Only the record rewritten under its own id keeps its
                 // deadline; a renamed or emitted-elsewhere record is new.
                 Expiry::Carry if output.collection == self.step.item => {
                     expiries.get(&output.id).copied().flatten()
                 }
-                Expiry::Carry => None,
+                Expiry::Carry | Expiry::Never => None,
             };
             let mut write = WriteOptions::new().schema(schema);
             if let Some(created) = output.created_ms {

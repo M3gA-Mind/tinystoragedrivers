@@ -319,7 +319,7 @@ fn metadata_sorts_read_a_missing_field_as_zero() {
             .unwrap()
             .get_array("$ifNull")
             .unwrap()
-            .to_vec()
+            .clone()
     };
     assert_eq!(
         source("_tsd_k0"),
