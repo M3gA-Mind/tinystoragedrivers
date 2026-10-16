@@ -93,7 +93,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [ ] 4 registry
 - [ ] 5 primitives
 - [ ] 6 sealing
-- [ ] 7 maintenance
+- [x] 7 maintenance
 - [ ] 8 sqlite v2
 - [ ] 9 mongodb, file, s3
 - [ ] 10 bus contract
