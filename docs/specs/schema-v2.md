@@ -1,6 +1,6 @@
 # Uniform schema (v2)
 
-Status: Draft. Owner: TinyStorageDrivers. Host integration: OpenHuman.
+Status: Implemented (v1.0.0). Owner: TinyStorageDrivers. Host integration: OpenHuman.
 Implementation order: [`../plans/schema-v2.md`](../plans/schema-v2.md).
 
 ## Problem
@@ -253,6 +253,7 @@ v2 ships as **v1.0.0** and is a breaking release on purpose:
 
 - **On-disk.** A SQLite file opened by v1.0.0 is upgraded in place to layout 2 and cannot be opened by v0.x again.
 - **Bus contract version 4.** Its wire types deny unknown fields, so a module built against contract 3 cannot decode a version-4 reply that carries `meta`. Every module re-pins onto v1.0.0 together with its host; mixed versions are unsupported. A module on contract 4 talking to an older host still works for default writes. An options-bearing write or `Seal` fails closed.
+- **S3 object keys.** The S3 driver drops the database segment: objects move from `<prefix>/<database>/scopes/…` to `<prefix>/scopes/…`. Blobs written by v0.x must be copied or re-keyed.
 - **`WriteOptions::created_ms` is host-only.** The bus refuses it with `InvalidInput`.
 
 ## Invariants

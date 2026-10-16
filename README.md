@@ -39,6 +39,18 @@ This repository holds no typed repository for any particular record. Those
 belong to the crate that owns the record, which keeps this crate free of every
 consumer's schema.
 
+## The schema
+
+Since v1.0.0, every record follows one uniform schema
+([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
+
+- **Scopes.** `local` or `u:<id>` for the tenant, optionally narrowed with `/agent:<id>` or `/module:<id>`; `cluster` for placement. Build them with `Scope::tenant`, `.agent` and `.module`.
+- **Names.** Collections are `<owner>.<entity>`, streams `<owner>.<stream>/<key>`, blobs `<owner>/<path>`. Ids come from `Key::of(parts)` or `Key::ulid()`.
+- **Bodies.** Bare snake_case JSON objects, every time an `*_ms` epoch millisecond. tsd keeps `schema`, `created_ms`, `updated_ms` and `expires_ms` per record (`Meta`, `WriteOptions`).
+- **Registry.** Each owning crate exports `storage_schema()`. The host composes them with `Registry::compose`, prepares them, runs their resumable migration steps (`Registry::migrate`) and applies their seal and retention policies (`Registry::maintain`).
+- **Primitives.** `Repo<T>`, `Leases`, `Kv` and `Counters` replace hand-written CAS loops, lease documents, key-value stores and counters.
+- **Streams seal.** A finished stream is folded into one compressed blob and reads exactly as before (`StreamStore::seal`).
+
 ```rust
 use serde_json::json;
 use tinystoragedrivers::{Filter, Precondition, Scope, StorageConfig};
