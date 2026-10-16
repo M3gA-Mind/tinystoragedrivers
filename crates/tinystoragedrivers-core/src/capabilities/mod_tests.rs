@@ -40,6 +40,7 @@ fn all_holds_every_capability() {
             Capability::AtomicScopePurge,
             Capability::Watch,
             Capability::BlobTtl,
+            Capability::StreamSeal,
         ]
     );
 }
@@ -82,6 +83,7 @@ fn renders_names() {
         (Capability::ScopePurge, "scope_purge"),
         (Capability::AtomicScopePurge, "atomic_scope_purge"),
         (Capability::Watch, "watch"),
+        (Capability::StreamSeal, "stream_seal"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

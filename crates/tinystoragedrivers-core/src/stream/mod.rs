@@ -11,6 +11,12 @@ use serde_json::Value;
 
 use crate::error::{Result, StorageError};
 
+mod sealed;
+mod types;
+
+pub use sealed::{SEALED_BLOB_PREFIX, SealedLog, sealed_blob_key};
+pub use types::{SealOutcome, SealPolicy, SealWhen};
+
 /// One record and its offset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEntry {
