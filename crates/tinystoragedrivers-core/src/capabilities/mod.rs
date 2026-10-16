@@ -54,10 +54,18 @@ pub enum Capability {
     /// [`BlobStore::put_expiring`](crate::BlobStore::put_expiring): a blob
     /// written with a lifetime reads as absent once it has passed.
     BlobTtl,
+    /// [`StorageBackend::maintain`](crate::StorageBackend::maintain) and
+    /// [`StorageBackend::checkpoint`](crate::StorageBackend::checkpoint) run
+    /// rather than refuse. A driver with nothing to reclaim may still report
+    /// it: the calls succeed and report zero.
+    Maintenance,
+    /// [`StorageBackend::scopes`](crate::StorageBackend::scopes) lists the
+    /// scopes that hold records.
+    ScopeEnumeration,
 }
 
 impl Capability {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 18] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -74,6 +82,8 @@ impl Capability {
         Self::AtomicScopePurge,
         Self::Watch,
         Self::BlobTtl,
+        Self::Maintenance,
+        Self::ScopeEnumeration,
     ];
 
     const fn bit(self) -> u32 {
@@ -94,6 +104,8 @@ impl Capability {
             Self::AtomicScopePurge => 1 << 11,
             Self::Watch => 1 << 12,
             Self::BlobTtl => 1 << 15,
+            Self::Maintenance => 1 << 16,
+            Self::ScopeEnumeration => 1 << 17,
         }
     }
 }
@@ -117,6 +129,8 @@ impl fmt::Display for Capability {
             Self::AtomicScopePurge => "atomic_scope_purge",
             Self::Watch => "watch",
             Self::BlobTtl => "blob_ttl",
+            Self::Maintenance => "maintenance",
+            Self::ScopeEnumeration => "scope_enumeration",
         })
     }
 }
@@ -166,7 +180,9 @@ impl Capabilities {
                 | Capability::ScopePurge.bit()
                 | Capability::AtomicScopePurge.bit()
                 | Capability::Watch.bit()
-                | Capability::BlobTtl.bit(),
+                | Capability::BlobTtl.bit()
+                | Capability::Maintenance.bit()
+                | Capability::ScopeEnumeration.bit(),
         )
     }
 

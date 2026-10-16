@@ -40,6 +40,8 @@ fn all_holds_every_capability() {
             Capability::AtomicScopePurge,
             Capability::Watch,
             Capability::BlobTtl,
+            Capability::Maintenance,
+            Capability::ScopeEnumeration,
         ]
     );
 }
@@ -82,6 +84,8 @@ fn renders_names() {
         (Capability::ScopePurge, "scope_purge"),
         (Capability::AtomicScopePurge, "atomic_scope_purge"),
         (Capability::Watch, "watch"),
+        (Capability::Maintenance, "maintenance"),
+        (Capability::ScopeEnumeration, "scope_enumeration"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

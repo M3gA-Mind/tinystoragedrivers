@@ -9,12 +9,16 @@ use tinystoragedrivers_core::{
 };
 
 /// Capabilities a host keeps to itself: they are not exposed to bus callers.
-pub(crate) const HOST_ONLY: [Capability; 5] = [
+/// `Maintenance` and `ScopeEnumeration` stay here until the bus contract
+/// carries `maintain`, `checkpoint` and `scopes`.
+pub(crate) const HOST_ONLY: [Capability; 7] = [
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
+    Capability::Maintenance,
+    Capability::ScopeEnumeration,
 ];
 
 /// Convert between types that share one serde shape (filters, sorts, specs,

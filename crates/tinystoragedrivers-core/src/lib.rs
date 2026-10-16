@@ -71,9 +71,9 @@ mod blocking;
 pub mod conformance;
 
 pub use backend::{
-    BackendBlobs, BlobBackend, CompositeStorage, DatabaseAddress, PurgeMode, PurgeReceipt,
-    PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge, ScopedStorage,
-    StorageBackend, validate_database,
+    BackendBlobs, BlobBackend, Checkpoint, CompositeStorage, DatabaseAddress, MaintenanceBudget,
+    MaintenanceReport, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
+    ScopeGeneration, ScopePurge, ScopedStorage, StorageBackend, validate_database,
 };
 pub use blob::{
     Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
