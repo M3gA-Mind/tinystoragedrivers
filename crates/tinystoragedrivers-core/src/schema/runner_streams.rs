@@ -14,11 +14,17 @@
 //! fine. A target that is shorter than the recorded progress, longer than the
 //! mapped entries, or non-empty with no recorded progress was not written by
 //! this step and is refused with `Conflict`.
+//!
+//! Every append is conditional on the length the run observed
+//! (`append_batch_if_offset`), so a second migrator working on the same stream
+//! gets a `Conflict` rather than duplicating entries. Whether the source was
+//! sealed is read from the stream backend (`StreamStore::info`), never from
+//! the blob handle: a composite keeps sealed blobs with the records.
 
 use crate::document::Precondition;
-use crate::error::{Result, StorageError};
+use crate::error::{ErrorKind, Result, StorageError};
 use crate::key::Key;
-use crate::stream::{StreamStore, sealed_blob_key};
+use crate::stream::StreamStore;
 
 use super::migrations::Progress;
 use super::runner::Context;
@@ -55,12 +61,7 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
     let step = context.step;
     let streams = context.storage.streams();
     let entries = read_all(streams.as_ref(), source, context.batch_size).await?;
-    let sealed = context
-        .storage
-        .blobs()
-        .head(&sealed_blob_key(source)?)
-        .await?
-        .is_some();
+    let sealed = is_sealed(streams.as_ref(), source).await?;
     let source_key = Key::of([context.owner.as_str(), step.item, step.id, source])?;
     let Some((target, values)) = run(source.to_owned(), entries)? else {
         streams.delete_stream(source).await?;
@@ -112,8 +113,14 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
         if batch.is_empty() {
             break;
         }
-        have += batch.len() as u64;
-        streams.append_batch(&target, batch).await?;
+        // Conditional on the length this run observed: a competing migrator
+        // that got there first makes this a `Conflict` instead of a duplicate.
+        let added = batch.len() as u64;
+        streams
+            .append_batch_if_offset(&target, have, batch)
+            .await
+            .map_err(|error| competing_runner(error, step.id, step.item, &target))?;
+        have += added;
         progress.written = have;
         context.migrations.save(&source_key, &progress).await?;
     }
@@ -123,6 +130,26 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
     streams.delete_stream(source).await?;
     delete_progress(context, &source_key).await?;
     Ok(total)
+}
+
+/// Whether the stream backend reports `stream` sealed. The backend is asked
+/// rather than the blob handle, because a composite keeps sealed blobs with
+/// the records. A driver that cannot seal has no sealed streams.
+async fn is_sealed(streams: &dyn StreamStore, stream: &str) -> Result<bool> {
+    match streams.info(stream).await {
+        Ok(info) => Ok(info.is_some_and(|info| info.sealed_ms.is_some())),
+        Err(error) if matches!(error.kind(), ErrorKind::Unsupported(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn competing_runner(error: StorageError, step: &str, item: &str, target: &str) -> StorageError {
+    if error.kind() != ErrorKind::Conflict {
+        return error;
+    }
+    StorageError::conflict(format!(
+        "step `{step}` of `{item}`: stream `{target}` changed under this run; another migrator is working on it"
+    ))
 }
 
 /// The target must be the item itself or live under `item/`.

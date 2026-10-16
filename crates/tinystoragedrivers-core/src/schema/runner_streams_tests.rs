@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::schema::{MigrateOptions, Owner, Registry, Schema, ScopeClass, Step};
 use crate::{
     ErrorKind, MemoryStorage, Result, Scope, ScopedStorage, SealOutcome, StorageBackend,
-    StorageError, StreamEntry, StreamStore, sealed_blob_key,
+    StorageError, StreamEntry, StreamInfo, StreamStore,
 };
 
 const LEGACY: &str = "16:session_journal/";
@@ -45,11 +45,25 @@ impl StreamStore for Flaky {
         self.spend()?;
         self.inner.append_batch(stream, values).await
     }
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        self.spend()?;
+        self.inner
+            .append_batch_if_offset(stream, expected_next_offset, values)
+            .await
+    }
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         self.inner.read_window(stream, from, limit).await
     }
     async fn len(&self, stream: &str) -> Result<u64> {
         self.inner.len(stream).await
+    }
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        self.inner.info(stream).await
     }
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         self.inner.truncate_before(stream, offset).await
@@ -140,13 +154,14 @@ async fn read_all(storage: &ScopedStorage, stream: &str) -> Vec<Value> {
     entries.into_iter().map(|entry| entry.value).collect()
 }
 
+/// Sealed state as the stream backend reports it, not as a blob handle does.
 async fn is_sealed(storage: &ScopedStorage, stream: &str) -> bool {
     storage
-        .blobs()
-        .head(&sealed_blob_key(stream).unwrap())
+        .streams()
+        .info(stream)
         .await
         .unwrap()
-        .is_some()
+        .is_some_and(|info| info.sealed_ms.is_some())
 }
 
 #[tokio::test]
@@ -323,4 +338,121 @@ async fn refuses_to_append_to_a_target_it_did_not_start() {
         2
     );
     assert_eq!(storage.streams().len("harness.journal/r").await.unwrap(), 1);
+}
+
+/// A stream store that plays a competing migrator: the first time the runner
+/// reads the length of a migrated stream, the rival appends `rival` to it.
+#[derive(Debug)]
+struct Rival {
+    inner: Arc<dyn StreamStore>,
+    rival: std::sync::Mutex<Option<Vec<Value>>>,
+}
+
+#[async_trait]
+impl StreamStore for Rival {
+    async fn append(&self, stream: &str, value: Value) -> Result<u64> {
+        self.inner.append(stream, value).await
+    }
+    async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
+        self.inner.append_batch(stream, values).await
+    }
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        self.inner
+            .append_batch_if_offset(stream, expected_next_offset, values)
+            .await
+    }
+    async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
+        self.inner.read_window(stream, from, limit).await
+    }
+    async fn len(&self, stream: &str) -> Result<u64> {
+        let seen = self.inner.len(stream).await?;
+        let values = if stream.starts_with("harness.journal/") {
+            self.rival.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some(values) = values {
+            self.inner.append_batch(stream, values).await?;
+        }
+        Ok(seen)
+    }
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        self.inner.info(stream).await
+    }
+    async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
+        self.inner.truncate_before(stream, offset).await
+    }
+    async fn delete_stream(&self, stream: &str) -> Result<bool> {
+        self.inner.delete_stream(stream).await
+    }
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        self.inner.seal(stream).await
+    }
+    async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.streams(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn a_competing_migrator_is_refused_instead_of_duplicating_entries() {
+    let real = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let rival = Arc::new(Rival {
+        inner: Arc::clone(real.streams()),
+        rival: std::sync::Mutex::new(Some((0..5).map(migrated_entry).collect())),
+    });
+    let storage = ScopedStorage::new(
+        Scope::local(),
+        "rival",
+        Arc::clone(real.documents()),
+        rival,
+        Arc::clone(real.blobs()),
+    );
+    seed(&storage, "a", 5).await;
+
+    let error = registry(journal_step())
+        .migrate(&storage, &MigrateOptions::new().batch_size(BATCH))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert_eq!(
+        read_all(&storage, "harness.journal/a").await,
+        (0..5).map(migrated_entry).collect::<Vec<_>>(),
+        "only the rival's copy is in the target"
+    );
+    assert_eq!(
+        storage.streams().len(&format!("{LEGACY}a")).await.unwrap(),
+        5,
+        "the source stays until a run owns the target"
+    );
+}
+
+#[tokio::test]
+async fn sealed_state_comes_from_the_stream_backend_not_the_blob_handle() {
+    // A composite keeps sealed-stream blobs with the records, so the blob
+    // handle it exposes never sees them.
+    let real = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let elsewhere = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let storage = ScopedStorage::new(
+        Scope::local(),
+        "composite",
+        Arc::clone(real.documents()),
+        Arc::clone(real.streams()),
+        Arc::clone(elsewhere.blobs()),
+    );
+    seed(&storage, "a", 5).await;
+    storage.streams().seal(&format!("{LEGACY}a")).await.unwrap();
+
+    registry(journal_step())
+        .migrate(&storage, &MigrateOptions::new().batch_size(BATCH))
+        .await
+        .unwrap();
+
+    assert!(is_sealed(&storage, "harness.journal/a").await);
+    assert_eq!(read_all(&storage, "harness.journal/a").await.len(), 5);
 }
