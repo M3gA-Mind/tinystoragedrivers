@@ -8,13 +8,15 @@ use tinystoragedrivers_core::{
     WriteOp as NativeWriteOp,
 };
 
-/// Capabilities a host keeps to itself: they are not exposed to bus callers.
-pub(crate) const HOST_ONLY: [Capability; 5] = [
+/// Capabilities bus callers never see: a host keeps them to itself, or (for
+/// `RecordMetadata`) the storage-bus wire cannot carry what they promise yet.
+pub(crate) const HOST_ONLY: [Capability; 6] = [
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
+    Capability::RecordMetadata,
 ];
 
 /// Convert between types that share one serde shape (filters, sorts, specs,
@@ -82,6 +84,8 @@ pub(crate) fn versioned_from_wire(found: Versioned) -> NativeVersioned<Value> {
         id: found.id,
         version: tinystoragedrivers_core::Version(found.version.0),
         doc: found.doc,
+        // The storage-bus wire does not carry record metadata yet.
+        meta: tinystoragedrivers_core::Meta::unknown(),
     }
 }
 

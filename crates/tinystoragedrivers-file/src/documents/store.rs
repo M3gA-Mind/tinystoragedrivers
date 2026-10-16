@@ -60,6 +60,7 @@ impl StoredDoc {
             id: self.id,
             version: self.version,
             doc: self.doc,
+            meta: tinystoragedrivers_core::Meta::unknown(),
         }
     }
 }

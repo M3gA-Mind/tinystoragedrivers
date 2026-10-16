@@ -11,6 +11,7 @@ fn guard(doc: Value) -> Versioned<Value> {
         id: "lease-1".to_owned(),
         version: Version(3),
         doc,
+        meta: crate::Meta::unknown(),
     }
 }
 

@@ -32,6 +32,7 @@ fn versioned_maps_and_builds_its_precondition() {
         id: "a".to_owned(),
         version: Version(4),
         doc: 2,
+        meta: Meta::unknown(),
     };
     assert_eq!(found.unchanged(), Precondition::Version(Version(4)));
     let mapped = found.map(|n| n * 10);
@@ -291,6 +292,37 @@ impl DocumentStore for Baseline {
     }
     async fn drop_collection(&self, _: &str) -> Result<()> {
         Ok(())
+    }
+}
+
+#[tokio::test]
+async fn put_with_default_options_is_a_plain_put_and_declared_options_are_unsupported() {
+    let baseline = Baseline;
+    assert_eq!(
+        baseline
+            .put_with(
+                "c",
+                "i",
+                json!({}),
+                Precondition::None,
+                WriteOptions::default()
+            )
+            .await
+            .unwrap(),
+        Version::FIRST
+    );
+    for options in [
+        WriteOptions::new().schema(1),
+        WriteOptions::new().expires_ms(5),
+    ] {
+        let error = baseline
+            .put_with("c", "i", json!({}), Precondition::None, options)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::Unsupported(Capability::RecordMetadata)
+        );
     }
 }
 

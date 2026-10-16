@@ -208,3 +208,101 @@ async fn overlapping_blob_boundary_checks_cannot_delete_each_others_payloads() {
         assert!(blobs.delete(&first).await.unwrap());
     }
 }
+
+/// A driver that claims `RecordMetadata` but keeps none: every write forwards
+/// as a plain put and every read reports unknown metadata.
+mod forgetful {
+    use std::sync::Arc;
+
+    use serde_json::Value;
+
+    use crate::{
+        Capabilities, Capability, CollectionSpec, DocumentStore, Filter, Page, Precondition, Query,
+        Result, Scope, ScopedStorage, Sort, StorageBackend, Version, Versioned, WriteOptions,
+    };
+
+    #[derive(Debug)]
+    struct ForgetfulDocs(Arc<dyn DocumentStore>);
+
+    fn forget(found: Versioned<Value>) -> Versioned<Value> {
+        Versioned {
+            meta: crate::Meta::unknown(),
+            ..found
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DocumentStore for ForgetfulDocs {
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities().with(Capability::RecordMetadata)
+        }
+        async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+            self.0.ensure_collection(spec).await
+        }
+        async fn get(&self, c: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+            Ok(self.0.get(c, id).await?.map(forget))
+        }
+        async fn put(&self, c: &str, id: &str, d: Value, p: Precondition) -> Result<Version> {
+            self.0.put(c, id, d, p).await
+        }
+        async fn put_with(
+            &self,
+            c: &str,
+            id: &str,
+            d: Value,
+            p: Precondition,
+            _: WriteOptions,
+        ) -> Result<Version> {
+            self.0.put(c, id, d, p).await
+        }
+        async fn delete(&self, c: &str, id: &str, p: Precondition) -> Result<bool> {
+            self.0.delete(c, id, p).await
+        }
+        async fn query(&self, c: &str, q: &Query) -> Result<Page<Versioned<Value>>> {
+            self.0.query(c, q).await
+        }
+        async fn count(&self, c: &str, f: &Filter) -> Result<u64> {
+            self.0.count(c, f).await
+        }
+        async fn delete_where(&self, c: &str, f: &Filter) -> Result<u64> {
+            self.0.delete_where(c, f).await
+        }
+        async fn claim(
+            &self,
+            c: &str,
+            f: &Filter,
+            s: &[Sort],
+            p: &Value,
+        ) -> Result<Option<Versioned<Value>>> {
+            self.0.claim(c, f, s, p).await
+        }
+        async fn drop_collection(&self, c: &str) -> Result<()> {
+            self.0.drop_collection(c).await
+        }
+    }
+
+    pub(super) fn storage() -> ScopedStorage {
+        let inner = crate::MemoryStorage::new()
+            .for_scope(&Scope::local())
+            .unwrap();
+        ScopedStorage::new(
+            Scope::local(),
+            "forgetful",
+            Arc::new(ForgetfulDocs(Arc::clone(inner.documents()))),
+            Arc::clone(inner.streams()),
+            Arc::clone(inner.blobs()),
+        )
+    }
+}
+
+#[tokio::test]
+async fn conformance_rejects_a_driver_that_claims_metadata_but_keeps_none() {
+    let outcome = tokio::spawn(async {
+        super::schema::run(&forgetful::storage()).await;
+    })
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a driver reporting RecordMetadata must persist schema and times"
+    );
+}

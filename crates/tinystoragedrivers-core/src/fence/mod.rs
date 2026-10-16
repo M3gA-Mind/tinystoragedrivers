@@ -178,7 +178,7 @@ impl Fence {
                 "fence document `{}/{}` is absent",
                 self.collection, self.id
             ))),
-            Some(found) if !self.filter.matches(&found.id, &found.doc) => {
+            Some(found) if !self.filter.matches_with(&found.id, &found.doc, &found.meta) => {
                 Err(StorageError::fenced(format!(
                     "fence document `{}/{}` no longer matches at version {}",
                     self.collection, self.id, found.version.0

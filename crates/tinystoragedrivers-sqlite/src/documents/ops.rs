@@ -294,6 +294,7 @@ fn stored(
             id: id.to_owned(),
             version: to_version(version),
             doc: serde_json::from_str(&doc)?,
+            meta: tinystoragedrivers_core::Meta::unknown(),
         })
     })
     .transpose()
@@ -383,6 +384,7 @@ pub(crate) fn matching_after(
                 id,
                 version: to_version(version),
                 doc,
+                meta: tinystoragedrivers_core::Meta::unknown(),
             });
         }
     }

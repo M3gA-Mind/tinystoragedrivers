@@ -155,6 +155,7 @@ impl Fencing {
                     id,
                     version: Version(u64::try_from(version).unwrap_or(0)),
                     doc: serde_json::from_str(&text)?,
+                    meta: tinystoragedrivers_core::Meta::unknown(),
                 })
             })
             .transpose()?

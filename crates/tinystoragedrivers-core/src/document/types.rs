@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::Meta;
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
@@ -58,6 +59,10 @@ pub struct Versioned<T> {
     pub version: Version,
     /// The document body.
     pub doc: T,
+    /// What the driver recorded about the document: [`Meta::unknown`] when the
+    /// driver lacks [`Capability::RecordMetadata`](crate::Capability::RecordMetadata).
+    #[serde(default)]
+    pub meta: Meta,
 }
 
 impl<T> Versioned<T> {
@@ -74,6 +79,7 @@ impl<T> Versioned<T> {
             id: self.id,
             version: self.version,
             doc: f(self.doc),
+            meta: self.meta,
         }
     }
 }
@@ -382,19 +388,21 @@ pub struct CursorPosition {
 }
 
 impl CursorPosition {
-    /// Capture a document's sort values and id for a continuation cursor.
+    /// Capture a document's sort values and id for a continuation cursor,
+    /// with [`Meta::unknown`] as its metadata.
     #[must_use]
     pub fn for_document(id: &str, document: &Value, sort: &[Sort]) -> Self {
+        Self::for_record(id, document, &Meta::unknown(), sort)
+    }
+
+    /// As [`for_document`](Self::for_document), reading the metadata sort
+    /// paths from the document's own [`Meta`].
+    #[must_use]
+    pub fn for_record(id: &str, document: &Value, meta: &Meta, sort: &[Sort]) -> Self {
         let values = sort
             .iter()
             .map(|key| {
-                if key.field == crate::ID_FIELD {
-                    Value::String(id.to_owned())
-                } else {
-                    crate::value::lookup(document, &key.field)
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                }
+                crate::filter::field_value(id, document, meta, &key.field).unwrap_or(Value::Null)
             })
             .collect();
         Self {

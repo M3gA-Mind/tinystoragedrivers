@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use super::*;
-use crate::ErrorKind;
+use crate::{ErrorKind, Meta};
 
 fn doc() -> Value {
     json!({"state": "queued", "n": 5, "owner": {"name": "ada"}, "maybe": null})
@@ -177,4 +177,97 @@ fn sorts_by_keys_then_id() {
         serde_json::to_value(Sort::desc("x")).unwrap(),
         json!({"field": "x", "direction": "desc"})
     );
+}
+
+fn meta() -> Meta {
+    Meta {
+        schema: 2,
+        created_ms: 1_000,
+        updated_ms: 2_000,
+        expires_ms: Some(9_000),
+    }
+}
+
+#[test]
+fn reserved_metadata_paths_address_the_record_not_the_body() {
+    let d = doc();
+    let m = meta();
+    assert!(Filter::eq(CREATED_FIELD, 1_000).matches_with("a", &d, &m));
+    assert!(Filter::eq(UPDATED_FIELD, 2_000).matches_with("a", &d, &m));
+    assert!(Filter::eq(SCHEMA_FIELD, 2).matches_with("a", &d, &m));
+    assert!(Filter::eq(EXPIRES_FIELD, 9_000).matches_with("a", &d, &m));
+    assert!(Filter::gte(CREATED_FIELD, 1_000).matches_with("a", &d, &m));
+    assert!(!Filter::gt(CREATED_FIELD, 1_000).matches_with("a", &d, &m));
+    assert!(Filter::lt(UPDATED_FIELD, 3_000).matches_with("a", &d, &m));
+    assert!(Filter::one_of(SCHEMA_FIELD, [1, 2]).matches_with("a", &d, &m));
+    assert!(Filter::exists(EXPIRES_FIELD, true).matches_with("a", &d, &m));
+    let forever = Meta {
+        expires_ms: None,
+        ..m
+    };
+    assert!(Filter::exists(EXPIRES_FIELD, false).matches_with("a", &d, &forever));
+    assert!(!Filter::eq(EXPIRES_FIELD, 9_000).matches_with("a", &d, &forever));
+}
+
+#[test]
+fn a_body_field_with_a_reserved_name_is_shadowed_by_the_metadata() {
+    let d = json!({"_created_ms": 5});
+    assert!(!Filter::eq(CREATED_FIELD, 5).matches_with("a", &d, &meta()));
+    assert!(Filter::eq(CREATED_FIELD, 1_000).matches_with("a", &d, &meta()));
+}
+
+#[test]
+fn matches_without_metadata_sees_unknown_metadata() {
+    let d = doc();
+    assert!(Filter::eq(CREATED_FIELD, 0).matches("a", &d));
+    assert!(Filter::eq(SCHEMA_FIELD, 0).matches("a", &d));
+    assert!(Filter::exists(EXPIRES_FIELD, false).matches("a", &d));
+}
+
+fn meta_key(item: &(String, Value, Meta)) -> (&str, &Value, &Meta) {
+    (item.0.as_str(), &item.1, &item.2)
+}
+
+#[test]
+fn sorts_by_metadata_paths() {
+    let mut items = vec![
+        (
+            "a".to_owned(),
+            json!({}),
+            Meta {
+                created_ms: 30,
+                ..Meta::unknown()
+            },
+        ),
+        (
+            "b".to_owned(),
+            json!({}),
+            Meta {
+                created_ms: 10,
+                ..Meta::unknown()
+            },
+        ),
+        (
+            "c".to_owned(),
+            json!({}),
+            Meta {
+                created_ms: 20,
+                ..Meta::unknown()
+            },
+        ),
+        (
+            "d".to_owned(),
+            json!({}),
+            Meta {
+                created_ms: 20,
+                ..Meta::unknown()
+            },
+        ),
+    ];
+    sort_documents_with_meta(&mut items, &[Sort::asc(CREATED_FIELD)], meta_key);
+    let ids: Vec<_> = items.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(ids, ["b", "c", "d", "a"]);
+    sort_documents_with_meta(&mut items, &[Sort::desc(CREATED_FIELD)], meta_key);
+    let ids: Vec<_> = items.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(ids, ["a", "c", "d", "b"]);
 }

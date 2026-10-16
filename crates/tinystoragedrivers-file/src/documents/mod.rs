@@ -312,6 +312,7 @@ impl DocumentStore for FileDocuments {
                 id: first.id,
                 version,
                 doc,
+                meta: tinystoragedrivers_core::Meta::unknown(),
             }))
         })
         .await

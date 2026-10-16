@@ -155,6 +155,7 @@ impl MongoDocuments {
             id: first.id,
             version,
             doc,
+            meta: tinystoragedrivers_core::Meta::unknown(),
         }))
     }
 
