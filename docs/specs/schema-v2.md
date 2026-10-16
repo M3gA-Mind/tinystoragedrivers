@@ -180,13 +180,27 @@ Two shared helpers are not collections:
   - Reads (`read`, `read_window`, `len`) behave exactly as before and return the same offsets and values.
   - Appending to a sealed stream is `ErrorKind::Conflict`.
   - Sealing is idempotent and survives a crash at any point: the blob is written before the head changes, and rows are deleted only after.
+- **Stream times.** Every driver's stream head records `last_append_ms` (stamped on every non-empty append by the driver's clock; truncation does not touch it) and `sealed_ms` (stamped when the seal marks the stream). `StreamStore::info(name) -> Option<StreamInfo { base, len, sealed_ms, last_append_ms }>` reads them; `None` means the stream does not exist. Reading times is part of the `StreamSeal` capability, not a capability of its own: a driver that can seal records both, and the default `info` is `Unsupported(StreamSeal)`. A stream written before times existed reports `None` for them, and the policy leaves it alone rather than guess.
+  - memory: fields of the stored stream, stamped from the injectable clock.
+  - SQLite: nullable `stream_heads.sealed_ms` and `last_append_ms`, added by `ensure()` with `ALTER TABLE ... ADD COLUMN` when a layout-2 file lacks them (layout stays 2).
+  - File: `sealed_ms` and `last_append_ms` in the `.meta.json` sidecar (an append now rewrites the sidecar before appending the entries).
+  - MongoDB: `ms` on every segment document and on the seal marker (`ms` is the seal time; `la` carries the last append time, because sealing deletes the entry segments).
+  - Bus: `Streams.Info` (`StreamRequest` in, `StreamInfoResponse` or `null` out). A module may read the times of its own streams. Contract version stays 4 (unreleased).
 - **Seal policy.** A `SealPolicy` on a `Stream` item states when the owner seals:
   - `OnFinish`: the owner calls `seal`
   - `Idle(ms)`: tsd seals streams untouched for that long, during maintenance
   - `Never`
 
   It also states a retention period: `delete_stream` after the stream has been sealed for N ms.
-- **Maintenance.** `Maintenance::run(budget)` (capability `Maintenance`) applies seal and retention policies and reclaims space:
+- **Applying policy.** `Registry::maintain(&ScopedStorage, now_ms, MaintenanceBudget) -> PolicyReport` applies every `Item::Stream` policy to one scope. For each declared base name it lists `<base>` and `<base>/...` with `streams(base)` (the `<base>` prefix alone would also match `<base>x`, so the family is filtered) and reads `info` for each:
+  - not sealed, `Idle(ms)`, and `now_ms - last_append_ms > ms`: `seal`;
+  - sealed, `retain_ms` set, and `sealed_ms + retain_ms < now_ms`: `delete_stream` (which removes the blob too);
+  - `OnFinish` and `Never` streams are never sealed here, but retention applies to any sealed stream whose policy states it. A family whose policy can never act (`Never` or `OnFinish` without retention) is not even listed.
+  - `MaintenanceBudget::max_streams` caps the streams sealed or deleted per call (a lost race counts); `PolicyReport { scopes, inspected, sealed, deleted, conflicts, exhausted }` says what happened and whether work remained. A `Conflict` or `NotFound` from a racing writer is counted, not returned; any other error stops the pass.
+  - The policy is applied to the scope handed in, whatever the item's `ScopeClass`: the host chooses the scopes.
+  - `Registry::maintain_all(&dyn StorageBackend, now_ms, budget)` runs it over `backend.scopes("")` with one budget shared across scopes. It needs `ScopeEnumeration`; without it, enumerate the scopes and call `maintain` for each.
+  - **Order for a host:** policies first, then space reclamation, so the vacuum sees the freed rows: `registry.maintain_all(...)`, then `backend.maintain(budget)`.
+- **Maintenance.** `StorageBackend::maintain(budget)` (capability `Maintenance`) reclaims space; it does not apply policies, because the backend does not know the registry:
   - SQLite runs `PRAGMA incremental_vacuum` with `auto_vacuum=INCREMENTAL`, set on creation and on the v2 physical migration.
   - MongoDB and File return `Unsupported`, which callers treat as nothing to do.
 - **`checkpoint(Truncate)`** flushes the SQLite WAL. Call it before moving a database file.
@@ -199,7 +213,7 @@ Two shared helpers are not collections:
 docs(scope, coll, id, version, schema, created_ms, updated_ms, expires_ms,
      deleted, body)                     PK (scope, coll, id)
 streams(scope, name, seq, body)         PK (scope, name, seq)
-stream_heads(scope, name, base, len, sealed)
+stream_heads(scope, name, base, len, sealed, sealed_ms, last_append_ms)
 blobs(scope, key, content_type, size, sha256, expires_ms, bytes)
 doc_fields(scope, coll, id, path, kind, value)   PK (scope, coll, id, path)
 fts                                     FTS5, searchable collections only
@@ -257,7 +271,7 @@ v2 ships as **v1.0.0** and is a breaking release on purpose:
   - seal and read equality
   - retention
 - The SQLite physical migration passes against a v0.11.0 fixture database with every table populated.
-- `Maintenance::run` reduces a SQLite file's size after a bulk delete.
+- `StorageBackend::maintain` reduces a SQLite file's size after a bulk delete.
 - Every collection in the [catalogue](#catalogue) has a v2 name, an owner and a migration step in its owning repository.
 - OpenHuman's `scripts/ci/check-storage-schema.mjs` passes. It checks names, single ownership, casing and the `_ms` rule, and generates `docs/storage-schema.md`.
 
