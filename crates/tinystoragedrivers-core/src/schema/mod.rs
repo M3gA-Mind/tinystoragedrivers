@@ -71,6 +71,6 @@ pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
 pub use policy::PolicyReport;
 pub use runner::{MigrateOptions, MigrationReport, StepReport};
 pub use types::{
-    BlobOutput, BlobStepFn, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody, StepFn,
-    StreamStepFn, TargetRecord,
+    BlobOutput, BlobStepFn, Expiry, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody,
+    StepFn, StreamStepFn, TargetRecord,
 };
