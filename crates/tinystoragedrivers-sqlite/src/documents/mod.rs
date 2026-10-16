@@ -48,6 +48,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::ExistingSchema)
         .with(Capability::CollectionValidation)
         .with(Capability::BlobTtl)
+        .with(Capability::StreamSeal)
 }
 
 /// SQLite documents bound to one scope.

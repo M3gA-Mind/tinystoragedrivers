@@ -90,3 +90,39 @@ fn a_blob_table_from_before_lifetimes_gains_the_column_and_validates() {
         .unwrap();
     assert_eq!(expiry, None, "existing blobs keep no lifetime");
 }
+
+#[test]
+fn a_stream_table_from_before_sealing_gains_the_column_and_validates() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new("old__");
+    tables.ensure(&conn).unwrap();
+    // Recreate the stream head table as the previous release declared it.
+    conn.execute_batch(&format!(
+        "DROP TABLE {meta};
+         CREATE TABLE {meta} (
+             scope TEXT NOT NULL,
+             stream TEXT NOT NULL,
+             base INTEGER NOT NULL,
+             len INTEGER NOT NULL,
+             PRIMARY KEY (scope, stream)
+         ) WITHOUT ROWID;
+         INSERT INTO {meta} (scope, stream, base, len) VALUES ('s', 'j', 0, 3);",
+        meta = ident(&tables.stream_meta)
+    ))
+    .unwrap();
+    assert!(
+        tables.validate(&conn).is_err(),
+        "a read-only open refuses a table that has not been migrated"
+    );
+    tables.ensure(&conn).unwrap();
+    tables.ensure(&conn).unwrap();
+    tables.validate(&conn).unwrap();
+    let sealed: i64 = conn
+        .query_row(
+            &format!("SELECT sealed FROM {}", ident(&tables.stream_meta)),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sealed, 0, "existing streams are not sealed");
+}
