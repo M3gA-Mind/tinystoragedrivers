@@ -624,3 +624,25 @@ async fn a_module_seals_a_stream_and_reads_it_back() {
         ErrorKind::Conflict
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_cannot_run_the_hosts_conditional_retention_delete() {
+    let rig = rig(Admission::Private).await;
+    let streams = rig.storage.streams();
+    streams.append("log", json!(1)).await.unwrap();
+    let sealed_ms = streams
+        .seal("log")
+        .await
+        .map(|_| ())
+        .and(streams.info("log").await);
+    let sealed_ms = sealed_ms.unwrap().and_then(|info| info.sealed_ms).unwrap();
+    assert_eq!(
+        streams
+            .delete_sealed_stream("log", sealed_ms)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert_eq!(streams.len("log").await.unwrap(), 1, "nothing was deleted");
+}

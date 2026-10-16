@@ -82,6 +82,31 @@ fn head(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result
     .map_err(during("read stream"))
 }
 
+/// Remove a stream's entries, head and sealed blob inside the caller's
+/// transaction; whether it existed.
+fn delete_in(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result<bool> {
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
+            ident(&tables.streams)
+        ),
+        params![scope, stream],
+    )
+    .map_err(during("delete stream"))?;
+    let removed = conn
+        .execute(
+            &format!(
+                "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
+                ident(&tables.stream_heads)
+            ),
+            params![scope, stream],
+        )
+        .map_err(during("delete stream"))?;
+    // Even when the stream is gone, clear a blob a crashed seal left.
+    seal::delete_blob(conn, tables, scope, stream)?;
+    Ok(removed > 0)
+}
+
 fn to_offset(stored: i64) -> u64 {
     u64::try_from(stored).unwrap_or(0)
 }
@@ -312,26 +337,23 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(true, move |conn, tables, scope| {
-            conn.execute(
-                &format!(
-                    "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
-                    ident(&tables.streams)
-                ),
-                params![scope, stream],
-            )
-            .map_err(during("delete stream"))?;
-            let removed = conn
-                .execute(
-                    &format!(
-                        "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
-                        ident(&tables.stream_heads)
-                    ),
-                    params![scope, stream],
-                )
-                .map_err(during("delete stream"))?;
-            // Even when the stream is gone, clear a blob a crashed seal left.
-            seal::delete_blob(conn, tables, scope, &stream)?;
-            Ok(removed > 0)
+            delete_in(conn, tables, scope, &stream)
+        })
+        .await
+    }
+
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        validate_stream(stream)?;
+        let stream = stream.to_owned();
+        // The check and the delete share the write transaction, so the stream
+        // cannot be replaced between them.
+        self.with(true, move |conn, tables, scope| {
+            let sealed = head(conn, tables, scope, &stream)?
+                .is_some_and(|head| head.sealed_ms == Some(sealed_ms));
+            if !sealed {
+                return Ok(false);
+            }
+            delete_in(conn, tables, scope, &stream)
         })
         .await
     }

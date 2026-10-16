@@ -76,6 +76,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
     run_ports(&local).await;
+    seal::run_host(&local).await;
     if single_scope {
         let other = Scope::new("conformance-b").expect("valid scope");
         assert!(

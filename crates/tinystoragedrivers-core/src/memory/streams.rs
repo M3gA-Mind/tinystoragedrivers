@@ -302,6 +302,20 @@ impl StreamStore for MemoryStreams {
         Ok(existed)
     }
 
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        validate_stream(stream)?;
+        // The check and the delete share one hold of the lock.
+        let mut state = self.db.lock()?;
+        self.guard(&state)?;
+        let key = self.key(stream);
+        if state.streams.get(&key).and_then(|stored| stored.sealed_ms) != Some(sealed_ms) {
+            return Ok(false);
+        }
+        state.streams.remove(&key);
+        state.blobs.remove(&self.blob_key(stream)?);
+        Ok(true)
+    }
+
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
         validate_stream(stream)?;
         // The three steps run under one hold of the lock, so no append can land

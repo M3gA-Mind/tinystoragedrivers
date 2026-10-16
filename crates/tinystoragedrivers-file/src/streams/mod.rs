@@ -171,6 +171,23 @@ fn read_meta(paths: &Paths, name: &str) -> Result<Option<StreamMeta>> {
     }
 }
 
+/// Remove a stream's files and sealed blob; whether it existed. The caller
+/// holds the directory lock.
+fn delete_files(db: &Db, scope: &Scope, paths: &Paths, name: &str) -> Result<bool> {
+    let existed = read_meta(paths, name)?.is_some();
+    if existed {
+        // The meta file decides existence; remove it first so a crash
+        // leaves at worst an orphaned, invisible data file.
+        remove_optional(&paths.meta)?;
+        remove_optional(&paths.data)?;
+    }
+    // The blob goes last, so a crash never leaves a sealed stream
+    // without its entries. It goes even when the stream is not there,
+    // to clear one a crashed seal left.
+    seal::delete_blob(db, scope, name)?;
+    Ok(existed)
+}
+
 /// The error for a stream whose next offset would not fit a `u64`.
 fn exhausted() -> StorageError {
     StorageError::backend("stream offset space is exhausted")
@@ -450,18 +467,21 @@ impl StreamStore for FileStreams {
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
         let name = stream.to_owned();
         self.write_db(stream, move |db, scope, paths| {
-            let existed = read_meta(paths, &name)?.is_some();
-            if existed {
-                // The meta file decides existence; remove it first so a crash
-                // leaves at worst an orphaned, invisible data file.
-                remove_optional(&paths.meta)?;
-                remove_optional(&paths.data)?;
+            delete_files(db, scope, paths, &name)
+        })
+        .await
+    }
+
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        let name = stream.to_owned();
+        // The check and the delete run under the same directory lock.
+        self.write_db(stream, move |db, scope, paths| {
+            let sealed =
+                read_meta(paths, &name)?.is_some_and(|meta| meta.sealed_ms == Some(sealed_ms));
+            if !sealed {
+                return Ok(false);
             }
-            // The blob goes last, so a crash never leaves a sealed stream
-            // without its entries. It goes even when the stream is not there,
-            // to clear one a crashed seal left.
-            seal::delete_blob(db, scope, &name)?;
-            Ok(existed)
+            delete_files(db, scope, paths, &name)
         })
         .await
     }
