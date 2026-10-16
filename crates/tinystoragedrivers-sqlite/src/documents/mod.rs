@@ -1,11 +1,15 @@
 //! [`DocumentStore`] on SQLite.
 //!
 //! All collections of a database share one `WITHOUT ROWID` table keyed by
-//! `(scope, collection, id)`, with the body stored as JSON text. Declared
-//! indexes become partial expression indexes over `json_extract`, and declared
-//! search fields are mirrored into an FTS5 table. Filters push their exact
+//! `(scope, collection, id)`, with the body stored as JSON text (or, over 4 KiB,
+//! a zstd blob, see [`crate::body`]) and the record
+//! metadata (`schema`, `created_ms`, `updated_ms`, `expires_ms`) in columns of
+//! their own. A deleted document keeps its row (`deleted = 1`, body `{}`) so
+//! its version continues if the id is written again; every read skips it. Declared
+//! index and search fields are projected into the `doc_fields` side table
+//! ([`crate::fields`]), and search fields are mirrored into an FTS5 table. Filters push their exact
 //! string and boolean equalities down to SQL and are re-checked in Rust with
-//! [`Filter::matches`], so results agree with the memory driver.
+//! [`Filter::matches_with`], so results agree with the memory driver.
 //!
 //! Every write runs in an immediate transaction under the shared connection,
 //! which makes preconditions, unique indexes, claims and batches atomic.
@@ -21,8 +25,8 @@ use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
     Precondition, Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
-    Versioned, WriteOp, WriteResult, async_trait, validate_collection, validate_doc, validate_id,
-    value,
+    Versioned, WriteOp, WriteOptions, WriteResult, async_trait, validate_collection, validate_doc,
+    validate_id, value,
 };
 
 use crate::connection::Db;
@@ -51,6 +55,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::Maintenance)
         .with(Capability::ScopeEnumeration)
         .with(Capability::StreamSeal)
+        .with(Capability::RecordMetadata)
 }
 
 /// SQLite documents bound to one scope.
@@ -232,6 +237,18 @@ impl DocumentStore for SqliteDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.put_with(collection, id, doc, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&doc)?;
@@ -241,7 +258,7 @@ impl DocumentStore for SqliteDocuments {
         }
         let (collection, id) = (collection.to_owned(), id.to_owned());
         self.with(Access::Write, move |conn, ctx| {
-            ops::put(conn, ctx, &collection, &id, &doc, precondition)
+            ops::put_with(conn, ctx, &collection, &id, &doc, precondition, options)
         })
         .await
     }
@@ -290,7 +307,7 @@ impl DocumentStore for SqliteDocuments {
                 Some(Cursor::keyset(
                     "sqlite",
                     fingerprint,
-                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                    &CursorPosition::for_record(&last.id, &last.doc, &last.meta, &query.sort),
                 )?)
             } else {
                 None
@@ -360,19 +377,27 @@ impl DocumentStore for SqliteDocuments {
             };
             let mut doc = first.doc;
             value::merge_patch(&mut doc, &patch);
-            let version = ops::put(
+            // A claim patches the body only: the schema and expiry carry over.
+            let version = ops::put_with(
                 conn,
                 ctx,
                 &collection,
                 &first.id,
                 &doc,
                 Precondition::Version(first.version),
+                WriteOptions {
+                    schema: first.meta.schema,
+                    expires_ms: first.meta.expires_ms,
+                    created_ms: None,
+                },
             )?;
+            let meta =
+                ops::get(conn, ctx, &collection, &first.id)?.map_or(first.meta, |found| found.meta);
             Ok(Some(Versioned {
                 id: first.id,
                 version,
                 doc,
-                meta: tinystoragedrivers_core::Meta::unknown(),
+                meta,
             }))
         })
         .await

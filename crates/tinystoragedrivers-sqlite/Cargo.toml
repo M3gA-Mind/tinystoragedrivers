@@ -19,6 +19,10 @@ tinystoragedrivers-core = { workspace = true }
 # the host's own pin (OpenHuman pins 0.40.2).
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = { workspace = true }
+# The `blobs.sha256` column.
+sha2 = { workspace = true }
+# Document bodies over 4 KiB are stored as zstd frames.
+zstd = { workspace = true }
 # Database calls run on the blocking pool so they never stall a runtime
 # worker.
 tokio = { workspace = true }

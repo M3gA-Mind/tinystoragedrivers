@@ -129,7 +129,7 @@ impl SqliteStreams {
                 return Err(StorageError::conflict("stream is already sealed"));
             }
             let sql = format!(
-                "SELECT seq, value FROM {} WHERE scope = ?1 AND stream = ?2 ORDER BY seq",
+                "SELECT seq, body FROM {} WHERE scope = ?1 AND name = ?2 ORDER BY seq",
                 ident(&tables.streams)
             );
             let mut statement = conn.prepare(&sql).map_err(during("read stream"))?;
@@ -156,13 +156,21 @@ impl SqliteStreams {
             let bytes = log.encode()?;
             let outcome = SealOutcome::new(log.base(), log.len(), bytes.len() as u64);
             let upsert = format!(
-                "INSERT INTO {} (scope, key, content_type, bytes, expires_at_ms) VALUES (?1, ?2, ?3, ?4, NULL)
-                 ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, bytes = excluded.bytes, expires_at_ms = NULL",
+                "INSERT INTO {} (scope, key, content_type, size, sha256, bytes, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                 ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, size = excluded.size,
+                     sha256 = excluded.sha256, bytes = excluded.bytes, expires_ms = NULL",
                 ident(&tables.blobs)
             );
             conn.execute(
                 &upsert,
-                params![scope, sealed_blob_key(&stream)?, CONTENT_TYPE, bytes],
+                params![
+                    scope,
+                    sealed_blob_key(&stream)?,
+                    CONTENT_TYPE,
+                    i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                    crate::blobs::digest(&bytes),
+                    bytes
+                ],
             )
             .map_err(during("write sealed stream"))?;
             Ok(outcome)
@@ -185,8 +193,8 @@ impl SqliteStreams {
                 return Err(StorageError::conflict("sealed blob changed while sealing"));
             }
             let update = format!(
-                "UPDATE {} SET sealed = 1 WHERE scope = ?1 AND stream = ?2",
-                ident(&tables.stream_meta)
+                "UPDATE {} SET sealed = 1 WHERE scope = ?1 AND name = ?2",
+                ident(&tables.stream_heads)
             );
             conn.execute(&update, params![scope, stream])
                 .map_err(during("seal stream"))?;
@@ -203,7 +211,7 @@ impl SqliteStreams {
         self.with(true, move |conn, tables, scope| {
             if head(conn, tables, scope, &stream)?.is_some_and(|head| head.sealed) {
                 let delete = format!(
-                    "DELETE FROM {} WHERE scope = ?1 AND stream = ?2",
+                    "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
                     ident(&tables.streams)
                 );
                 conn.execute(&delete, params![scope, stream])

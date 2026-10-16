@@ -59,8 +59,8 @@ struct Head {
 /// The head of a stream, if it exists.
 fn head(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result<Option<Head>> {
     let sql = format!(
-        "SELECT base, len, sealed FROM {} WHERE scope = ?1 AND stream = ?2",
-        ident(&tables.stream_meta)
+        "SELECT base, len, sealed FROM {} WHERE scope = ?1 AND name = ?2",
+        ident(&tables.stream_heads)
     );
     let row: Option<(i64, i64, i64)> = conn
         .query_row(&sql, params![scope, stream], |row| {
@@ -165,7 +165,7 @@ impl SqliteStreams {
                 return Ok(first);
             }
             let insert = format!(
-                "INSERT INTO {} (scope, stream, seq, value) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO {} (scope, name, seq, body) VALUES (?1, ?2, ?3, ?4)",
                 ident(&tables.streams)
             );
             let mut next = first;
@@ -183,9 +183,9 @@ impl SqliteStreams {
                 next += 1;
             }
             let upsert = format!(
-                "INSERT INTO {} (scope, stream, base, len) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (scope, stream) DO UPDATE SET len = excluded.len",
-                ident(&tables.stream_meta)
+                "INSERT INTO {} (scope, name, base, len) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (scope, name) DO UPDATE SET len = excluded.len",
+                ident(&tables.stream_heads)
             );
             conn.execute(
                 &upsert,
@@ -226,7 +226,7 @@ impl StreamStore for SqliteStreams {
                 return Ok(seal::read_sealed(conn, tables, scope, &stream)?.window(from, limit));
             }
             let sql = format!(
-                "SELECT seq, value FROM {} WHERE scope = ?1 AND stream = ?2 AND seq >= ?3
+                "SELECT seq, body FROM {} WHERE scope = ?1 AND name = ?2 AND seq >= ?3
                  ORDER BY seq LIMIT ?4",
                 ident(&tables.streams)
             );
@@ -273,14 +273,14 @@ impl StreamStore for SqliteStreams {
             }
             let cut = offset.clamp(base, len);
             let delete = format!(
-                "DELETE FROM {} WHERE scope = ?1 AND stream = ?2 AND seq < ?3",
+                "DELETE FROM {} WHERE scope = ?1 AND name = ?2 AND seq < ?3",
                 ident(&tables.streams)
             );
             conn.execute(&delete, params![scope, stream, to_stored(cut)?])
                 .map_err(during("truncate stream"))?;
             let update = format!(
-                "UPDATE {} SET base = ?3 WHERE scope = ?1 AND stream = ?2",
-                ident(&tables.stream_meta)
+                "UPDATE {} SET base = ?3 WHERE scope = ?1 AND name = ?2",
+                ident(&tables.stream_heads)
             );
             conn.execute(&update, params![scope, stream, to_stored(cut)?])
                 .map_err(during("truncate stream"))?;
@@ -295,7 +295,7 @@ impl StreamStore for SqliteStreams {
         self.with(true, move |conn, tables, scope| {
             conn.execute(
                 &format!(
-                    "DELETE FROM {} WHERE scope = ?1 AND stream = ?2",
+                    "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
                     ident(&tables.streams)
                 ),
                 params![scope, stream],
@@ -304,8 +304,8 @@ impl StreamStore for SqliteStreams {
             let removed = conn
                 .execute(
                     &format!(
-                        "DELETE FROM {} WHERE scope = ?1 AND stream = ?2",
-                        ident(&tables.stream_meta)
+                        "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
+                        ident(&tables.stream_heads)
                     ),
                     params![scope, stream],
                 )
@@ -325,8 +325,8 @@ impl StreamStore for SqliteStreams {
         let prefix = prefix.to_owned();
         self.with(false, move |conn, tables, scope| {
             let sql = format!(
-                "SELECT stream FROM {} WHERE scope = ?1 ORDER BY stream",
-                ident(&tables.stream_meta)
+                "SELECT name FROM {} WHERE scope = ?1 ORDER BY name",
+                ident(&tables.stream_heads)
             );
             let mut statement = conn.prepare(&sql).map_err(during("list streams"))?;
             let names: Vec<String> = statement

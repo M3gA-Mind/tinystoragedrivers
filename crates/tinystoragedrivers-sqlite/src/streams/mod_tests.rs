@@ -147,10 +147,7 @@ mod sealing {
         // Prove the reads do not come from the rows: replace their values.
         f.db.run_now(|conn| {
             conn.execute(
-                &format!(
-                    "UPDATE {} SET value = '\"stale\"'",
-                    ident(&f.tables.streams)
-                ),
+                &format!("UPDATE {} SET body = '\"stale\"'", ident(&f.tables.streams)),
                 [],
             )
             .unwrap();
@@ -243,7 +240,7 @@ mod sealing {
         f.streams.seal("k").await.unwrap();
         assert!(f.streams.delete_stream("k").await.unwrap());
         assert!(!f.has_blob("k").await);
-        assert_eq!(f.count(&f.tables.stream_meta), 0);
+        assert_eq!(f.count(&f.tables.stream_heads), 0);
     }
 
     #[tokio::test]

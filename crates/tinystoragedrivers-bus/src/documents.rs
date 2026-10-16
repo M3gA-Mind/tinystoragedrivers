@@ -225,6 +225,23 @@ pub struct PutDocumentRequest {
     pub doc: Value,
     /// Atomic native condition.
     pub precondition: Precondition,
+    /// Body version the writer declares; `0` (omitted) means undeclared.
+    /// Needs `record_metadata`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub schema: u32,
+    /// Unix epoch milliseconds from which the document reads as absent.
+    /// Needs `record_metadata`. There is deliberately no `created_ms`: that
+    /// is a host-only migration option and a request naming it fails to decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+}
+/// Serde `skip_serializing_if` predicate: omit a zero `schema`.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference"
+)]
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 /// Delete one document from a host-granted collection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

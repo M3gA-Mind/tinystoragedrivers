@@ -225,7 +225,7 @@ async fn existing_schema_does_not_repair_incompatible_tables_or_create_guard_fil
     storage
         .db
         .run_now(|conn| {
-            conn.execute_batch("DROP TABLE _tsd_blobs; CREATE TABLE _tsd_blobs (wrong TEXT)")
+            conn.execute_batch("DROP TABLE blobs; CREATE TABLE blobs (wrong TEXT)")
                 .map_err(crate::error::during("replace test schema"))
         })
         .unwrap();
@@ -238,12 +238,12 @@ async fn existing_schema_does_not_repair_incompatible_tables_or_create_guard_fil
         .run_now(|conn| {
             let sql: String = conn
                 .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE name = '_tsd_blobs'",
+                    "SELECT sql FROM sqlite_schema WHERE name = 'blobs'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(sql, "CREATE TABLE _tsd_blobs (wrong TEXT)");
+            assert_eq!(sql, "CREATE TABLE blobs (wrong TEXT)");
             Ok(())
         })
         .unwrap();

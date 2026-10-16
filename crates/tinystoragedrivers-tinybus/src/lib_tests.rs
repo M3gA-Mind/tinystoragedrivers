@@ -74,7 +74,8 @@ async fn native_cas_conflicts_preserve_document_and_version() {
         Versioned {
             id: "index".into(),
             version: Version(1),
-            doc: json!({"value":1})
+            doc: json!({"value":1}),
+            meta: None,
         }
     );
     let second = service

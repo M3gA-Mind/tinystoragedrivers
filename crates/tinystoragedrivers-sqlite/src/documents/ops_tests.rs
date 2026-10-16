@@ -32,7 +32,7 @@ fn an_exhausted_version_fails_the_write() {
         Precondition::None,
     )
     .unwrap();
-    conn.execute("UPDATE _tsd_docs SET version = ?1", [i64::MAX])
+    conn.execute("UPDATE docs SET version = ?1", [i64::MAX])
         .unwrap();
     let error = put(
         &conn,
@@ -129,7 +129,7 @@ fn corrupt_stored_json_is_a_serialization_error() {
         Precondition::None,
     )
     .unwrap();
-    conn.execute("UPDATE _tsd_docs SET doc = 'not json'", [])
+    conn.execute("UPDATE docs SET body = 'not json'", [])
         .unwrap();
     let error = get(&conn, ctx(&tables), "c", "a").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Serialization);
@@ -187,8 +187,95 @@ fn versions_survive_deletion_and_drops() {
     .unwrap();
     assert!(v3 > v2);
     assert_eq!(
-        buried_version(&conn, ctx(&tables), "c", "zz").unwrap(),
-        None
+        stored(&conn, ctx(&tables), "c", "zz")
+            .unwrap()
+            .map(|row| row.version),
+        None,
+        "deleting an id that never existed leaves no row"
+    );
+}
+
+#[test]
+fn a_deleted_document_keeps_a_hidden_row_with_its_version() {
+    let (conn, tables) = setup();
+    let version = put(
+        &conn,
+        ctx(&tables),
+        "c",
+        "a",
+        &json!({"n": 1}),
+        Precondition::None,
+    )
+    .unwrap();
+    assert!(delete(&conn, ctx(&tables), "c", "a", Precondition::None).unwrap());
+    let row = stored(&conn, ctx(&tables), "c", "a").unwrap().unwrap();
+    assert!(row.deleted);
+    assert_eq!(row.version, version);
+    assert_eq!(row.doc, json!({}), "a deleted row holds the empty body");
+    assert_eq!(get(&conn, ctx(&tables), "c", "a").unwrap(), None);
+    assert!(
+        matching(&conn, ctx(&tables), "c", &Filter::All, &[])
+            .unwrap()
+            .is_empty(),
+        "queries skip deleted rows"
+    );
+    assert_eq!(collections(&conn, ctx(&tables), "").unwrap(), ["c"]);
+}
+
+#[test]
+fn metadata_is_stamped_and_an_expired_record_reads_as_absent() {
+    let (conn, tables) = setup();
+    let at = |now_ms| Ctx {
+        now_ms,
+        ..ctx(&tables)
+    };
+    let options = WriteOptions::new().schema(3).expires_ms(5_000);
+    put_with(
+        &conn,
+        at(1_000),
+        "c",
+        "a",
+        &json!({}),
+        Precondition::None,
+        options,
+    )
+    .unwrap();
+    put_with(
+        &conn,
+        at(2_000),
+        "c",
+        "a",
+        &json!({}),
+        Precondition::None,
+        options,
+    )
+    .unwrap();
+    let meta = get(&conn, at(2_500), "c", "a").unwrap().unwrap().meta;
+    assert_eq!(
+        meta,
+        Meta {
+            schema: 3,
+            created_ms: 1_000,
+            updated_ms: 2_000,
+            expires_ms: Some(5_000)
+        }
+    );
+    assert_eq!(get(&conn, at(5_000), "c", "a").unwrap(), None);
+    assert_eq!(
+        matching(&conn, at(5_000), "c", &Filter::All, &[])
+            .unwrap()
+            .len(),
+        0
+    );
+    // Re-creating over an expired record is a new creation.
+    put(&conn, at(6_000), "c", "a", &json!({}), Precondition::Absent).unwrap();
+    assert_eq!(
+        get(&conn, at(6_000), "c", "a")
+            .unwrap()
+            .unwrap()
+            .meta
+            .created_ms,
+        6_000
     );
 }
 

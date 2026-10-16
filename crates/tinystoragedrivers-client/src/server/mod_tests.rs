@@ -108,6 +108,8 @@ async fn capabilities_never_list_host_only_entries() {
         "scope_purge",
         "atomic_scope_purge",
         "existing_schema",
+        "maintenance",
+        "scope_enumeration",
     ] {
         assert!(!names.iter().any(|n| n == host_only), "{host_only}");
     }
@@ -127,4 +129,123 @@ async fn closing_an_unknown_watch_is_not_found() {
         .await,
         StorageKind::NotFound
     );
+}
+
+async fn call(server: &StorageServer, object: &str, selector: &str, request: Value) -> Value {
+    server
+        .handle(Admission::Private, object, selector, request)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn put_options_land_as_metadata_that_every_read_returns() {
+    let server = server();
+    let far = 4_102_444_800_000_i64;
+    call(
+        &server,
+        "Documents",
+        "Put",
+        json!({"collection":"c","document_id":"a","document_json":"{\"n\":1}",
+               "precondition":{"kind":"none"},"schema":3,"expires_ms":far}),
+    )
+    .await;
+    let got = call(
+        &server,
+        "Documents",
+        "Get",
+        json!({"collection":"c","document_id":"a"}),
+    )
+    .await;
+    assert_eq!(got["meta"]["schema"], 3);
+    assert_eq!(got["meta"]["expires_ms"], far);
+    assert!(got["meta"]["created_ms"].as_i64().unwrap() > 0);
+    let page = call(
+        &server,
+        "Documents",
+        "Query",
+        json!({"collection":"c","query":{}}),
+    )
+    .await;
+    assert_eq!(page["items"][0]["meta"]["schema"], 3);
+    let claimed = call(
+        &server,
+        "Documents",
+        "Claim",
+        json!({"collection":"c","filter":{"op":"all"},"patch":"{\"n\":2}"}),
+    )
+    .await;
+    assert_eq!(claimed["meta"]["schema"], 3);
+}
+
+#[tokio::test]
+async fn a_put_without_options_is_the_pre_v4_request_and_a_forged_created_ms_is_refused() {
+    let server = server();
+    call(
+        &server,
+        "Documents",
+        "Put",
+        json!({"collection":"c","document_id":"a","document_json":"{}",
+               "precondition":{"kind":"none"}}),
+    )
+    .await;
+    assert_eq!(
+        kind(
+            &server,
+            "Documents",
+            "Put",
+            json!({"collection":"c","document_id":"b","document_json":"{}",
+                   "precondition":{"kind":"none"},"created_ms":1}),
+        )
+        .await,
+        StorageKind::InvalidInput
+    );
+    // Nothing was written by the refused request.
+    let got = call(
+        &server,
+        "Documents",
+        "Get",
+        json!({"collection":"c","document_id":"b"}),
+    )
+    .await;
+    assert!(got.is_null());
+}
+
+#[tokio::test]
+async fn seal_closes_a_stream_and_maintenance_selectors_do_not_exist() {
+    let server = server();
+    call(
+        &server,
+        "Streams",
+        "Append",
+        json!({"stream":"s","record_json":"1"}),
+    )
+    .await;
+    let sealed = call(&server, "Streams", "Seal", json!({"stream":"s"})).await;
+    assert_eq!(
+        sealed,
+        json!({"base":0,"len":1,"blob_bytes":sealed["blob_bytes"]})
+    );
+    assert_eq!(
+        kind(
+            &server,
+            "Streams",
+            "Append",
+            json!({"stream":"s","record_json":"2"})
+        )
+        .await,
+        StorageKind::Conflict
+    );
+    assert_eq!(
+        kind(&server, "Streams", "Seal", json!({"stream":"never"})).await,
+        StorageKind::NotFound
+    );
+    for selector in ["Maintain", "Checkpoint", "Scopes"] {
+        for object in ["Documents", "Streams", "Blobs"] {
+            assert_eq!(
+                kind(&server, object, selector, json!({})).await,
+                StorageKind::InvalidInput
+            );
+        }
+    }
 }
