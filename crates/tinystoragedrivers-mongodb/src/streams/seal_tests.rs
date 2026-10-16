@@ -64,6 +64,14 @@ fn unfenced_streams(storage: &MongoStorage, label: &str) -> MongoStreams {
     MongoStreams::new(Arc::new(shared), unique_scope(label), None)
 }
 
+/// A basis for a stream that was never truncated.
+fn basis(last_append_ms: Option<i64>) -> SealBasis {
+    SealBasis {
+        last_append_ms,
+        truncations: 0,
+    }
+}
+
 async fn append_three(streams: &MongoStreams, name: &str) {
     for i in 0..3 {
         streams.append(name, json!({"i": i})).await.unwrap();
@@ -185,13 +193,13 @@ async fn live_a_repeated_marker_is_accepted_only_for_the_same_entries() {
 
     // Another sealer of the same entries placed the identical marker.
     streams
-        .seal_mark(&handle, "log", generation, outcome, None)
+        .seal_mark(&handle, "log", generation, outcome, basis(None))
         .await
         .unwrap();
     // A marker at the same end but for another base collides and is refused.
     let other = SealOutcome::new(outcome.base + 1, outcome.len, outcome.blob_bytes);
     let error = streams
-        .seal_mark(&handle, "log", generation, other, None)
+        .seal_mark(&handle, "log", generation, other, basis(None))
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict);
@@ -210,7 +218,7 @@ async fn live_a_marker_for_a_deleted_stream_is_refused_without_transactions() {
     assert!(streams.delete_stream("log").await.unwrap());
 
     let error = streams
-        .seal_mark(&handle, "log", generation, outcome, Some(1))
+        .seal_mark(&handle, "log", generation, outcome, basis(Some(1)))
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict);
@@ -257,7 +265,7 @@ async fn live_a_seal_that_paused_across_a_delete_cannot_replace_the_recreated_st
         // The first seal collects generation G, then stalls before publishing.
         let handle = streams.segments().await.unwrap();
         let generation = streams.generation(&name, None).await.unwrap();
-        let (stale, last_append_ms) = streams
+        let (stale, basis) = streams
             .seal_collect(&handle, &name, generation)
             .await
             .unwrap();
@@ -274,7 +282,7 @@ async fn live_a_seal_that_paused_across_a_delete_cannot_replace_the_recreated_st
             .await
             .unwrap();
         let marked = streams
-            .seal_mark(&handle, &name, generation, outcome, last_append_ms)
+            .seal_mark(&handle, &name, generation, outcome, basis)
             .await
             .unwrap_err();
         assert_eq!(
@@ -319,4 +327,120 @@ async fn live_a_failed_or_deleted_seal_leaves_no_stale_blob_behind() {
         .await
         .unwrap();
     assert!(left.is_empty(), "stale blobs: {left:?}");
+}
+
+#[tokio::test]
+async fn live_a_truncation_between_the_snapshot_and_the_marker_refuses_the_marker() {
+    let Some(storage) = connect("a_truncation_between_snapshot_and_marker").await else {
+        return;
+    };
+    for transactions in [true, false] {
+        let storage = if transactions {
+            storage.clone()
+        } else {
+            storage.clone().without_transactions()
+        };
+        let streams = streams(&storage, "truncseal");
+        let name = format!("truncseal_{transactions}");
+        streams
+            .append_batch(&name, (0..5).map(|i| json!(i)).collect())
+            .await
+            .unwrap();
+
+        // The seal snapshots all five entries, then stalls.
+        let handle = streams.segments().await.unwrap();
+        let generation = streams.generation(&name, None).await.unwrap();
+        let (stale, basis) = streams
+            .seal_collect(&handle, &name, generation)
+            .await
+            .unwrap();
+
+        // Meanwhile an acknowledged truncation drops the first two.
+        assert_eq!(streams.truncate_before(&name, 2).await.unwrap(), 2);
+
+        // The stalled seal resumes: its marker must not publish the old blob.
+        let outcome = streams
+            .seal_publish(&name, generation, &stale)
+            .await
+            .unwrap();
+        let marked = streams
+            .seal_mark(&handle, &name, generation, outcome, basis)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            marked.kind(),
+            ErrorKind::Conflict,
+            "transactions={transactions}"
+        );
+        let info = streams.info(&name).await.unwrap().unwrap();
+        assert_eq!(info.sealed_ms, None, "the stream is not sealed");
+        let read: Vec<_> = streams
+            .read_window(&name, 0, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect();
+        assert_eq!(read, vec![json!(2), json!(3), json!(4)]);
+
+        // A fresh seal snapshots the truncated stream and succeeds.
+        let sealed = streams.seal(&name).await.unwrap();
+        assert_eq!((sealed.base, sealed.len), (2, 5));
+        assert_eq!(streams.read_window(&name, 0, 10).await.unwrap().len(), 3);
+        streams.delete_stream(&name).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn live_a_truncation_that_finishes_after_the_seal_is_refused() {
+    let Some(storage) = connect("a_truncation_that_finishes_after_the_seal").await else {
+        return;
+    };
+    let streams = unfenced_streams(&storage, "truncafter");
+    append_three(&streams, "log").await;
+    let handle = streams.segments().await.unwrap();
+    let generation = streams.generation("log", None).await.unwrap();
+
+    // A truncation read the stream unsealed and is about to finish; the seal
+    // lands first. The truncation must not report success over the old blob.
+    streams.seal("log").await.unwrap();
+    let error = streams
+        .ensure_unsealed_after_truncate(&handle, "log", generation, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn live_a_truncated_stream_still_seals_and_deletes_by_its_sealed_instant() {
+    let Some(storage) = connect("a_truncated_stream_seals_and_deletes").await else {
+        return;
+    };
+    for transactions in [true, false] {
+        let storage = if transactions {
+            storage.clone()
+        } else {
+            storage.clone().without_transactions()
+        };
+        let streams = streams(&storage, "truncdelete");
+        append_three(&streams, "log").await;
+        // The truncation creates the stream's head (generation 0).
+        assert_eq!(streams.truncate_before("log", 1).await.unwrap(), 1);
+        streams.seal("log").await.unwrap();
+        let sealed_ms = streams
+            .info("log")
+            .await
+            .unwrap()
+            .unwrap()
+            .sealed_ms
+            .unwrap();
+        assert!(
+            streams
+                .delete_sealed_stream("log", sealed_ms)
+                .await
+                .unwrap(),
+            "transactions={transactions}"
+        );
+        assert!(streams.info("log").await.unwrap().is_none());
+    }
 }

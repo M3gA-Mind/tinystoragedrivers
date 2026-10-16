@@ -32,6 +32,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     truncated_streams_seal(storage).await;
     delete_removes_the_blob(storage).await;
     sealing_loses_no_concurrent_append(storage).await;
+    sealing_never_resurrects_truncated_entries(storage).await;
     sealed_blobs_are_hidden_from_blob_listings(storage).await;
     info_records_times(storage).await;
 }
@@ -218,6 +219,55 @@ async fn sealing_loses_no_concurrent_append(storage: &ScopedStorage) {
             stored.len(),
             5 + acknowledged.len(),
             "no entry beyond the acknowledged appends"
+        );
+    }
+}
+
+/// A truncation racing a seal is ordered one way or the other: the seal holds
+/// the truncated stream, or the truncation is refused because the stream was
+/// sealed first. An acknowledged truncation is never undone by the seal.
+async fn sealing_never_resurrects_truncated_entries(storage: &ScopedStorage) {
+    const CUTS: [u64; 3] = [1, 3, 5];
+    let streams = storage.streams();
+    for round in 0..8 {
+        let name = unique(&format!("seal_trunc_race{round}"));
+        ok(streams.append_batch(&name, values(6)).await, "fill");
+        let truncator = async {
+            let mut floor = 0;
+            for cut in CUTS {
+                tokio::task::yield_now().await;
+                match streams.truncate_before(&name, cut).await {
+                    Ok(_) => floor = cut,
+                    Err(error) if error.kind() == ErrorKind::Conflict => break,
+                    Err(error) => panic!("truncate during a seal: {error}"),
+                }
+            }
+            floor
+        };
+        let sealer = async {
+            for _ in 0..200 {
+                match streams.seal(&name).await {
+                    Ok(outcome) => return outcome,
+                    Err(error) if error.kind() == ErrorKind::Conflict => {}
+                    Err(error) => panic!("seal during a truncation: {error}"),
+                }
+            }
+            panic!("seal during a truncation kept conflicting")
+        };
+        let (floor, _outcome) = tokio::join!(truncator, sealer);
+        let offsets: Vec<u64> = paged(streams.as_ref(), &name)
+            .await
+            .into_iter()
+            .map(|entry| entry.offset)
+            .collect();
+        assert!(
+            offsets.iter().all(|offset| *offset >= floor),
+            "an acknowledged truncation to {floor} was undone by the seal (round {round}): {offsets:?}"
+        );
+        assert_eq!(
+            offsets.last().copied(),
+            Some(5),
+            "the tail survives (round {round})"
         );
     }
 }
