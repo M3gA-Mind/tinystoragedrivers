@@ -36,93 +36,51 @@ fn json_paths_resolve_in_sqlite() {
 }
 
 #[test]
-fn creates_prefixed_tables_idempotently() {
+fn creates_prefixed_layout_two_tables_idempotently() {
     let conn = Connection::open_in_memory().unwrap();
     let tables = Tables::new("flows__");
     tables.ensure(&conn).unwrap();
     tables.ensure(&conn).unwrap();
-    assert_eq!(tables.docs, "flows___tsd_docs");
+    assert_eq!(tables.docs, "flows__docs");
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
-                 'flows___tsd_docs', 'flows___tsd_collections', 'flows___tsd_fts',
-                 'flows___tsd_streams', 'flows___tsd_stream_meta', 'flows___tsd_blobs',
-                 'flows___tsd_tombstones')",
+                 'flows__docs', 'flows___tsd_collections', 'flows__fts', 'flows__streams',
+                 'flows__stream_heads', 'flows__blobs', 'flows__meta',
+                 'flows___tsd_scope_admissions', 'flows___tsd_purge_receipts')",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 7);
+    assert_eq!(count, 9);
+    assert_eq!(tables.layout(&conn).unwrap().as_deref(), Some("2"));
     assert_eq!(Tables::new("").prefix, "");
 }
 
 #[test]
-fn a_blob_table_from_before_lifetimes_gains_the_column_and_validates() {
+fn a_foreign_table_in_the_way_is_refused() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("old__");
-    tables.ensure(&conn).unwrap();
-    // Recreate the blob table as the previous release declared it.
-    conn.execute_batch(&format!(
-        "DROP TABLE {blobs};
-         CREATE TABLE {blobs} (
-             scope TEXT NOT NULL,
-             key TEXT NOT NULL,
-             content_type TEXT,
-             bytes BLOB NOT NULL,
-             PRIMARY KEY (scope, key)
-         ) WITHOUT ROWID;
-         INSERT INTO {blobs} (scope, key, bytes) VALUES ('s', 'k', x'01');",
-        blobs = ident(&tables.blobs)
-    ))
-    .unwrap();
-    assert!(
-        tables.validate(&conn).is_err(),
-        "a read-only open refuses a table that has not been migrated"
-    );
-    tables.ensure(&conn).unwrap();
-    tables.validate(&conn).unwrap();
-    let expiry: Option<i64> = conn
-        .query_row(
-            &format!("SELECT expires_at_ms FROM {}", ident(&tables.blobs)),
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(expiry, None, "existing blobs keep no lifetime");
+    conn.execute_batch("CREATE TABLE docs (id TEXT)").unwrap();
+    assert!(Tables::new("").ensure(&conn).is_err());
 }
 
 #[test]
-fn a_stream_table_from_before_sealing_gains_the_column_and_validates() {
+fn a_layout_two_file_with_v0_tables_is_corrupt() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("old__");
+    let tables = Tables::new("");
     tables.ensure(&conn).unwrap();
-    // Recreate the stream head table as the previous release declared it.
-    conn.execute_batch(&format!(
-        "DROP TABLE {meta};
-         CREATE TABLE {meta} (
-             scope TEXT NOT NULL,
-             stream TEXT NOT NULL,
-             base INTEGER NOT NULL,
-             len INTEGER NOT NULL,
-             PRIMARY KEY (scope, stream)
-         ) WITHOUT ROWID;
-         INSERT INTO {meta} (scope, stream, base, len) VALUES ('s', 'j', 0, 3);",
-        meta = ident(&tables.stream_meta)
-    ))
-    .unwrap();
-    assert!(
-        tables.validate(&conn).is_err(),
-        "a read-only open refuses a table that has not been migrated"
-    );
-    tables.ensure(&conn).unwrap();
-    tables.ensure(&conn).unwrap();
-    tables.validate(&conn).unwrap();
-    let sealed: i64 = conn
-        .query_row(
-            &format!("SELECT sealed FROM {}", ident(&tables.stream_meta)),
-            [],
-            |row| row.get(0),
-        )
+    conn.execute_batch("CREATE TABLE _tsd_docs (scope TEXT)")
         .unwrap();
-    assert_eq!(sealed, 0, "existing streams are not sealed");
+    let error = tables.ensure(&conn).unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error}");
+}
+
+#[test]
+fn a_file_without_the_layout_marker_does_not_validate() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new("");
+    tables.ensure(&conn).unwrap();
+    conn.execute_batch(&format!("DELETE FROM {}", ident(&tables.meta)))
+        .unwrap();
+    assert!(tables.validate(&conn).is_err());
 }

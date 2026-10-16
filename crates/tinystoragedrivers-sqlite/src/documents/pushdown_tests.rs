@@ -2,12 +2,15 @@
 
 use serde_json::json;
 
+use rusqlite::types::Value as SqlValue;
+use tinystoragedrivers_core::{CursorPosition, Meta, Sort};
+
 use super::*;
 
 #[test]
 fn pushes_string_and_boolean_equality() {
     let pushed = clause(&Filter::eq("state", "queued")).unwrap();
-    assert_eq!(pushed.sql, "json_extract(doc, ?) = ?");
+    assert_eq!(pushed.sql, "json_extract(body, ?) = ?");
     assert_eq!(
         pushed.params,
         vec![
@@ -24,14 +27,14 @@ fn pushes_string_and_boolean_equality() {
 #[test]
 fn pushes_membership_and_conjunctions() {
     let pushed = clause(&Filter::one_of("state", ["a", "b"])).unwrap();
-    assert_eq!(pushed.sql, "json_extract(doc, ?) IN (?, ?)");
+    assert_eq!(pushed.sql, "json_extract(body, ?) IN (?, ?)");
     let both = clause(
         &Filter::eq("a", "x")
             .and(Filter::gt("n", 3))
             .and(Filter::one_of(ID_FIELD, ["i"])),
     )
     .unwrap();
-    assert_eq!(both.sql, "(json_extract(doc, ?) = ?) AND (id IN (?))");
+    assert_eq!(both.sql, "(json_extract(body, ?) = ?) AND (id IN (?))");
     assert_eq!(both.params.len(), 3);
 }
 
@@ -66,10 +69,14 @@ fn seeks_by_nullable_mixed_direction_sort_and_id() {
         values: vec![json!(2), json!("queued")],
     };
     let pushed = after(&position, &[Sort::asc("rank"), Sort::desc("state")]).unwrap();
-    assert!(pushed.sql.contains("json_type(doc, '$.\"rank\"')"));
-    assert!(pushed.sql.contains("json_type(doc, '$.\"state\"')"));
-    assert!(pushed.sql.contains("json_extract(doc, '$.\"rank\"') >= ?"));
-    assert!(pushed.sql.contains("json_extract(doc, '$.\"state\"') <= ?"));
+    assert!(pushed.sql.contains("json_type(body, '$.\"rank\"')"));
+    assert!(pushed.sql.contains("json_type(body, '$.\"state\"')"));
+    assert!(pushed.sql.contains("json_extract(body, '$.\"rank\"') >= ?"));
+    assert!(
+        pushed
+            .sql
+            .contains("json_extract(body, '$.\"state\"') <= ?")
+    );
     assert!(pushed.sql.ends_with("id > ?)"));
     assert_eq!(pushed.params.last(), Some(&SqlValue::Text("last".into())));
 
@@ -81,7 +88,7 @@ fn seeks_by_nullable_mixed_direction_sort_and_id() {
     assert!(
         !nullable
             .sql
-            .contains("json_extract(doc, '$.\"rank\"') >= ?")
+            .contains("json_extract(body, '$.\"rank\"') >= ?")
     );
 }
 
@@ -104,4 +111,33 @@ fn leaves_structural_sort_values_to_reference_ordering() {
         ),
         None
     );
+}
+
+#[test]
+fn reserved_metadata_paths_push_down_to_their_columns() {
+    let range = Filter::gte("_created_ms", 5).and(Filter::lt("_created_ms", 9));
+    let pushed = clause(&range).unwrap();
+    assert_eq!(pushed.sql, "(created_ms >= ?) AND (created_ms < ?)");
+    let pushed = clause(&Filter::eq("_schema", 7)).unwrap();
+    assert_eq!(pushed.sql, "schema = ?");
+    assert_eq!(pushed.params, vec![SqlValue::Integer(7)]);
+    assert_eq!(
+        clause(&Filter::eq("_expires_ms", "text")),
+        None,
+        "not a number"
+    );
+    assert_eq!(
+        clause(&Filter::eq("_updated_ms", 1.5)),
+        None,
+        "left to the Rust check"
+    );
+}
+
+#[test]
+fn a_metadata_sort_seeks_through_its_column() {
+    let sorts = [Sort::asc("_expires_ms")];
+    let position = CursorPosition::for_record("a", &json!({}), &Meta::unknown(), &sorts);
+    let pushed = after(&position, &sorts).unwrap();
+    assert!(pushed.sql.contains("expires_ms IS NULL"), "{}", pushed.sql);
+    assert!(!pushed.sql.contains("json_"), "{}", pushed.sql);
 }

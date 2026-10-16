@@ -94,7 +94,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [x] 5 primitives
 - [x] 6 sealing
 - [x] 7 maintenance
-- [ ] 8 sqlite v2
+- [ ] 8 sqlite v2 (8a layout+metadata+upgrade done; 8b compression+generated columns pending)
 - [ ] 9 mongodb, file, s3
 - [ ] 10 bus contract
 - [ ] 11 docs and v1.0.0

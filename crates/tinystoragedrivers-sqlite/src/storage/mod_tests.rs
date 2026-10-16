@@ -29,7 +29,6 @@ async fn directory_mode_gives_each_database_its_own_file() {
             .without(tinystoragedrivers_core::Capability::Watch)
             .without(tinystoragedrivers_core::Capability::PresignedUrls)
             .without(tinystoragedrivers_core::Capability::StreamingBlobs)
-            .without(tinystoragedrivers_core::Capability::RecordMetadata)
     );
     assert!(format!("{storage:?}").contains("storage.db"));
 }
@@ -51,7 +50,7 @@ async fn file_mode_prefixes_database_tables() {
         .native()
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'flows___tsd_docs'",
+                "SELECT count(*) FROM sqlite_master WHERE name = 'flows__docs'",
                 [],
                 |row| row.get(0),
             )

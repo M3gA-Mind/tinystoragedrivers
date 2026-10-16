@@ -6,7 +6,7 @@ use tinystoragedrivers_core::{Result, Scope, StorageError};
 use crate::error::during;
 use crate::sql::{Tables, ident};
 
-/// The scopes with a document, tombstone, stream or blob whose text starts
+/// The scopes with a document (live or deleted), stream or blob whose text starts
 /// with `prefix`, in byte order.
 ///
 /// The prefix is compared with `substr`, not `LIKE`, so `%` and `_` are
@@ -15,9 +15,8 @@ use crate::sql::{Tables, ident};
 pub(crate) fn list(conn: &Connection, tables: &Tables, prefix: &str) -> Result<Vec<Scope>> {
     let branches = [
         &tables.docs,
-        &tables.tombstones,
         &tables.streams,
-        &tables.stream_meta,
+        &tables.stream_heads,
         &tables.blobs,
     ]
     .map(|table| {

@@ -74,7 +74,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
         // handle's generation check, before its payload SELECT.
         let writer = Connection::open(path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-        writer.execute(&format!("UPDATE {} SET doc=?1 WHERE scope=?2", crate::sql::ident(&ctx.tables.docs)),
+        writer.execute(&format!("UPDATE {} SET body=?1 WHERE scope=?2", crate::sql::ident(&ctx.tables.docs)),
             rusqlite::params![r#"{"source":"new"}"#, ctx.scope]).unwrap();
         writer.execute(&format!("INSERT INTO {} (scope,generation,operation) VALUES (?1,1,'reset_snapshot')", crate::sql::ident(&ctx.tables.admissions)),
             [ctx.scope]).unwrap();
