@@ -253,7 +253,9 @@ impl DbState {
         let now = clock_ms(now_ms);
         let meta = Meta {
             schema: options.schema,
-            created_ms: current.as_ref().map_or(now, |found| found.meta.created_ms),
+            created_ms: options
+                .created_ms
+                .unwrap_or_else(|| current.as_ref().map_or(now, |found| found.meta.created_ms)),
             updated_ms: current
                 .as_ref()
                 .map_or(now, |found| now.max(found.meta.updated_ms)),

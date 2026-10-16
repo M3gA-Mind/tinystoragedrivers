@@ -2,7 +2,7 @@
 //! [`Repo`] with its compare-and-swap [`update`](Repo::update) loop.
 //!
 //! Every owner needs the same four things, and each used to rebuild them. They
-//! all run on a [`DocumentStore`] handle the caller opened for the right
+//! all run on a [`DocumentStore`](crate::DocumentStore) handle the caller opened for the right
 //! scope (a tenant for [`Kv`] and [`Counters`], usually `cluster` for
 //! [`Leases`] that place processes), so scope isolation and write fencing
 //! apply to them exactly as to any other record.

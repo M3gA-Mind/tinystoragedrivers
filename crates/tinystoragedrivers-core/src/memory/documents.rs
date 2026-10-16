@@ -333,6 +333,7 @@ impl DocumentStore for MemoryDocuments {
             options: WriteOptions {
                 schema: first.meta.schema,
                 expires_ms: first.meta.expires_ms,
+                created_ms: None,
             },
         };
         let version = state.put(self.scope.as_str(), collection, &first.id, write, now)?;

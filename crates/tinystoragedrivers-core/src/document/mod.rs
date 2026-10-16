@@ -129,7 +129,7 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         if !options.is_default() {
             return Err(StorageError::unsupported(
                 Capability::RecordMetadata,
-                "this driver cannot keep a document's schema or expiry",
+                "this driver cannot keep a document's schema, expiry or creation time",
             ));
         }
         self.put(collection, id, doc, precondition).await

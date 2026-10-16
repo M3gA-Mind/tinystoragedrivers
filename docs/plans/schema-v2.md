@@ -90,7 +90,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [x] 1 scope grammar
 - [x] 2 key
 - [x] 3 metadata (core + memory driver; other drivers in task 9, bus in task 10)
-- [ ] 4 registry
+- [x] 4 registry (core only; stream and blob steps follow)
 - [x] 5 primitives
 - [x] 6 sealing
 - [x] 7 maintenance

@@ -75,7 +75,7 @@ impl Meta {
 
 /// What a write declares about the document beyond its body.
 ///
-/// A write replaces both values: a plain [`put`](crate::DocumentStore::put)
+/// A write replaces these values: a plain [`put`](crate::DocumentStore::put)
 /// declares [`WriteOptions::default`], so an upsert without options clears an
 /// earlier expiry. The creation and update times are never part of a write;
 /// the driver sets them from its own clock.
@@ -95,16 +95,33 @@ pub struct WriteOptions {
     /// Unix epoch milliseconds from which the document reads as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_ms: Option<i64>,
+    /// Unix epoch milliseconds to record as the document's creation time
+    /// instead of the driver's clock. **Migration only**: a step that rewrites
+    /// a record uses it so history keeps its original times. Honoured only by
+    /// drivers with [`Capability::RecordMetadata`](crate::Capability::RecordMetadata);
+    /// the others refuse a write that sets it. The update time still comes from
+    /// the driver clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ms: Option<i64>,
 }
 
 impl WriteOptions {
-    /// Undeclared schema, no expiry.
+    /// Undeclared schema, no expiry, driver-clock creation time.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             schema: 0,
             expires_ms: None,
+            created_ms: None,
         }
+    }
+
+    /// Record `created_ms` as the creation time (migration only; see the
+    /// field).
+    #[must_use]
+    pub const fn created_ms(mut self, created_ms: i64) -> Self {
+        self.created_ms = Some(created_ms);
+        self
     }
 
     /// Declare the body version.
@@ -124,7 +141,7 @@ impl WriteOptions {
     /// Whether these are the options of a plain write.
     #[must_use]
     pub const fn is_default(&self) -> bool {
-        self.schema == 0 && self.expires_ms.is_none()
+        self.schema == 0 && self.expires_ms.is_none() && self.created_ms.is_none()
     }
 }
 
