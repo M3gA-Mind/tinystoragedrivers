@@ -176,6 +176,8 @@ Composition then runs `ensure_collection` once for each item, from trusted boots
 | `tsd.secrets` | `SecretStore` over documents (exists as `secrets`) | `{ciphertext}` |
 | `tsd.secret_keys` | KMS envelope (exists as `secret_keys`) | `{format, key_id, wrapped}` |
 
+`Registry::prepare` declares `tsd.migrations` and `tsd.leases`, `tsd.kv` (with its `kv_by_key` index) and `tsd.counters` (`primitives::collection_specs()`) along with the owners' collections, so a host that opens the backend with `existing_schema` reaches the primitives without declaring anything itself.
+
 Two shared helpers are not collections:
 - **`Repo<T>`** is a typed collection handle: `get`, `put`, `insert`, `update(id, f)` and `query`. `update` runs one compare-and-swap loop (budget and backoff in `RetryPolicy`, default 32 attempts, 1 to 8 ms jittered). The closure returns `Some(value)` to write or `None` to leave the record alone. A lease keeps its expiry in the body, not in `expires_ms`, because a takeover must read the lapsed record to continue its epoch. Every owner uses it instead of its own loop.
 - **The graph checkpointer** exists once, in tinyagents-graph (`graph.checkpoints`, `graph.threads`, `graph.writes`). Each user passes a namespace field instead of copying the checkpointer.

@@ -8,6 +8,7 @@ use crate::backend::StorageBackend;
 use crate::blob::MAX_BLOB_KEY_LEN;
 use crate::document::{MAX_COLLECTION_LEN, validate_collection};
 use crate::error::{Result, StorageError};
+use crate::primitives;
 use crate::scope::Scope;
 use crate::stream::{SEALED_BLOB_PREFIX, validate_stream};
 
@@ -127,7 +128,8 @@ impl Registry {
     }
 
     /// Declare every collection in `backend`, including the internal
-    /// `tsd.migrations`. Safe to call again: `ensure_collection` merges into
+    /// `tsd.migrations` and the shared primitives' `tsd.leases`, `tsd.kv`
+    /// and `tsd.counters` ([`primitives::collection_specs`]). Safe to call again: `ensure_collection` merges into
     /// what is declared.
     ///
     /// **Trusted bootstrap, host only.** Owners never call this; it is the one
@@ -145,6 +147,9 @@ impl Registry {
             .documents()
             .ensure_collection(&migrations_spec())
             .await?;
+        for spec in primitives::collection_specs() {
+            storage.documents().ensure_collection(&spec).await?;
+        }
         for schema in &self.schemas {
             for item in &schema.items {
                 if let Item::Collection { spec, .. } = item {

@@ -264,6 +264,45 @@ async fn prepare_declares_every_collection_spec() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn prepare_declares_the_shared_primitive_collections() {
+    use crate::primitives::{self, Counters, Kv, Leases};
+    let registry = Registry::compose([Schema::new(owner("cron")).collection(
+        "cron.jobs",
+        1,
+        ScopeClass::Tenant,
+    )])
+    .unwrap();
+    let backend = MemoryStorage::new();
+    registry.prepare(&backend).await.unwrap();
+
+    // A host that opened the backend restricted to what is declared reaches
+    // leases, key-value and counters without declaring anything itself.
+    let restricted = backend.existing_schema().unwrap();
+    let storage = restricted.for_scope(&crate::Scope::local()).unwrap();
+    let docs = storage.documents();
+    let leases = Leases::new(docs);
+    assert!(
+        leases
+            .acquire("cron", "tick", "a", 1_000)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let kv = Kv::ns(docs, "cron", "state").unwrap();
+    kv.put("k", &json!(1)).await.unwrap();
+    assert_eq!(kv.list::<serde_json::Value>("").await.unwrap().len(), 1);
+    assert_eq!(Counters::new(docs).next("cron", "runs").await.unwrap(), 1);
+
+    // Each is declared with its indexes: the persisted declaration satisfies
+    // the primitive's own spec.
+    for spec in primitives::collection_specs() {
+        docs.validate_collection_spec(&spec)
+            .await
+            .unwrap_or_else(|error| panic!("{} was not declared: {error}", spec.name));
+    }
+}
+
 #[test]
 fn check_ready_gates_collections_with_unfinished_steps() {
     let registry = Registry::compose([Schema::new(owner("cron"))
