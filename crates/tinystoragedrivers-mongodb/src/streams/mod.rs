@@ -243,6 +243,7 @@ impl MongoStreams {
     fn blobs(&self) -> MongoBlobs {
         MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false)
             .with_generation(self.generation)
+            .with_sealed_access()
     }
 
     fn heads(&self) -> ScopedCollection {
@@ -519,7 +520,7 @@ impl StreamStore for MongoStreams {
                 let segment = Segment::decode(&doc)?;
                 if segment.sealed_base.is_some() {
                     // The marker is the last segment: the blob holds it all.
-                    return self.sealed_window(stream, from, limit).await;
+                    return self.sealed_window(stream, generation, from, limit).await;
                 }
                 for (offset, value) in segment.entries_from(from) {
                     out.push(StreamEntry {
@@ -604,8 +605,9 @@ impl StreamStore for MongoStreams {
             } else {
                 self.delete_in(&handle, stream, None).await?
             };
-            // Even when the stream is gone, clear a blob a crashed seal left.
-            self.delete_sealed_blob(stream).await?;
+            // Even when the stream is gone, clear the blobs of the generations
+            // it deleted, including one a crashed or stalled seal left.
+            self.purge_stale_sealed_blobs(stream).await?;
             Ok(removed)
         })
     }

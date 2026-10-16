@@ -33,17 +33,15 @@ mod sealing {
     //! a crash there would.
 
     use serde_json::json;
-    use tinystoragedrivers_core::{BlobStore, ErrorKind, SealOutcome, SealedLog, sealed_blob_key};
+    use tinystoragedrivers_core::{ErrorKind, SealOutcome, SealedLog};
 
     use super::*;
-    use crate::blobs::SqliteBlobs;
 
     struct Fixture {
         _dir: tempfile::TempDir,
         db: Arc<Db>,
         tables: Arc<Tables>,
         streams: SqliteStreams,
-        blobs: SqliteBlobs,
     }
 
     fn fixture() -> Fixture {
@@ -58,19 +56,11 @@ mod sealing {
             None,
             Arc::new(|| 0),
         );
-        let blobs = SqliteBlobs::new(
-            Arc::clone(&db),
-            Arc::clone(&tables),
-            Scope::local(),
-            Arc::new(|| 0),
-            None,
-        );
         Fixture {
             _dir: dir,
             db,
             tables,
             streams,
-            blobs,
         }
     }
 
@@ -97,12 +87,26 @@ mod sealing {
             self.count(&self.tables.streams)
         }
 
-        async fn has_blob(&self, name: &str) -> bool {
-            self.blobs
-                .head(&sealed_blob_key(name).unwrap())
-                .await
+        // The sealed blob is reserved, so the tests reach it the way the
+        // sealing code does, not through the blob port.
+        fn blob_bytes(&self, name: &str) -> Option<Vec<u8>> {
+            self.db
+                .run_now(|conn| {
+                    super::seal::blob_bytes(conn, &self.tables, Scope::local().as_str(), name)
+                })
                 .unwrap()
-                .is_some()
+        }
+
+        fn has_blob(&self, name: &str) -> bool {
+            self.blob_bytes(name).is_some()
+        }
+
+        fn delete_blob(&self, name: &str) {
+            self.db
+                .run_now(|conn| {
+                    super::seal::delete_blob(conn, &self.tables, Scope::local().as_str(), name)
+                })
+                .unwrap();
         }
     }
 
@@ -111,7 +115,7 @@ mod sealing {
         let f = fixture();
         let before = f.fill("j", 20).await;
         let written = f.streams.seal_write_blob("j").await.unwrap();
-        assert!(f.has_blob("j").await);
+        assert!(f.has_blob("j"));
 
         assert_eq!(
             f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
@@ -198,10 +202,7 @@ mod sealing {
         assert_eq!(cut.kind(), ErrorKind::Conflict);
 
         let again = f.streams.seal_write_blob("j").await.unwrap();
-        f.blobs
-            .delete(&sealed_blob_key("j").unwrap())
-            .await
-            .unwrap();
+        f.delete_blob("j");
         let lost = f.streams.seal_mark("j", again).await.unwrap_err();
         assert_eq!(lost.kind(), ErrorKind::Conflict, "no blob, no seal");
         assert_eq!(f.streams.append("j", json!(0)).await.unwrap(), 6);
@@ -212,13 +213,10 @@ mod sealing {
         let f = fixture();
         let before = f.fill("a/b", 3).await;
         let outcome = f.streams.seal("a/b").await.unwrap();
-        let blob = f.blobs.get("_tsd/sealed/a%2Fb").await.unwrap().unwrap();
-        assert_eq!(blob.meta.len, outcome.blob_bytes);
-        assert_eq!(
-            SealedLog::decode(&blob.bytes).unwrap().window(0, 10),
-            before
-        );
-        assert_eq!(outcome, SealOutcome::new(0, 3, blob.meta.len));
+        let bytes = f.blob_bytes("a/b").unwrap();
+        assert_eq!(bytes.len() as u64, outcome.blob_bytes);
+        assert_eq!(SealedLog::decode(&bytes).unwrap().window(0, 10), before);
+        assert_eq!(outcome, SealOutcome::new(0, 3, bytes.len() as u64));
     }
 
     #[tokio::test]
@@ -226,10 +224,7 @@ mod sealing {
         let f = fixture();
         f.fill("j", 3).await;
         f.streams.seal("j").await.unwrap();
-        f.blobs
-            .delete(&sealed_blob_key("j").unwrap())
-            .await
-            .unwrap();
+        f.delete_blob("j");
         for error in [
             f.streams.read_window("j", 0, 10).await.unwrap_err(),
             f.streams.seal("j").await.unwrap_err(),
@@ -245,12 +240,12 @@ mod sealing {
         f.fill("j", 3).await;
         f.streams.seal_write_blob("j").await.unwrap();
         assert!(f.streams.delete_stream("j").await.unwrap());
-        assert!(!f.has_blob("j").await);
+        assert!(!f.has_blob("j"));
 
         f.fill("k", 3).await;
         f.streams.seal("k").await.unwrap();
         assert!(f.streams.delete_stream("k").await.unwrap());
-        assert!(!f.has_blob("k").await);
+        assert!(!f.has_blob("k"));
         assert_eq!(f.count(&f.tables.stream_heads), 0);
     }
 
@@ -271,6 +266,6 @@ mod sealing {
             f.streams.seal("j").await.unwrap_err().kind(),
             ErrorKind::Backend
         );
-        assert!(!f.has_blob("j").await, "nothing was written");
+        assert!(!f.has_blob("j"), "nothing was written");
     }
 }

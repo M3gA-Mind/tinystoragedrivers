@@ -61,7 +61,7 @@ fn check_target(context: &Context<'_>, target: &str) -> Result<()> {
             context.step.id
         )));
     }
-    crate::blob::validate_blob_key(target)
+    crate::blob::validate_user_blob_key(target)
 }
 
 #[cfg(test)]

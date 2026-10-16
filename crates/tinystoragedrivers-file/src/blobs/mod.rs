@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
     Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
-    validate_blob_key,
+    is_reserved_blob_key, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::documents::guard;
@@ -137,7 +137,7 @@ impl FileBlobs {
         T: Send + 'static,
         F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,
     {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let (scope, key) = (self.scope.clone(), key.to_owned());
         self.db
             .run(move |db| {
@@ -379,6 +379,7 @@ impl BlobStore for FileBlobs {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_user_blob_prefix(prefix)?;
         let (scope, prefix) = (self.scope.clone(), prefix.to_owned());
         self.db
             .run(move |db| {
@@ -397,7 +398,7 @@ impl BlobStore for FileBlobs {
                         }
                         continue;
                     }
-                    if !sidecar.key.starts_with(&prefix) {
+                    if !sidecar.key.starts_with(&prefix) || is_reserved_blob_key(&sidecar.key) {
                         continue;
                     }
                     let data = dir.join(file_stem(&sidecar.key));

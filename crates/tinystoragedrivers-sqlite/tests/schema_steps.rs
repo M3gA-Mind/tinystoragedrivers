@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tinystoragedrivers_core::schema::{MigrateOptions, Owner, Registry, Schema, ScopeClass, Step};
 use tinystoragedrivers_core::{
     Result, Scope, ScopedStorage, SealOutcome, StorageBackend, StorageError, StreamEntry,
-    StreamInfo, StreamStore, sealed_blob_key,
+    StreamInfo, StreamStore,
 };
 use tinystoragedrivers_sqlite::SqliteStorage;
 
@@ -180,11 +180,11 @@ async fn read_all(storage: &ScopedStorage, stream: &str) -> Vec<Value> {
 
 async fn is_sealed(storage: &ScopedStorage, stream: &str) -> bool {
     storage
-        .blobs()
-        .head(&sealed_blob_key(stream).unwrap())
+        .streams()
+        .info(stream)
         .await
         .unwrap()
-        .is_some()
+        .is_some_and(|info| info.sealed_ms.is_some())
 }
 
 #[tokio::test]

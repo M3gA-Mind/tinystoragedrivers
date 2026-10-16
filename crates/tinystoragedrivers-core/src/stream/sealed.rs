@@ -28,8 +28,16 @@ use crate::error::{Result, StorageError};
 use crate::key::Key;
 
 /// The blob-key prefix reserved for sealed streams. Nothing else may write
-/// under it.
+/// under it: the blob ports refuse it
+/// ([`validate_user_blob_key`](crate::validate_user_blob_key)) and hide it from
+/// listings, and only a driver's own sealing code reaches it.
 pub const SEALED_BLOB_PREFIX: &str = "_tsd/sealed/";
+
+/// Whether `key` is under [`SEALED_BLOB_PREFIX`].
+#[must_use]
+pub fn is_reserved_blob_key(key: &str) -> bool {
+    key.starts_with(SEALED_BLOB_PREFIX)
+}
 
 /// The blob format version [`SealedLog`] writes and accepts.
 const VERSION: u32 = 1;
@@ -93,9 +101,19 @@ struct Wire {
 
 impl SealedLog {
     /// Entries `values`, the first at offset `base`.
-    #[must_use]
-    pub fn new(base: u64, values: Vec<Value>) -> Self {
-        Self { base, values }
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) when
+    /// `base` plus the number of entries does not fit a `u64`: such a log has
+    /// no representable length.
+    pub fn new(base: u64, values: Vec<Value>) -> Result<Self> {
+        if base.checked_add(values.len() as u64).is_none() {
+            return Err(StorageError::invalid_input(
+                "a sealed log's base plus its entries overflows u64",
+            ));
+        }
+        Ok(Self { base, values })
     }
 
     /// The first retained offset.
@@ -152,7 +170,9 @@ impl SealedLog {
                 wire.version
             )));
         }
-        Ok(Self::new(wire.base, wire.values))
+        Self::new(wire.base, wire.values).map_err(|error| {
+            StorageError::backend("sealed stream blob is malformed").with_source(error)
+        })
     }
 
     /// Up to `limit` entries starting at offset `from`, in offset order;

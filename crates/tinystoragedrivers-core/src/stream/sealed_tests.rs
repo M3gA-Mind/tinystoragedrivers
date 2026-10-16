@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::ErrorKind;
-use crate::blob::validate_blob_key;
+use crate::blob::{validate_blob_key, validate_user_blob_key};
 
 #[test]
 fn blob_key_is_reserved_prefix_plus_escaped_name() {
@@ -75,7 +75,7 @@ fn log_round_trips_through_its_encoding() {
     let values: Vec<_> = (0..50)
         .map(|i| json!({"i": i, "text": "x".repeat(40)}))
         .collect();
-    let log = SealedLog::new(7, values.clone());
+    let log = SealedLog::new(7, values.clone()).unwrap();
     let bytes = log.encode().unwrap();
     let decoded = SealedLog::decode(&bytes).unwrap();
     assert_eq!(decoded, log);
@@ -86,7 +86,7 @@ fn log_round_trips_through_its_encoding() {
 
 #[test]
 fn encoding_is_deterministic_and_is_zstd() {
-    let log = SealedLog::new(0, vec![json!(1), json!("two")]);
+    let log = SealedLog::new(0, vec![json!(1), json!("two")]).unwrap();
     assert_eq!(log.encode().unwrap(), log.encode().unwrap());
     // The zstd frame magic number.
     assert_eq!(log.encode().unwrap()[..4], [0x28, 0xB5, 0x2F, 0xFD]);
@@ -94,7 +94,7 @@ fn encoding_is_deterministic_and_is_zstd() {
 
 #[test]
 fn an_empty_log_keeps_its_base() {
-    let log = SealedLog::new(9, Vec::new());
+    let log = SealedLog::new(9, Vec::new()).unwrap();
     let decoded = SealedLog::decode(&log.encode().unwrap()).unwrap();
     assert_eq!((decoded.base(), decoded.len()), (9, 9));
     assert_eq!(decoded.window(0, 10), Vec::<StreamEntry>::new());
@@ -129,7 +129,7 @@ fn decoding_refuses_an_unknown_format_version() {
 
 #[test]
 fn window_pages_by_offset_and_skips_below_base() {
-    let log = SealedLog::new(10, (0..5).map(|i| json!(i)).collect());
+    let log = SealedLog::new(10, (0..5).map(|i| json!(i)).collect()).unwrap();
     let offsets =
         |from, limit| -> Vec<u64> { log.window(from, limit).iter().map(|e| e.offset).collect() };
     assert_eq!(offsets(0, 100), [10, 11, 12, 13, 14]);
@@ -143,9 +143,9 @@ fn window_pages_by_offset_and_skips_below_base() {
 
 #[test]
 fn emptiness_follows_the_retained_entries_not_the_base() {
-    assert!(SealedLog::new(0, Vec::new()).is_empty());
-    assert!(SealedLog::new(5, Vec::new()).is_empty());
-    assert!(!SealedLog::new(0, vec![json!(null)]).is_empty());
+    assert!(SealedLog::new(0, Vec::new()).unwrap().is_empty());
+    assert!(SealedLog::new(5, Vec::new()).unwrap().is_empty());
+    assert!(!SealedLog::new(0, vec![json!(null)]).unwrap().is_empty());
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn the_version_refusal_names_the_version() {
 
 #[test]
 fn a_window_that_starts_past_the_end_is_empty_even_with_a_huge_limit() {
-    let log = SealedLog::new(0, vec![json!(1), json!(2)]);
+    let log = SealedLog::new(0, vec![json!(1), json!(2)]).unwrap();
     assert_eq!(log.window(2, usize::MAX), Vec::<StreamEntry>::new());
     assert_eq!(log.window(1, usize::MAX).len(), 1);
 }
@@ -185,4 +185,56 @@ fn a_window_that_starts_past_the_end_is_empty_even_with_a_huge_limit() {
 fn a_dotted_stream_name_gets_a_distinct_valid_key() {
     assert_eq!(sealed_blob_key(".").unwrap(), "_tsd/sealed/%2E");
     assert_eq!(sealed_blob_key("..").unwrap(), "_tsd/sealed/%2E.");
+}
+
+#[test]
+fn a_log_whose_length_overflows_u64_cannot_be_built() {
+    let error = SealedLog::new(u64::MAX, vec![json!(1)]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    // The largest representable log is accepted: its length is `u64::MAX`.
+    let edge = SealedLog::new(u64::MAX - 1, vec![json!(1)]).unwrap();
+    assert_eq!(edge.len(), u64::MAX);
+    assert_eq!(edge.window(0, 5).len(), 1);
+}
+
+#[test]
+fn decoding_refuses_a_blob_whose_length_overflows() {
+    let bytes =
+        zstd::encode_all(
+            &serde_json::to_vec(&json!({"version": 1, "base": u64::MAX, "values": [1, 2]}))
+                .unwrap()[..],
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        SealedLog::decode(&bytes).unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[test]
+fn the_user_blob_key_check_refuses_the_sealed_prefix() {
+    for key in [
+        "_tsd/sealed/x",
+        "_tsd/sealed/a/b",
+        &sealed_blob_key("run/1").unwrap(),
+    ] {
+        let error = validate_user_blob_key(key).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{key}");
+        validate_blob_key(key).unwrap();
+    }
+    for key in [
+        "_tsd/sealed",
+        "_tsd/other",
+        "tsd/sealed/x",
+        "a/_tsd/sealed/x",
+    ] {
+        validate_user_blob_key(key).unwrap();
+    }
+    assert_eq!(
+        validate_user_blob_key("").unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(is_reserved_blob_key("_tsd/sealed/x"));
+    assert!(!is_reserved_blob_key("_tsd/sealed"));
 }

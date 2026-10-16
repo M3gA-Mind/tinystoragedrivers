@@ -66,7 +66,7 @@ fn write_blob(db: &Db, scope: &Scope, paths: &Paths, name: &str) -> Result<SealO
     let log = SealedLog::new(
         meta.base,
         lines.into_iter().map(|entry| entry.value).collect(),
-    );
+    )?;
     let bytes = log.encode()?;
     FileBlobs::put_locked(db, scope, &sealed_blob_key(name)?, &bytes, CONTENT_TYPE)?;
     Ok(SealOutcome::new(log.base(), log.len(), bytes.len() as u64))

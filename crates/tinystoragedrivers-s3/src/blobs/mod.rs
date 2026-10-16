@@ -15,7 +15,8 @@ use object_store::{
 };
 use tinystoragedrivers_core::{
     Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
-    ErrorKind, Result, Scope, StorageError, async_trait, validate_blob_key,
+    ErrorKind, Result, Scope, StorageError, async_trait, validate_blob_key, validate_user_blob_key,
+    validate_user_blob_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -330,7 +331,7 @@ impl S3Blobs {
     }
 
     fn path(&self, key: &str) -> Result<Path> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         if key.len() > self.max_key_len() {
             return Err(StorageError::invalid_input(
                 "blob key exceeds the scoped s3 key limit",
@@ -708,6 +709,7 @@ impl BlobStore for S3Blobs {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_user_blob_prefix(prefix)?;
         // A partial key prefix need not itself be a valid full key.
         // ObjectStore list prefixes match complete path segments. Push the
         // requested directory portion down; filter its partial last segment below.
@@ -722,7 +724,7 @@ impl BlobStore for S3Blobs {
         while let Some(object) = objects.try_next().await.map_err(map_error)? {
             if let Some(key) = object.location.as_ref().strip_prefix(&self.prefix)
                 && key.starts_with(prefix)
-                && validate_blob_key(key).is_ok()
+                && validate_user_blob_key(key).is_ok()
                 && key.len() <= self.max_key_len()
             {
                 // S3 ListObjects omits content-type, so fetch HEAD for the

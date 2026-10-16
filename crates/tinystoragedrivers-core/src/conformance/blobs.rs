@@ -70,6 +70,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     assert!(!ok(blobs.delete(&key).await, "delete missing"));
 
     key_limits(storage).await;
+    sealed_prefix_is_reserved(storage).await;
     tree(storage).await;
     expiry(storage).await;
 
@@ -104,6 +105,55 @@ pub(super) fn boundary_key(limit: usize, utf8: bool) -> String {
         }
     }
     key
+}
+
+/// The prefix sealed streams keep their entries under belongs to the drivers:
+/// no caller operation reads, writes, lists or deletes beneath it.
+async fn sealed_prefix_is_reserved(storage: &ScopedStorage) {
+    let blobs = storage.blobs();
+    for key in ["_tsd/sealed/x", "_tsd/sealed/a/b", "_tsd/sealed/run%2F1"] {
+        fails(
+            blobs.put(key, vec![1], None).await,
+            ErrorKind::InvalidInput,
+            "put under the sealed prefix",
+        );
+        fails(
+            blobs.get(key).await,
+            ErrorKind::InvalidInput,
+            "get under the sealed prefix",
+        );
+        fails(
+            blobs.get_range(key, 0..1).await,
+            ErrorKind::InvalidInput,
+            "get_range under the sealed prefix",
+        );
+        fails(
+            blobs.head(key).await,
+            ErrorKind::InvalidInput,
+            "head under the sealed prefix",
+        );
+        fails(
+            blobs.delete(key).await,
+            ErrorKind::InvalidInput,
+            "delete under the sealed prefix",
+        );
+    }
+    fails(
+        blobs.list("_tsd/sealed/").await,
+        ErrorKind::InvalidInput,
+        "list under the sealed prefix",
+    );
+    fails(
+        blobs
+            .put_tree("_tsd/sealed/tree", vec![TreeFile::new("f", b"x".to_vec())])
+            .await,
+        ErrorKind::InvalidInput,
+        "put_tree under the sealed prefix",
+    );
+    // Neighbouring names are ordinary keys.
+    let sibling = format!("_tsd/sealed-{}", unique("sibling"));
+    ok(blobs.put(&sibling, vec![1], None).await, "put a sibling");
+    assert!(ok(blobs.delete(&sibling).await, "delete the sibling"));
 }
 
 async fn key_limits(storage: &ScopedStorage) {

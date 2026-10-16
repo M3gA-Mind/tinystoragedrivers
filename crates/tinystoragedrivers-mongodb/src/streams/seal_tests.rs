@@ -1,7 +1,9 @@
 //! The seal steps against a live server: damaged blobs and segments, the
 //! sealed-concurrently and deleted-meanwhile refusals, the unfenced marker
-//! path of a deployment without physical transactions, and existing-schema
-//! handles. Each skips without `TSD_MONGO_URL`.
+//! path of a deployment without physical transactions, existing-schema
+//! handles, and sealing against a stream that is deleted and recreated
+//! mid-seal (the sealed blob belongs to one generation). Each skips without
+//! `TSD_MONGO_URL`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -76,9 +78,10 @@ async fn live_a_sealed_stream_whose_blob_vanished_is_a_backend_error() {
     let streams = streams(&storage, "noblob");
     append_three(&streams, "log").await;
     streams.seal("log").await.unwrap();
+    let generation = streams.generation("log", None).await.unwrap();
     streams
         .blobs()
-        .delete(&sealed_blob_key("log").unwrap())
+        .delete(&MongoStreams::generation_blob_key("log", generation).unwrap())
         .await
         .unwrap();
 
@@ -230,4 +233,90 @@ async fn live_existing_schema_handles_neither_seal_nor_need_a_blob_to_delete() {
         ErrorKind::Unsupported(Capability::ExistingSchema)
     );
     assert!(!actor.streams().delete_stream("log").await.unwrap());
+}
+
+#[tokio::test]
+async fn live_a_seal_that_paused_across_a_delete_cannot_replace_the_recreated_streams_blob() {
+    let Some(storage) = connect("a_seal_that_paused_across_a_delete").await else {
+        return;
+    };
+    for transactions in [true, false] {
+        let storage = if transactions {
+            storage.clone()
+        } else {
+            storage.clone().without_transactions()
+        };
+        let streams = streams(&storage, "paused");
+        let name = format!("paused_{transactions}");
+        streams.delete_stream(&name).await.unwrap();
+        streams
+            .append_batch(&name, vec![json!("old-1"), json!("old-2")])
+            .await
+            .unwrap();
+
+        // The first seal collects generation G, then stalls before publishing.
+        let handle = streams.segments().await.unwrap();
+        let generation = streams.generation(&name, None).await.unwrap();
+        let (stale, last_append_ms) = streams
+            .seal_collect(&handle, &name, generation)
+            .await
+            .unwrap();
+
+        // Meanwhile the stream is deleted, recreated and sealed as G+1.
+        assert!(streams.delete_stream(&name).await.unwrap());
+        let fresh = vec![json!("new-1"), json!("new-2"), json!("new-3")];
+        streams.append_batch(&name, fresh.clone()).await.unwrap();
+        streams.seal(&name).await.unwrap();
+
+        // The stalled seal resumes: its publish and mark must not touch G+1.
+        let outcome = streams
+            .seal_publish(&name, generation, &stale)
+            .await
+            .unwrap();
+        let marked = streams
+            .seal_mark(&handle, &name, generation, outcome, last_append_ms)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            marked.kind(),
+            ErrorKind::Conflict,
+            "transactions={transactions}"
+        );
+        let read: Vec<_> = streams
+            .read_window(&name, 0, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect();
+        assert_eq!(read, fresh, "G+1 still reads its own entries");
+
+        streams.delete_stream(&name).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn live_a_failed_or_deleted_seal_leaves_no_stale_blob_behind() {
+    let Some(storage) = connect("a_failed_or_deleted_seal").await else {
+        return;
+    };
+    let streams = streams(&storage, "stale");
+    let name = "orphan";
+    streams.delete_stream(name).await.unwrap();
+    streams.append(name, json!(1)).await.unwrap();
+    let handle = streams.segments().await.unwrap();
+    let generation = streams.generation(name, None).await.unwrap();
+    let (log, _) = streams
+        .seal_collect(&handle, name, generation)
+        .await
+        .unwrap();
+    streams.delete_stream(name).await.unwrap();
+    streams.seal_publish(name, generation, &log).await.unwrap();
+    streams.purge_stale_sealed_blobs(name).await.unwrap();
+    let left = streams
+        .blobs()
+        .list(&sealed_blob_key(name).unwrap())
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "stale blobs: {left:?}");
 }

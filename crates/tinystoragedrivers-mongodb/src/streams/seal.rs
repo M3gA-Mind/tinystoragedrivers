@@ -1,7 +1,8 @@
 //! Sealing a MongoDB stream: the three steps and the marker that records them.
 //!
 //! A sealed stream keeps its entries as one compressed blob (GridFS, under
-//! [`sealed_blob_key`]). The steps run in the order that keeps a crash between
+//! [`sealed_blob_key`] plus `/g<generation>`, so a blob belongs to one
+//! incarnation of the stream). The steps run in the order that keeps a crash between
 //! any two recoverable:
 //!
 //! 1. **Write the blob.** The stream's own segments are still the stream, so
@@ -21,8 +22,8 @@
 //! interrupted after step 2 is finished by sealing again.
 
 use tinystoragedrivers_core::{
-    Capability, Result, SealOutcome, SealedLog, StorageError, StreamEntry, sealed_blob_key,
-    validate_stream,
+    Capability, ErrorKind, Result, SealOutcome, SealedLog, StorageError, StreamEntry,
+    sealed_blob_key, validate_stream,
 };
 
 use super::{MongoStreams, Segment, stored_offset};
@@ -35,6 +36,10 @@ use futures_util::TryStreamExt;
 use mongodb::bson::doc;
 use mongodb::options::FindOptions;
 
+/// How many snapshots a seal takes while appends keep landing between its
+/// snapshot and its marker, before it reports the conflict.
+const SEAL_ATTEMPTS: usize = 8;
+
 /// The sealed blob's `content_type`.
 const CONTENT_TYPE: &str = "application/zstd";
 
@@ -44,11 +49,11 @@ fn missing_blob() -> StorageError {
 
 impl MongoStreams {
     /// The entries of sealed stream `stream`, decoded from its blob.
-    pub(super) async fn sealed_log(&self, stream: &str) -> Result<SealedLog> {
+    pub(super) async fn sealed_log(&self, stream: &str, generation: i64) -> Result<SealedLog> {
         use tinystoragedrivers_core::BlobStore;
         let blob = self
             .blobs()
-            .get(&sealed_blob_key(stream)?)
+            .get(&Self::generation_blob_key(stream, generation)?)
             .await?
             .ok_or_else(missing_blob)?;
         SealedLog::decode(&blob.bytes)
@@ -58,22 +63,50 @@ impl MongoStreams {
     pub(super) async fn sealed_window(
         &self,
         stream: &str,
+        generation: i64,
         from: u64,
         limit: usize,
     ) -> Result<Vec<StreamEntry>> {
-        Ok(self.sealed_log(stream).await?.window(from, limit))
+        Ok(self
+            .sealed_log(stream, generation)
+            .await?
+            .window(from, limit))
     }
 
-    /// Remove the sealed blob of `stream`, if there is one. Called after a
-    /// delete, so a name that is reused starts with no stale blob.
-    pub(super) async fn delete_sealed_blob(&self, stream: &str) -> Result<()> {
+    /// The blob holding sealed `stream` of `generation`.
+    ///
+    /// The key carries the generation so a seal that stalled across a delete
+    /// and recreate writes (and later removes) only its own incarnation's
+    /// blob, never the one the recreated stream is sealed with:
+    /// `<sealed_blob_key>/g<generation>`. A stream name's segment never holds
+    /// a raw `/`, so no other stream's key can collide with it.
+    fn generation_blob_key(stream: &str, generation: i64) -> Result<String> {
+        Ok(format!("{}/g{generation}", sealed_blob_key(stream)?))
+    }
+
+    /// Remove the blobs of `stream` from generations before the current one:
+    /// the blobs of deleted incarnations, and any a stalled seal published
+    /// after the delete.
+    pub(super) async fn purge_stale_sealed_blobs(&self, stream: &str) -> Result<()> {
         use tinystoragedrivers_core::BlobStore;
         if self.shared.existing {
             // A stream here cannot be sealed, and a delete must not create
             // the GridFS collections.
             return Ok(());
         }
-        self.blobs().delete(&sealed_blob_key(stream)?).await?;
+        let current = self.generation(stream, None).await?;
+        let prefix = format!("{}/g", sealed_blob_key(stream)?);
+        let blobs = self.blobs();
+        for meta in blobs.list(&prefix).await? {
+            let stale = meta
+                .key
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.parse::<i64>().ok())
+                .is_some_and(|generation| generation < current);
+            if stale {
+                blobs.delete(&meta.key).await?;
+            }
+        }
         Ok(())
     }
 
@@ -95,27 +128,64 @@ impl MongoStreams {
             })?;
         }
         let handle = self.segments().await?;
+        // An append that lands between the snapshot and the marker makes the
+        // marker insert (or the check) report a conflict: the snapshot is stale,
+        // not the seal wrong, so take a fresh one. The append is never lost
+        // (the marker is refused) and never silently outside the blob.
+        for attempt in 1..=SEAL_ATTEMPTS {
+            match self.seal_attempt(&handle, stream).await {
+                Err(error) if error.kind() == ErrorKind::Conflict && attempt < SEAL_ATTEMPTS => {}
+                done => return done,
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// One snapshot, publish and mark of `stream`.
+    async fn seal_attempt(&self, handle: &ScopedCollection, stream: &str) -> Result<SealOutcome> {
         let generation = self.generation(stream, None).await?;
         let last = self
-            .edge(&handle, stream, generation, -1, None)
+            .edge(handle, stream, generation, -1, None)
             .await?
             .ok_or_else(|| StorageError::not_found("stream does not exist"))?;
         if let Some(base) = last.sealed_base {
-            self.seal_drop_segments(&handle, stream, generation).await?;
-            return self.sealed_outcome(stream, base, last.end).await;
+            self.seal_drop_segments(handle, stream, generation).await?;
+            return self
+                .sealed_outcome(stream, generation, base, last.end)
+                .await;
         }
-        let (log, last_append_ms) = self.seal_collect(&handle, stream, generation).await?;
+        let (log, last_append_ms) = self.seal_collect(handle, stream, generation).await?;
+        let outcome = self.seal_publish(stream, generation, &log).await?;
+        let marked = self
+            .seal_mark(handle, stream, generation, outcome, last_append_ms)
+            .await;
+        if let Err(error) = marked {
+            // A stream deleted meanwhile leaves this seal's blob under a
+            // retired generation: remove it.
+            self.purge_stale_sealed_blobs(stream).await?;
+            return Err(error);
+        }
+        self.seal_drop_segments(handle, stream, generation).await?;
+        Ok(outcome)
+    }
+
+    /// Step 1's output: write `log` as the blob of `stream` in `generation`.
+    async fn seal_publish(
+        &self,
+        stream: &str,
+        generation: i64,
+        log: &SealedLog,
+    ) -> Result<SealOutcome> {
+        use tinystoragedrivers_core::BlobStore;
         let bytes = log.encode()?;
         let outcome = SealOutcome::new(log.base(), log.len(), bytes.len() as u64);
-        {
-            use tinystoragedrivers_core::BlobStore;
-            self.blobs()
-                .put(&sealed_blob_key(stream)?, bytes, Some(CONTENT_TYPE))
-                .await?;
-        }
-        self.seal_mark(&handle, stream, generation, outcome, last_append_ms)
+        self.blobs()
+            .put(
+                &Self::generation_blob_key(stream, generation)?,
+                bytes,
+                Some(CONTENT_TYPE),
+            )
             .await?;
-        self.seal_drop_segments(&handle, stream, generation).await?;
         Ok(outcome)
     }
 
@@ -163,7 +233,7 @@ impl MongoStreams {
             ));
         }
         Ok((
-            SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect()),
+            SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect())?,
             last_append_ms,
         ))
     }
@@ -256,11 +326,17 @@ impl MongoStreams {
     }
 
     /// The outcome of an already sealed stream, sized from its blob.
-    async fn sealed_outcome(&self, stream: &str, base: u64, len: u64) -> Result<SealOutcome> {
+    async fn sealed_outcome(
+        &self,
+        stream: &str,
+        generation: i64,
+        base: u64,
+        len: u64,
+    ) -> Result<SealOutcome> {
         use tinystoragedrivers_core::BlobStore;
         let meta = self
             .blobs()
-            .head(&sealed_blob_key(stream)?)
+            .head(&Self::generation_blob_key(stream, generation)?)
             .await?
             .ok_or_else(missing_blob)?;
         Ok(SealOutcome::new(base, len, meta.len))
