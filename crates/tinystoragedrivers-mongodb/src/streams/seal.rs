@@ -7,7 +7,8 @@
 //!
 //! 1. **Write the blob.** The stream's own segments are still the stream, so
 //!    readers see nothing different.
-//! 2. **Insert the seal marker**: an empty segment `{o: len, e: len, seal:
+//! 2. **Insert the seal marker**, provided no truncation completed since the
+//!    snapshot (below), as an empty segment `{o: len, e: len, seal:
 //!    true, sb: base}` at the stream's end. The unique `(_scope, s, g, o)`
 //!    index that serializes appenders serializes the marker too, so an
 //!    append racing the seal either lands first (the marker insert is refused
@@ -16,6 +17,17 @@
 //!    every operation that already finds the stream's end also finds that it
 //!    is sealed; there is no separate flag to keep in step. Reads of a sealed
 //!    stream decode the blob.
+//!
+//!    **Truncation.** A truncation edits or deletes earlier segments, so it
+//!    never collides with the marker's key. It counts itself on the stream head
+//!    (`truncate_epoch`) instead, and the snapshot records that count. With
+//!    transactions the marker's transaction holds the head at the recorded
+//!    count (a write that conflicts with a concurrent truncation's), so a
+//!    truncation completed after the snapshot refuses the marker. Without
+//!    them the marker is checked against the count right after the insert and
+//!    removed, with a `Conflict`, when it moved; a truncation that finishes
+//!    after the marker finds the stream sealed and is refused too. Either way
+//!    the blob never outlives an acknowledged truncation.
 //! 3. **Delete the entry segments** the blob replaces, keeping the marker.
 //!
 //! Sealing a stream that is already sealed only repeats step 3, so a seal
@@ -43,6 +55,15 @@ const SEAL_ATTEMPTS: usize = 8;
 
 /// The sealed blob's `content_type`.
 const CONTENT_TYPE: &str = "application/zstd";
+
+/// What a seal's snapshot was taken from, carried to its marker.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SealBasis {
+    /// The `at_ms` of the last entry segment, kept on the marker (`la`).
+    pub(super) last_append_ms: Option<i64>,
+    /// The head's `truncate_epoch` before the snapshot was read.
+    pub(super) truncations: i64,
+}
 
 fn missing_blob() -> StorageError {
     StorageError::backend("sealed stream has no blob")
@@ -155,10 +176,10 @@ impl MongoStreams {
                 .sealed_outcome(stream, generation, base, last.end)
                 .await;
         }
-        let (log, last_append_ms) = self.seal_collect(handle, stream, generation).await?;
+        let (log, basis) = self.seal_collect(handle, stream, generation).await?;
         let outcome = self.seal_publish(stream, generation, &log).await?;
         let marked = self
-            .seal_mark(handle, stream, generation, outcome, last_append_ms)
+            .seal_mark(handle, stream, generation, outcome, basis)
             .await;
         if let Err(error) = marked {
             // A stream deleted meanwhile leaves this seal's blob under a
@@ -196,7 +217,10 @@ impl MongoStreams {
         handle: &ScopedCollection,
         stream: &str,
         generation: i64,
-    ) -> Result<(SealedLog, Option<i64>)> {
+    ) -> Result<(SealedLog, SealBasis)> {
+        // Before the first read: a truncation that completes after this
+        // point moves the count past the one the marker is conditioned on.
+        let truncations = self.truncate_epoch(stream, None).await?;
         let mut cursor = handle
             .cursor(
                 doc! {"s": stream, "g": generation},
@@ -235,19 +259,23 @@ impl MongoStreams {
         }
         Ok((
             SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect())?,
-            last_append_ms,
+            SealBasis {
+                last_append_ms,
+                truncations,
+            },
         ))
     }
 
     /// Step 2: insert the marker at the stream's end, provided the stream is
-    /// still the one the blob was written from.
+    /// still the one the blob was written from: no append took the end, and no
+    /// truncation completed since the snapshot (`basis`).
     async fn seal_mark(
         &self,
         handle: &ScopedCollection,
         stream: &str,
         generation: i64,
         written: SealOutcome,
-        last_append_ms: Option<i64>,
+        basis: SealBasis,
     ) -> Result<()> {
         let mut marker = doc! {
             "s": stream,
@@ -261,7 +289,7 @@ impl MongoStreams {
             "sb": stored_offset(written.base)?,
             "ms": self.now_ms(),
         };
-        if let Some(last) = last_append_ms {
+        if let Some(last) = basis.last_append_ms {
             marker.insert("la", last);
         }
         if self.shared.physical_transactions {
@@ -270,6 +298,7 @@ impl MongoStreams {
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
                 self.hold_admission(&mut *session).await?;
+                self.hold_truncations(stream, basis.truncations, &mut *session).await?;
                 match handle.insert_one(marker.clone(), Some(session)).await {
                     Ok(()) => Ok(()),
                     Err(error) if errors::duplicate_index(&error).as_deref() == Some(STREAM_SEGMENT_INDEX) => {
@@ -280,8 +309,8 @@ impl MongoStreams {
             })?;
             return self.seal_generation_unchanged(stream, generation).await;
         }
-        match handle.insert_one(marker, None).await {
-            Ok(()) => {}
+        let inserted = match handle.insert_one(marker, None).await {
+            Ok(()) => true,
             Err(error)
                 if errors::duplicate_index(&error).as_deref() == Some(STREAM_SEGMENT_INDEX) =>
             {
@@ -294,10 +323,62 @@ impl MongoStreams {
                 if !same {
                     return Err(StorageError::conflict("stream changed while sealing"));
                 }
+                false
             }
             Err(error) => return Err(errors::map(error, "seal a stream")),
+        };
+        // The insert cannot be conditioned on the head here, so check it
+        // after: a truncation that completed since the snapshot leaves the
+        // marker publishing entries it cut, and the marker is taken back
+        // before the entry segments are dropped (a sealer that did not insert
+        // refuses too, so none of them drops what the owner may take back).
+        if self.truncate_epoch(stream, None).await? != basis.truncations {
+            if inserted {
+                handle
+                    .delete_many(
+                        doc! {"s": stream, "g": generation, "o": stored_offset(written.len)?, "seal": true},
+                        None,
+                    )
+                    .await
+                    .map_err(errors::failed("seal a stream"))?;
+            }
+            return Err(StorageError::conflict("stream was truncated while sealing"));
         }
         self.seal_generation_unchanged(stream, generation).await
+    }
+
+    /// Hold the head at the snapshot's truncation count for the rest of the
+    /// transaction: the write conflicts with a concurrent truncation's, and
+    /// the filter refuses one that already completed.
+    async fn hold_truncations(
+        &self,
+        stream: &str,
+        expected: i64,
+        session: &mut ClientSession,
+    ) -> Result<()> {
+        let unchanged = if expected == 0 {
+            doc! {"$not": {"$gt": 0_i64}}
+        } else {
+            doc! {"$eq": expected}
+        };
+        let held = self
+            .heads()
+            .update_one(
+                doc! {"_id": head_id(&self.scope, stream), "n": stream, "truncate_epoch": unchanged},
+                doc! {"$inc": {"seal_epoch": 1_i64}, "$max": {"g": 0_i64}},
+                expected == 0,
+                Some(session),
+            )
+            .await;
+        match held {
+            Ok(result) if result.matched_count > 0 || result.upserted_id.is_some() => Ok(()),
+            Ok(_) => Err(StorageError::conflict("stream was truncated while sealing")),
+            // The head exists at another count: an upsert met its own key.
+            Err(error) if errors::duplicate_index(&error).is_some() => {
+                Err(StorageError::conflict("stream was truncated while sealing"))
+            }
+            Err(error) => Err(errors::map(error, "seal a stream")),
+        }
     }
 
     /// Delete `stream` only while it is the incarnation sealed at `sealed_ms`;

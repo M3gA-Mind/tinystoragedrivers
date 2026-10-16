@@ -18,6 +18,12 @@
 //! instead), so `len` survives. Each step is idempotent and monotonic, so an
 //! interrupted truncation is finished by the next one.
 //!
+//! A truncation that changed anything then counts itself on the stream head
+//! (`truncate_epoch`) and checks that no seal marked the stream meanwhile. A
+//! seal conditions its marker on that count (see `seal`), so truncation and
+//! sealing are ordered one way or the other: the seal snapshots the truncated
+//! stream, or the truncation is refused with `Conflict`.
+//!
 //! **Deletion** is coordinated with appends through a *generation*. Each
 //! stream has a header in `<prefix>_tsd_stream_heads` holding its generation
 //! `g` (0 when absent), every segment records the generation it was appended
@@ -57,6 +63,12 @@ use crate::scoped::ScopedCollection;
 
 /// How many times an append retries after another appender took its offset.
 const APPEND_ATTEMPTS: usize = 128;
+
+/// The stream head's count of truncations that changed segments. A seal reads
+/// it before its snapshot and conditions its marker on it being unchanged, so
+/// a truncation that completes after the snapshot can never be undone by a
+/// marker that publishes the older blob (see `seal`).
+const TRUNCATE_EPOCH: &str = "truncate_epoch";
 
 /// One stored segment.
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +272,74 @@ impl MongoStreams {
         Ok(head.map_or(0, |head| head.get_i64("g").unwrap_or(0)))
     }
 
+    /// How many truncations of `stream` have changed its segments.
+    async fn truncate_epoch(
+        &self,
+        stream: &str,
+        session: Option<&mut ClientSession>,
+    ) -> Result<i64> {
+        let head = self
+            .heads()
+            .find_one(doc! {"_id": head_id(&self.scope, stream)}, session)
+            .await
+            .map_err(errors::failed("read a stream header"))?;
+        Ok(head.map_or(0, |head| head.get_i64(TRUNCATE_EPOCH).unwrap_or(0)))
+    }
+
+    /// Record a truncation that changed segments on the stream's head. The
+    /// head is created at generation 0 when the stream never had one.
+    async fn bump_truncate_epoch(
+        &self,
+        stream: &str,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<()> {
+        // Two truncations of a head-less stream race to create it; the loser
+        // retries against the head the winner made (outside a transaction,
+        // where a failed write leaves nothing to abort).
+        let attempts = if session.is_some() { 1 } else { 3 };
+        for attempt in 1..=attempts {
+            let bumped = self
+                .heads()
+                .update_one(
+                    doc! {"_id": head_id(&self.scope, stream), "n": stream},
+                    doc! {"$inc": {TRUNCATE_EPOCH: 1_i64}, "$max": {"g": 0_i64}},
+                    true,
+                    session.as_deref_mut(),
+                )
+                .await;
+            match bumped {
+                Ok(_) => return Ok(()),
+                Err(error) if errors::duplicate_index(&error).is_some() && attempt < attempts => {}
+                Err(error) if errors::duplicate_index(&error).is_some() => {
+                    return Err(StorageError::unavailable(
+                        "stream header changed concurrently; retry",
+                    ));
+                }
+                Err(error) => return Err(errors::map(error, "record a truncation")),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// Refuse to acknowledge a truncation of a stream that a seal marked
+    /// meanwhile: the seal's blob may still hold the entries just cut, and a
+    /// reader of the sealed stream would see them again. The truncation is
+    /// then ordered after the seal, which refuses it as an operation on a
+    /// sealed stream.
+    async fn ensure_unsealed_after_truncate(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        generation: i64,
+        session: Option<&mut ClientSession>,
+    ) -> Result<()> {
+        let last = self.edge(handle, stream, generation, -1, session).await?;
+        if last.is_some_and(|last| last.sealed_base.is_some()) {
+            return Err(StorageError::conflict("stream was sealed while truncating"));
+        }
+        Ok(())
+    }
+
     /// The segment of `stream` in `generation` first in `order` (`1` first,
     /// `-1` last).
     async fn edge(
@@ -387,14 +467,17 @@ impl MongoStreams {
                 |segment| segment.start + segment.trimmed,
             );
         let cut = offset.clamp(base, last.end);
+        let mut changed = false;
         for segment in &segments {
             let keep_from = cut.clamp(segment.start, segment.end) - segment.start;
             if segment.end <= cut && segment.start != last.start {
+                changed = true;
                 handle
                     .delete_many(doc! {"_id": segment.id.clone()}, session.as_deref_mut())
                     .await
                     .map_err(errors::failed("truncate a stream"))?;
             } else if keep_from > segment.trimmed {
+                changed = true;
                 let drop = usize::try_from(keep_from - segment.trimmed).unwrap_or(usize::MAX);
                 let rest: Vec<Bson> = segment.values.iter().skip(drop).cloned().collect();
                 handle
@@ -407,6 +490,15 @@ impl MongoStreams {
                     .await
                     .map_err(errors::failed("truncate a stream"))?;
             }
+        }
+        if changed {
+            // Last, so a seal whose snapshot predates this truncation sees the
+            // count move before it publishes (and one that publishes first is
+            // seen here).
+            self.bump_truncate_epoch(stream, session.as_deref_mut())
+                .await?;
+            self.ensure_unsealed_after_truncate(handle, stream, generation, session)
+                .await?;
         }
         Ok(cut - base)
     }

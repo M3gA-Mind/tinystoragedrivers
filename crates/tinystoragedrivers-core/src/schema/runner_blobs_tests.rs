@@ -89,15 +89,17 @@ async fn renames_blobs_and_resumes_after_a_failure() {
 }
 
 #[tokio::test]
-async fn keeps_an_existing_target_and_drops_none() {
+async fn resumes_over_an_identical_target_and_drops_none() {
     let storage = storage();
     seed(&storage).await;
+    // An interrupted earlier run already wrote the target for `a` (reversed).
     storage
         .blobs()
-        .put("juice/ccr/a", b"new".to_vec(), None)
+        .put("juice/ccr/a", b"cba".to_vec(), Some("text/plain"))
         .await
         .unwrap();
-    let step = Step::blobs("ccr_v2", "juice/ccr/", 1, 2, |key, ct, bytes| {
+    let step = Step::blobs("ccr_v2", "juice/ccr/", 1, 2, |key, ct, mut bytes| {
+        bytes.reverse();
         Ok((!key.ends_with("/c")).then(|| (key.replace(LEGACY, "juice/ccr/"), ct, bytes)))
     })
     .source_prefix(LEGACY);
@@ -113,10 +115,79 @@ async fn keeps_an_existing_target_and_drops_none() {
             .unwrap()
             .unwrap()
             .bytes,
-        b"new"
+        b"cba"
     );
     assert!(storage.blobs().get("juice/ccr/c").await.unwrap().is_none());
     assert_eq!(storage.blobs().list(LEGACY).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_target_holding_other_bytes_conflicts_and_keeps_the_source() {
+    let storage = storage();
+    seed(&storage).await;
+    storage
+        .blobs()
+        .put("juice/ccr/a", b"unrelated".to_vec(), None)
+        .await
+        .unwrap();
+    let error = registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    let kept = storage.blobs().get(&format!("{LEGACY}a")).await.unwrap();
+    assert_eq!(kept.unwrap().bytes, b"abc", "the source survives");
+    let target = storage.blobs().get("juice/ccr/a").await.unwrap().unwrap();
+    assert_eq!(target.bytes, b"unrelated", "the target is not overwritten");
+}
+
+#[tokio::test]
+async fn a_target_with_another_content_type_conflicts() {
+    let storage = storage();
+    seed(&storage).await;
+    storage
+        .blobs()
+        .put("juice/ccr/a", b"cba".to_vec(), Some("application/json"))
+        .await
+        .unwrap();
+    let error = registry(rename_step(Arc::new(AtomicUsize::new(0)), None))
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    assert!(
+        storage
+            .blobs()
+            .head(&format!("{LEGACY}a"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn two_sources_mapping_to_one_target_keep_the_second_source() {
+    let storage = storage();
+    seed(&storage).await;
+    let step = Step::blobs("ccr_v2", "juice/ccr/", 1, 2, |_, ct, bytes| {
+        Ok(Some(("juice/ccr/same".to_owned(), ct, bytes)))
+    })
+    .source_prefix(LEGACY);
+    let error = registry(step)
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Conflict);
+    // The first source moved; the colliding ones were not discarded.
+    assert_eq!(storage.blobs().list(LEGACY).await.unwrap().len(), 2);
+    assert!(
+        storage
+            .blobs()
+            .head("juice/ccr/same")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

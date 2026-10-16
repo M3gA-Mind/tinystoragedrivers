@@ -75,3 +75,30 @@ fn epoch_milliseconds_are_kept_as_they_are() {
     let ms = serde_json::json!({"created_at": 100_000_000_000_i64});
     assert_eq!(recognised_ms(&ms, &["created_at"]), Some(100_000_000_000));
 }
+
+#[test]
+fn fractional_ms_fields_are_milliseconds_rounded_to_the_nearest() {
+    // A modern value with a fraction is not dropped.
+    let doc = serde_json::json!({"created_ms": 1_700_000_000_000.5_f64});
+    assert_eq!(
+        recognised_ms(&doc, &["created_ms"]),
+        Some(1_700_000_000_001)
+    );
+    // A small `_ms` value is milliseconds, not seconds: never multiplied.
+    let doc = serde_json::json!({"updated_ms": 1500.4_f64, "expires_ms": 1500.6_f64});
+    assert_eq!(recognised_ms(&doc, &["updated_ms"]), Some(1500));
+    assert_eq!(recognised_ms(&doc, &["expires_ms"]), Some(1501));
+    let doc = serde_json::json!({"created_ms": -2.5_f64, "bad_ms": 1.0e30_f64});
+    assert_eq!(recognised_ms(&doc, &["created_ms"]), Some(-3));
+    assert_eq!(recognised_ms(&doc, &["bad_ms"]), None);
+}
+
+#[test]
+fn fractional_values_of_an_unknown_unit_use_the_seconds_heuristic() {
+    let doc = serde_json::json!({
+        "seconds": 1_700_000_000.25_f64,
+        "millis": 1_700_000_000_000.5_f64,
+    });
+    assert_eq!(recognised_ms(&doc, &["seconds"]), Some(1_700_000_000_250));
+    assert_eq!(recognised_ms(&doc, &["millis"]), Some(1_700_000_000_001));
+}

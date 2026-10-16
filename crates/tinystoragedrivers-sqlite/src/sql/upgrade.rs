@@ -284,22 +284,30 @@ const SECONDS_BELOW: i64 = 100_000_000_000;
 /// string is RFC 3339 text, and a number is milliseconds, except under a field
 /// not named `*_ms` where one below [`SECONDS_BELOW`] is epoch seconds (v0.x
 /// kept `profiles.created_at` in seconds and had no unit marker, so the
-/// magnitude is the only signal).
+/// magnitude is the only signal). A fractional number follows the same rule:
+/// a `*_ms` field is always milliseconds, and only a field of unknown unit
+/// falls back to the magnitude. The result is rounded to the nearest
+/// millisecond; a value outside `i64` is not an instant.
 fn recognised_ms(doc: &Value, fields: &[&str]) -> Option<i64> {
     fields.iter().find_map(|field| match doc.get(field)? {
         Value::Number(number) => {
             let unit_known = field.ends_with("_ms");
             let seconds = |n: i64| !unit_known && n.abs() < SECONDS_BELOW;
+            let seconds_f64 = |n: f64| !unit_known && n.abs() < 1e11;
             match number.as_i64() {
                 Some(n) if seconds(n) => n.checked_mul(1000),
                 Some(n) => Some(n),
                 None => {
+                    // A fraction (or an integer past `i64`): the unit rule is
+                    // the same as for integers, then the result is rounded
+                    // to the nearest millisecond (halves away from zero).
                     let n = number.as_f64().filter(|n| n.is_finite())?;
+                    let millis = if seconds_f64(n) { n * 1000.0 } else { n };
                     #[allow(
                         clippy::cast_possible_truncation,
                         reason = "bounded by the range check"
                     )]
-                    ((n.abs() < 1e11).then(|| (n * 1000.0).round() as i64))
+                    (millis.abs() < 9.0e18).then(|| millis.round() as i64)
                 }
             }
         }

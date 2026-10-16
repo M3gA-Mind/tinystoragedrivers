@@ -3,9 +3,12 @@
 //!
 //! The stores are their own progress. A blob moves in two writes (put the
 //! target, delete the source), so a crash between them leaves both; the next
-//! run lists the source again, finds the target present and keeps it (a
-//! target is never overwritten), then deletes the source. `tsd.migrations`
-//! gets the step's running count after every blob.
+//! run lists the source again and finds the target present. A present target
+//! is the interrupted write only when its bytes and content type equal the
+//! step's output; anything else (an unrelated blob, or the target of another
+//! source that maps to the same key) is a `Conflict`: the target is never
+//! overwritten and the source is kept, so no transformed bytes are discarded.
+//! `tsd.migrations` gets the step's running count after every blob.
 
 use crate::error::{Result, StorageError};
 
@@ -39,9 +42,7 @@ pub(super) async fn run(
             run(listed.key.clone(), blob.meta.content_type, blob.bytes)?
         {
             check_target(context, &target)?;
-            if blobs.head(&target).await?.is_none() {
-                blobs.put(&target, bytes, content_type.as_deref()).await?;
-            }
+            write_target(context, &target, bytes, content_type).await?;
             progress.written += 1;
         }
         blobs.delete(&listed.key).await?;
@@ -50,6 +51,30 @@ pub(super) async fn run(
     progress.done = true;
     context.migrations.save(context.key, &progress).await?;
     Ok(progress.written)
+}
+
+/// Put the step's output under `target`, or accept an equal blob that an
+/// interrupted run left there. A different blob is a `Conflict`.
+async fn write_target(
+    context: &Context<'_>,
+    target: &str,
+    bytes: Vec<u8>,
+    content_type: Option<String>,
+) -> Result<()> {
+    let blobs = context.storage.blobs();
+    match blobs.get(target).await? {
+        None => {
+            blobs.put(target, bytes, content_type.as_deref()).await?;
+            Ok(())
+        }
+        Some(existing) if existing.bytes == bytes && existing.meta.content_type == content_type => {
+            Ok(())
+        }
+        Some(_) => Err(StorageError::conflict(format!(
+            "step `{}` of `{}` maps a blob to `{target}`, which already holds different content; the source is kept",
+            context.step.id, context.step.item
+        ))),
+    }
 }
 
 /// The target key must lie under the item's prefix.
