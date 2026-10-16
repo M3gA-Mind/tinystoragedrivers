@@ -542,3 +542,76 @@ async fn live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest() {
     assert!(blobs.get("later").await.unwrap().is_none());
     assert!(blobs.get("kept").await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn live_metadata_queries_see_a_legacy_record_as_zero() {
+    use tinystoragedrivers_core::{DocumentStoreExt as _, Query, Sort, WriteOptions};
+
+    let Some(backend) = live("live_metadata_queries_see_a_legacy_record_as_zero").await else {
+        return;
+    };
+    let coll = unique("legacy_meta");
+    let raw = backend.shared.raw(&coll);
+    let scope = Scope::new("legacy").unwrap();
+    let docs_scope = backend.for_scope(&scope).unwrap();
+    let docs = docs_scope.documents();
+    // Written before the metadata fields existed: no `_schema`, `_c` or `_u`.
+    for key in ["a", "b"] {
+        raw.insert_one(doc! {
+            "_id": {"s": "legacy", "k": key},
+            "_scope": "legacy",
+            "_key": key,
+            "_v": 1_i64,
+            "d": {"n": 1_i64},
+        })
+        .await
+        .unwrap();
+    }
+    docs.put_with(
+        &coll,
+        "c",
+        json!({"n": 1}),
+        Precondition::None,
+        WriteOptions::new().schema(2),
+    )
+    .await
+    .unwrap();
+
+    let ids = |filter: Filter| {
+        let docs = &docs;
+        let coll = &coll;
+        async move {
+            let mut found: Vec<String> = docs
+                .query_all(coll, &Query::filter(filter))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect();
+            found.sort();
+            found
+        }
+    };
+    assert_eq!(ids(Filter::eq("_schema", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::lt("_schema", 2)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::eq("_schema", 2)).await, ["c"]);
+    assert_eq!(ids(Filter::eq("_schema", 2).negate()).await, ["a", "b"]);
+    assert_eq!(ids(Filter::lte("_created_ms", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::eq("_updated_ms", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::gt("_created_ms", 0)).await, ["c"]);
+    assert_eq!(ids(Filter::exists("_schema", true)).await, ["a", "b", "c"]);
+
+    // A legacy record sorts as created at 0, before the stamped one.
+    let by_created = docs
+        .query_all(&coll, &Query::all().sort(Sort::desc("_created_ms")))
+        .await
+        .unwrap();
+    let order: Vec<&str> = by_created.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(order, ["c", "a", "b"]);
+    let by_schema = docs
+        .query_all(&coll, &Query::all().sort(Sort::asc("_schema")))
+        .await
+        .unwrap();
+    let order: Vec<&str> = by_schema.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(order, ["a", "b", "c"]);
+}

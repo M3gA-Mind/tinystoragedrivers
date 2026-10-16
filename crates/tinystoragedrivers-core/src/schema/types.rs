@@ -182,7 +182,8 @@ pub struct SourceRecord {
 /// It is written to `collection` (an item of the same owner) with the schema
 /// version implied by the step's `to` (or by the declared version of a
 /// different item), and with `Precondition::Absent`, so a record that already
-/// exists is kept.
+/// exists is kept. Its expiry defaults to the source record's when the output
+/// rewrites that record under its own id ([`Expiry::Carry`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetRecord {
     /// Destination collection.
@@ -194,6 +195,22 @@ pub struct TargetRecord {
     /// Creation time to record (Unix epoch ms), usually the source's. `None`
     /// uses the driver clock (or keeps the time of an in-place rewrite).
     pub created_ms: Option<i64>,
+    /// What to record as the expiry. See [`Expiry`].
+    pub expires: Expiry,
+}
+
+/// The expiry a [`TargetRecord`] is written with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Expiry {
+    /// The expiry of the source record with the same id, when the output is
+    /// that record rewritten (an in-place step, or a step that keeps ids);
+    /// none for a record with a new id, which the step must date itself.
+    #[default]
+    Carry,
+    /// The record never expires, whatever the source did.
+    Never,
+    /// The record reads as absent from this Unix epoch millisecond.
+    At(i64),
 }
 
 impl TargetRecord {
@@ -205,6 +222,7 @@ impl TargetRecord {
             id: id.into(),
             body,
             created_ms: None,
+            expires: Expiry::Carry,
         }
     }
 
@@ -212,6 +230,16 @@ impl TargetRecord {
     #[must_use]
     pub fn created_ms(mut self, created_ms: i64) -> Self {
         self.created_ms = Some(created_ms);
+        self
+    }
+
+    /// Record `expires_ms` as the expiry (`Some(ms)`), or none (`None`),
+    /// instead of carrying the source record's. A step moving a legacy TTL
+    /// body field into metadata passes it here; one that renames a record
+    /// passes `record.meta.expires_ms` to keep the old deadline.
+    #[must_use]
+    pub fn expires_ms(mut self, expires_ms: Option<i64>) -> Self {
+        self.expires = expires_ms.map_or(Expiry::Never, Expiry::At);
         self
     }
 }

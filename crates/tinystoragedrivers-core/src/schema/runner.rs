@@ -11,7 +11,7 @@ use crate::filter::{Filter, ID_FIELD, SCHEMA_FIELD, Sort};
 
 use super::compose::Registry;
 use super::migrations::{Migrations, Progress, migrations_spec, step_key};
-use super::types::{Owner, SourceRecord, Step, StepBody, StepFn, TargetRecord};
+use super::types::{Expiry, Owner, SourceRecord, Step, StepBody, StepFn, TargetRecord};
 use super::{runner_blobs, runner_streams};
 
 /// How [`Registry::migrate`] runs.
@@ -302,6 +302,11 @@ impl StepRun<'_> {
             .iter()
             .map(|item| (item.id.clone(), item.version))
             .collect();
+        // The expiry of each source record, for an output that rewrites it.
+        let expiries: HashMap<String, Option<i64>> = items
+            .iter()
+            .map(|item| (item.id.clone(), item.meta.expires_ms))
+            .collect();
         let records = items
             .into_iter()
             .map(|item| SourceRecord {
@@ -330,9 +335,21 @@ impl StepRun<'_> {
             HashSet::new()
         };
         for (output, schema) in outputs.into_iter().zip(schemas) {
+            let expires_ms = match output.expires {
+                Expiry::At(ms) => Some(ms),
+                // Only the record rewritten under its own id keeps its
+                // deadline; a renamed or emitted-elsewhere record is new.
+                Expiry::Carry if output.collection == self.step.item => {
+                    expiries.get(&output.id).copied().flatten()
+                }
+                Expiry::Carry | Expiry::Never => None,
+            };
             let mut write = WriteOptions::new().schema(schema);
             if let Some(created) = output.created_ms {
                 write = write.created_ms(created);
+            }
+            if let Some(expires) = expires_ms {
+                write = write.expires_ms(expires);
             }
             let precondition = if self.in_place() && output.collection == self.step.item {
                 versions
@@ -353,7 +370,7 @@ impl StepRun<'_> {
                 Ok(_) => {}
                 // Only an interrupted run of this step may have left the
                 // output behind, and then it holds exactly this body, schema
-                // and (when the step supplies one) creation time. Any
+                // expiry and (when the step supplies one) creation time. Any
                 // other conflict (a stranger under the id, a unique-index
                 // collision with another document, a concurrent edit) stops
                 // the step.
@@ -365,6 +382,7 @@ impl StepRun<'_> {
                         found.doc == body
                             && found.meta.schema == schema
                             && created_ms.is_none_or(|created| found.meta.created_ms == created)
+                            && found.meta.expires_ms == expires_ms
                     });
                     if !identical {
                         return Err(error);

@@ -677,3 +677,181 @@ async fn an_existing_output_matching_body_schema_and_creation_time_is_accepted()
     assert_eq!(snapshot(&storage, "orders_v1").await.len(), 0);
     assert_eq!(snapshot(&storage, "shop.orders").await.len(), 1);
 }
+
+async fn seed_with_expiry(storage: &ScopedStorage, id: &str, body: Value, expires: Option<i64>) {
+    let mut options = WriteOptions::new().schema(1);
+    if let Some(expires) = expires {
+        options = options.expires_ms(expires);
+    }
+    storage
+        .documents()
+        .put_with("shop.orders", id, body, Precondition::Absent, options)
+        .await
+        .unwrap();
+}
+
+async fn expiry_of(storage: &ScopedStorage, collection: &str, id: &str) -> Option<i64> {
+    storage
+        .documents()
+        .get(collection, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .meta
+        .expires_ms
+}
+
+fn in_place(map: impl Fn(SourceRecord) -> TargetRecord + Send + Sync + 'static) -> Registry {
+    registry(
+        Step::new("bump", "shop.orders", 1, 2, move |batch| {
+            Ok(batch.into_iter().map(&map).collect())
+        }),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn an_in_place_migration_keeps_a_record_expiry() {
+    let storage = scoped();
+    seed_with_expiry(&storage, "timed", json!({"n": 1}), Some(9_000)).await;
+    seed_with_expiry(&storage, "forever", json!({"n": 2}), None).await;
+    in_place(|record| TargetRecord::new("shop.orders", record.id, record.body))
+        .migrate(&storage, &opts())
+        .await
+        .unwrap();
+    assert_eq!(
+        expiry_of(&storage, "shop.orders", "timed").await,
+        Some(9_000)
+    );
+    assert_eq!(expiry_of(&storage, "shop.orders", "forever").await, None);
+    assert_eq!(snapshot(&storage, "shop.orders").await[0].2, 2);
+}
+
+#[tokio::test]
+async fn a_step_can_move_a_legacy_ttl_field_into_expires_ms() {
+    let storage = scoped();
+    seed_with_expiry(&storage, "a", json!({"n": 1, "until": 8_000}), None).await;
+    in_place(|record| {
+        let until = record.body["until"].as_i64();
+        let mut body = record.body;
+        body.as_object_mut().unwrap().remove("until");
+        TargetRecord::new("shop.orders", record.id, body).expires_ms(until)
+    })
+    .migrate(&storage, &opts())
+    .await
+    .unwrap();
+    assert_eq!(expiry_of(&storage, "shop.orders", "a").await, Some(8_000));
+    let stored = storage
+        .documents()
+        .get("shop.orders", "a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.doc, json!({"n": 1}));
+}
+
+#[tokio::test]
+async fn a_step_can_clear_a_record_expiry() {
+    let storage = scoped();
+    seed_with_expiry(&storage, "a", json!({"n": 1}), Some(9_000)).await;
+    in_place(|record| TargetRecord::new("shop.orders", record.id, record.body).expires_ms(None))
+        .migrate(&storage, &opts())
+        .await
+        .unwrap();
+    assert_eq!(expiry_of(&storage, "shop.orders", "a").await, None);
+}
+
+#[tokio::test]
+async fn a_renamed_record_takes_an_expiry_only_from_its_step() {
+    let storage = scoped();
+    for (id, expires) in [("a", Some(9_000)), ("b", Some(9_500))] {
+        storage
+            .documents()
+            .put_with(
+                "orders_v1",
+                id,
+                json!({"n": 1}),
+                Precondition::Absent,
+                WriteOptions::new().schema(1).expires_ms(expires.unwrap()),
+            )
+            .await
+            .unwrap();
+    }
+    registry(
+        Step::new("import", "shop.orders", 1, 2, |batch| {
+            Ok(batch
+                .into_iter()
+                .map(|record| {
+                    let target =
+                        TargetRecord::new("shop.orders", format!("n-{}", record.id), record.body);
+                    if record.id == "a" {
+                        target.expires_ms(record.meta.expires_ms)
+                    } else {
+                        target
+                    }
+                })
+                .collect())
+        })
+        .source("orders_v1"),
+        None,
+    )
+    .migrate(&storage, &opts())
+    .await
+    .unwrap();
+    assert_eq!(expiry_of(&storage, "shop.orders", "n-a").await, Some(9_000));
+    assert_eq!(
+        expiry_of(&storage, "shop.orders", "n-b").await,
+        None,
+        "a new id is a new record: nothing is carried implicitly"
+    );
+}
+
+#[tokio::test]
+async fn an_existing_output_with_another_expiry_stops_the_migration() {
+    let storage = scoped();
+    seed_one_legacy_and_leftover(&storage, WriteOptions::new().schema(2).expires_ms(7_000)).await;
+    let error = registry(
+        Step::new("import", "shop.orders", 1, 2, |batch| {
+            Ok(batch
+                .into_iter()
+                .map(|record| {
+                    TargetRecord::new("shop.orders", format!("n-{}", record.id), record.body)
+                        .expires_ms(Some(9_000))
+                })
+                .collect())
+        })
+        .source("orders_v1"),
+        None,
+    )
+    .migrate(&storage, &opts())
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error.kind(), ErrorKind::Conflict | ErrorKind::AlreadyExists),
+        "{error}"
+    );
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_existing_output_with_the_same_expiry_is_accepted() {
+    let storage = scoped();
+    seed_one_legacy_and_leftover(&storage, WriteOptions::new().schema(2).expires_ms(9_000)).await;
+    registry(
+        Step::new("import", "shop.orders", 1, 2, |batch| {
+            Ok(batch
+                .into_iter()
+                .map(|record| {
+                    TargetRecord::new("shop.orders", format!("n-{}", record.id), record.body)
+                        .expires_ms(Some(9_000))
+                })
+                .collect())
+        })
+        .source("orders_v1"),
+        None,
+    )
+    .migrate(&storage, &opts())
+    .await
+    .unwrap();
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), 0);
+}

@@ -37,6 +37,22 @@ fn seal_policy_round_trips_and_defaults_retention_to_none() {
 }
 
 #[test]
+fn a_negative_retention_is_refused_on_the_wire() {
+    // `-1` would read as "deleted before it was sealed" and make a sealed
+    // stream due for deletion at once, so it cannot be stated.
+    for retain in [json!(-1), json!(i64::MIN), json!(-0.5), json!("1")] {
+        let wire = json!({"when": "never", "retain_ms": retain});
+        assert!(
+            serde_json::from_value::<SealPolicy>(wire).is_err(),
+            "{retain}"
+        );
+    }
+    let zero: SealPolicy =
+        serde_json::from_value(json!({"when": "never", "retain_ms": 0})).unwrap();
+    assert_eq!(zero.retain_ms, Some(0));
+}
+
+#[test]
 fn seal_outcome_serializes_in_its_pinned_form() {
     let outcome = SealOutcome::new(3, 10, 120);
     assert_eq!(
