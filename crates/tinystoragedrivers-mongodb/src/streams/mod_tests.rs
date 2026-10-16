@@ -6,7 +6,7 @@ use tinystoragedrivers_core::ErrorKind;
 
 #[test]
 fn new_segments_cover_their_batch() {
-    let segment = new_segment("log", 0, 4, &[json!(1), json!({"a": 2})]).unwrap();
+    let segment = new_segment("log", 0, 4, &[json!(1), json!({"a": 2})], 77).unwrap();
     assert_eq!(segment.get_str("s").unwrap(), "log");
     assert_eq!(segment.get_i64("o").unwrap(), 4);
     assert_eq!(segment.get_i64("n").unwrap(), 2);
@@ -15,21 +15,27 @@ fn new_segments_cover_their_batch() {
     let decoded = Segment::decode(&segment).unwrap();
     assert_eq!((decoded.start, decoded.end, decoded.trimmed), (4, 6, 0));
     assert_eq!(decoded.id, Bson::Null);
+    assert_eq!(
+        decoded.at_ms,
+        Some(77),
+        "a segment records when it was appended"
+    );
+    assert_eq!(decoded.last_append_ms, None);
 
     assert_eq!(
-        new_segment("log", 0, u64::MAX, &[json!(1)])
+        new_segment("log", 0, u64::MAX, &[json!(1)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", 0, u64::MAX - 1, &[json!(1)])
+        new_segment("log", 0, u64::MAX - 1, &[json!(1)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", 0, 0, &[json!(u64::MAX)])
+        new_segment("log", 0, 0, &[json!(u64::MAX)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Serialization

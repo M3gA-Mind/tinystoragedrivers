@@ -104,7 +104,7 @@ impl MongoStreams {
             self.seal_drop_segments(&handle, stream, generation).await?;
             return self.sealed_outcome(stream, base, last.end).await;
         }
-        let log = self.seal_collect(&handle, stream, generation).await?;
+        let (log, last_append_ms) = self.seal_collect(&handle, stream, generation).await?;
         let bytes = log.encode()?;
         let outcome = SealOutcome::new(log.base(), log.len(), bytes.len() as u64);
         {
@@ -113,7 +113,8 @@ impl MongoStreams {
                 .put(&sealed_blob_key(stream)?, bytes, Some(CONTENT_TYPE))
                 .await?;
         }
-        self.seal_mark(&handle, stream, generation, outcome).await?;
+        self.seal_mark(&handle, stream, generation, outcome, last_append_ms)
+            .await?;
         self.seal_drop_segments(&handle, stream, generation).await?;
         Ok(outcome)
     }
@@ -124,7 +125,7 @@ impl MongoStreams {
         handle: &ScopedCollection,
         stream: &str,
         generation: i64,
-    ) -> Result<SealedLog> {
+    ) -> Result<(SealedLog, Option<i64>)> {
         let mut cursor = handle
             .cursor(
                 doc! {"s": stream, "g": generation},
@@ -134,6 +135,7 @@ impl MongoStreams {
             .map_err(errors::failed("read a stream"))?;
         let mut entries = Vec::new();
         let mut end = 0;
+        let mut last_append_ms = None;
         while let Some(found) = cursor
             .try_next()
             .await
@@ -144,6 +146,7 @@ impl MongoStreams {
                 return Err(StorageError::conflict("stream was sealed concurrently"));
             }
             end = segment.end;
+            last_append_ms = segment.at_ms;
             for (offset, value) in segment.entries_from(0) {
                 entries.push((offset, from_bson(value)?));
             }
@@ -159,9 +162,9 @@ impl MongoStreams {
                 "stream segments do not tile the stream; refusing to seal",
             ));
         }
-        Ok(SealedLog::new(
-            base,
-            entries.into_iter().map(|(_, value)| value).collect(),
+        Ok((
+            SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect()),
+            last_append_ms,
         ))
     }
 
@@ -173,8 +176,9 @@ impl MongoStreams {
         stream: &str,
         generation: i64,
         written: SealOutcome,
+        last_append_ms: Option<i64>,
     ) -> Result<()> {
-        let marker = doc! {
+        let mut marker = doc! {
             "s": stream,
             "g": generation,
             "o": stored_offset(written.len)?,
@@ -184,7 +188,11 @@ impl MongoStreams {
             "vs": [],
             "seal": true,
             "sb": stored_offset(written.base)?,
+            "ms": self.now_ms(),
         };
+        if let Some(last) = last_append_ms {
+            marker.insert("la", last);
+        }
         if self.shared.physical_transactions {
             // A fenced handle must hold its fence for the one write that makes
             // the stream sealed, so a stale holder is refused here.
