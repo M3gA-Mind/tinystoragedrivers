@@ -30,6 +30,9 @@ tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
 tinystoragedrivers-busproxy = { path = "crates/tinystoragedrivers-busproxy" }
 # SHA-256 binds Mongo watch cursors and protects native secret key identities.
 sha2 = "0.10"
+# Lowercase base32 text of the SHA-256 digest that stands in for a scope segment the
+# grammar cannot hold (`Scope::tenant`, `agent`, `module`).
+data-encoding = "2"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
 bytes = "1"
 # HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.

@@ -3279,8 +3279,10 @@ name = "tinystoragedrivers-core"
 version = "0.11.0"
 dependencies = [
  "async-trait",
+ "data-encoding",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
 ]

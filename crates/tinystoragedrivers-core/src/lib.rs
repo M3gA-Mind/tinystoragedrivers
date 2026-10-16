@@ -92,7 +92,10 @@ pub use error::{ErrorKind, Result, StorageError};
 pub use fence::{Fence, GuardDatabase};
 pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
-pub use scope::{MAX_SCOPE_LEN, Scope};
+pub use scope::{
+    AGENT_INFIX, CLUSTER, MAX_SCOPE_LEN, MAX_SEGMENT_LEN, MODULE_INFIX, ParsedScope, Principal,
+    Scope, Tenant, USER_PREFIX,
+};
 pub use stream::{StreamEntry, StreamStore, validate_stream};
 
 /// The `async_trait` attribute the port traits are declared with, re-exported
