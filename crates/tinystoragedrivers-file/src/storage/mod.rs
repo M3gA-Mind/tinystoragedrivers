@@ -56,6 +56,7 @@ use crate::streams::FileStreams;
 /// the process-wide native gate.
 pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Ttl)
+    .with(Capability::RecordMetadata)
     .with(Capability::FullText)
     .with(Capability::Fencing)
     .with(Capability::CrossDatabaseFencing)
