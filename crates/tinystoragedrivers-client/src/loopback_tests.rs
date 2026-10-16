@@ -6,8 +6,8 @@ use std::time::Duration;
 use serde_json::json;
 use tinystoragedrivers_bus::{MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
 use tinystoragedrivers_core::{
-    CollectionSpec, Filter, MemoryStorage, Precondition, Scope, ScopedStorage, StorageBackend,
-    WatchNotice, WatchOptions, conformance,
+    Capability, CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope,
+    ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOptions, conformance,
 };
 use tinystoragedrivers_secrets::{MemorySecrets, SecretStore};
 use tokio::io::AsyncReadExt;
@@ -575,4 +575,52 @@ async fn a_poisoned_watch_registry_is_a_backend_failure() {
         .await
         .unwrap_err();
     assert_eq!(error.kind, tinystoragedrivers_bus::StorageKind::Backend);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_writes_options_reads_metadata_and_cannot_set_created_ms() {
+    let rig = rig(Admission::Private).await;
+    let docs = rig.storage.documents();
+    let options = WriteOptions::new().schema(7);
+    docs.put_with("meta", "a", json!({"x": 1}), Precondition::None, options)
+        .await
+        .unwrap();
+    let found = docs.get("meta", "a").await.unwrap().unwrap();
+    assert_eq!(found.meta.schema, 7);
+    assert!(found.meta.created_ms > 0);
+    let refused = docs
+        .put_with(
+            "meta",
+            "b",
+            json!({}),
+            Precondition::None,
+            WriteOptions::new().created_ms(5),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::InvalidInput);
+    assert!(docs.get("meta", "b").await.unwrap().is_none());
+    // Host-only capabilities stay hidden from the module.
+    let caps = rig.storage.documents().capabilities();
+    assert!(caps.contains(Capability::RecordMetadata));
+    assert!(caps.contains(Capability::StreamSeal));
+    assert!(!caps.contains(Capability::Maintenance));
+    assert!(!caps.contains(Capability::ScopeEnumeration));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_seals_a_stream_and_reads_it_back() {
+    let rig = rig(Admission::Private).await;
+    let streams = rig.storage.streams();
+    streams
+        .append_batch("log", vec![json!(1), json!(2)])
+        .await
+        .unwrap();
+    let outcome = streams.seal("log").await.unwrap();
+    assert_eq!((outcome.base, outcome.len), (0, 2));
+    assert_eq!(streams.read_window("log", 0, 10).await.unwrap().len(), 2);
+    assert_eq!(
+        streams.append("log", json!(3)).await.unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
 }

@@ -6,7 +6,11 @@
 ///
 /// Changing any existing wire shape or selector requires a new interface
 /// version; adding a selector or message bumps this constant.
-pub const CONTRACT_VERSION: u32 = 3;
+///
+/// Version 4 adds record metadata (`Meta` on every returned `Versioned`,
+/// optional `schema` and `expires_ms` on `Put`) and the `Streams.Seal`
+/// selector. Both are additive; see `docs/specs/storage-bus.md`.
+pub const CONTRACT_VERSION: u32 = 4;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded-size cap for one inline page, batch or record set (half the frame,

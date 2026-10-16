@@ -100,13 +100,13 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 3` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 4` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
-| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams` | private |
+| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 
@@ -180,6 +180,55 @@ wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
 SQLite database written by an earlier release gains the `expires_at_ms` column
 on the next migrating open; a read-only `existing_schema` open refuses the old
 layout like any other schema drift.
+
+### Record metadata, sealing and host-only operations (version 4)
+
+Uniform schema v2 ([`schema-v2.md`](schema-v2.md) sections 3 and 6) adds four
+things to the ports. The wire carries two of them and deliberately not the
+other two.
+
+Carried (additive; every new field is optional and defaulted):
+
+- `Meta { schema, created_ms, updated_ms, expires_ms? }` is an optional `meta`
+  field on every `Versioned` a host returns: `Get`, `Query` and `Claim`. Its
+  JSON is the native `Meta`'s. `Watch` is content-free and carries none; a
+  module rereads. An absent `meta` (a host that predates version 4, or the
+  legacy `DocumentCollection1` callback) reads as `Meta::unknown()`.
+- `PutDocumentRequest` gains optional `schema` (omitted when `0`) and
+  `expires_ms`: `DocumentStore::put_with`. A plain put serializes exactly as
+  before. The client reports `Unsupported(RecordMetadata)` when the host
+  refuses an options-bearing put. `WriteOptions::created_ms` is a host-only
+  migration option: the request has no such field (a request naming it fails to
+  decode and is refused `InvalidInput`), and `BusDocuments::put_with` refuses it
+  locally with `InvalidInput`. A module can never choose a record's creation
+  time; `created_ms` and `updated_ms` always come from the host driver's clock.
+  Batch `Put` operations carry no options, as the native `WriteOp` has none.
+- `Streams.Seal` takes `StreamRequest { stream }` and replies
+  `SealResponse { base, len, blob_bytes }` (the native `SealOutcome`). Sealing
+  a stream the module may append to is within its grant, so it is exposed;
+  `Conflict` (append to a sealed stream) and `NotFound` cross as usual.
+- `Documents.Capabilities` now lists `record_metadata` and `stream_seal` when
+  the backend has them.
+
+Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
+keeps `maintenance` and `scope_enumeration` out of every capability list):
+
+- `StorageBackend::maintain` and `checkpoint` run vacuum, WAL checkpoints and
+  the seal and retention policies across the whole database. A module could
+  use them to spend the host's I/O budget or stall other tenants, so the host
+  runs them on its own schedule.
+- `StorageBackend::scopes` enumerates every tenant. A module is bound to one
+  scope and must not learn that others exist.
+
+Compatibility. A new module on an old host works for everything it did before:
+a default put sends no new field, and a missing `meta` decodes to unknown. An
+options-bearing put or `Seal` fails closed on an old host (`deny_unknown_fields`
+and the finite selector set), never silently dropping the option. An old module
+on a new host decodes only replies without `meta`: the wire types reject
+unknown fields, so a host serving version 4 metadata must be paired with a
+module built against version 4. This is the existing rule that contract
+changes bump `CONTRACT_VERSION`; the constant is informational and no
+handshake compares it.
 
 ## Real TinyBus transport
 

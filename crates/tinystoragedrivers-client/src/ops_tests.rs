@@ -11,7 +11,9 @@ use tinystoragedrivers_core::{
 };
 use tokio::io::AsyncReadExt;
 
-use crate::convert::{capabilities_of, capability_names, error_of, failure_of};
+use crate::convert::{
+    capabilities_of, capability_names, error_of, failure_of, versioned_from_wire,
+};
 use crate::{Admission, BusStorage, Loopback, Object, StorageServer, StorageTransport, WireError};
 
 async fn connect() -> (ScopedStorage, Arc<StorageServer>, BusStorage) {
@@ -375,9 +377,12 @@ fn capability_names_round_trip_without_host_only_entries() {
     let all = tinystoragedrivers_core::Capabilities::all();
     let names = capability_names(all);
     assert!(!names.contains(&"fencing".to_owned()));
-    // The bus contract carries neither call yet, so a client must not claim them.
+    // Maintenance and scope enumeration are host-only: a module must not
+    // trigger vacuum or list other tenants. The metadata and seal calls it may use.
     assert!(!names.contains(&"maintenance".to_owned()));
     assert!(!names.contains(&"scope_enumeration".to_owned()));
+    assert!(names.contains(&"record_metadata".to_owned()));
+    assert!(names.contains(&"stream_seal".to_owned()));
     let parsed = capabilities_of(&names);
     assert!(parsed.contains(Capability::FullText));
     assert!(!parsed.contains(Capability::Fencing));
@@ -502,4 +507,13 @@ async fn wire_reset_categories_map_to_native_reasons_and_watches_close_off_runti
     drop(tx);
     // Dropping with no runtime on the thread must not panic.
     std::thread::spawn(move || drop(watch)).join().unwrap();
+}
+
+#[test]
+fn a_reply_from_a_pre_v4_host_reads_as_unknown_metadata() {
+    let reply: tinystoragedrivers_bus::Versioned =
+        serde_json::from_value(json!({"document_id":"a","version":2,"document_json":"{}"}))
+            .unwrap();
+    let native = versioned_from_wire(reply);
+    assert_eq!(native.meta, tinystoragedrivers_core::Meta::unknown());
 }

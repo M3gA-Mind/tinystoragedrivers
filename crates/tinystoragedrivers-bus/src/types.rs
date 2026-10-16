@@ -22,6 +22,27 @@ pub enum Precondition {
     /// Document must have this exact version.
     Version(Version),
 }
+/// What the driver recorded about a document, outside its body.
+///
+/// Mirrors the native `Meta`: the same four fields, the same JSON. A host
+/// sends it with every document it returns; times are driver-clock Unix epoch
+/// milliseconds and are never accepted from a module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Meta {
+    /// Body version the writer declared; `0` means undeclared.
+    #[serde(default)]
+    pub schema: u32,
+    /// First write, Unix epoch milliseconds.
+    #[serde(default)]
+    pub created_ms: i64,
+    /// Latest write, Unix epoch milliseconds.
+    #[serde(default)]
+    pub updated_ms: i64,
+    /// Instant from which the document reads as absent, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+}
 /// Document data and version.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +55,11 @@ pub struct Versioned {
     /// Inline JSON document, encoded as JSON text on the wire.
     #[serde(rename = "document_json", with = "crate::inline_json")]
     pub doc: Value,
+    /// Record metadata. Absent from a host that predates contract version 4
+    /// and from the legacy `DocumentCollection1` callback, which never sends
+    /// it; readers treat absence as unknown metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Meta>,
 }
 /// Read in the captured collection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

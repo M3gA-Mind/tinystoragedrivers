@@ -49,11 +49,12 @@ pub use secrets::{
 pub use streams::{
     AppendBatchIfOffsetRequest, AppendBatchRequest, AppendRequest, AppendResponse,
     ListStreamsRequest, ReadWindowRequest, ReadWindowResponse, STREAMS_OBJECT, STREAMS_SELECTORS,
-    StreamItem, StreamRecord, StreamRequest, TruncateBeforeRequest, is_streams_selector,
+    SealResponse, StreamItem, StreamRecord, StreamRequest, TruncateBeforeRequest,
+    is_streams_selector,
 };
 pub use types::{
-    DeleteRequest, GetRequest, Precondition, PutRequest, StorageFailure, StorageKind, Version,
-    Versioned,
+    DeleteRequest, GetRequest, Meta, Precondition, PutRequest, StorageFailure, StorageKind,
+    Version, Versioned,
 };
 /// Fixed callback interface.
 pub const INTERFACE: &str = "ai.tinyhumans.storage.DocumentCollection1";
