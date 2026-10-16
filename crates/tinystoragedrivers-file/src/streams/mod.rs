@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamStore, validate_stream,
+    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore, validate_stream,
 };
 
 use crate::documents::guard;
@@ -62,6 +62,14 @@ struct StreamMeta {
     /// The stream's length when it was sealed; present exactly when sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sealed_len: Option<u64>,
+    /// When the stream was sealed, epoch milliseconds. Absent on a stream
+    /// sealed before times were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed_ms: Option<i64>,
+    /// When a record was last appended, epoch milliseconds. Absent on a
+    /// stream written before times were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_append_ms: Option<i64>,
 }
 
 /// One line of a stream file.
@@ -273,7 +281,8 @@ impl FileStreams {
         values: Vec<Value>,
     ) -> Result<u64> {
         let name = stream.to_owned();
-        self.write(stream, move |paths| {
+        self.write_db(stream, move |db, _, paths| {
+            let now_ms = i64::try_from(db.now()).unwrap_or(i64::MAX);
             let existing = read_meta(paths, &name)?;
             if existing.as_ref().is_some_and(|meta| meta.sealed_len.is_some()) {
                 return Err(StorageError::conflict("stream is sealed"));
@@ -286,11 +295,14 @@ impl FileStreams {
                 return existing.map_or(Ok(0), |meta| stream_len(paths, &meta));
             }
             let created = existing.is_none();
-            let meta = existing.unwrap_or(StreamMeta {
+            let mut meta = existing.unwrap_or(StreamMeta {
                 name,
                 base: 0,
                 sealed_len: None,
+                sealed_ms: None,
+                last_append_ms: None,
             });
+            meta.last_append_ms = Some(now_ms);
             let mut file = open_append(&paths.data)?;
             // A data file without a meta file is an orphan a failed delete
             // left; a new stream starts empty rather than inheriting it.
@@ -312,8 +324,10 @@ impl FileStreams {
                     .and_then(|()| file.sync_data())
                     .map_err(io_error("append to a stream file"))?;
                 sync_dir(parent_of(&paths.data))?;
-                write_json(&paths.meta, &meta)?;
             }
+            // The time goes in before the entries: a failed append rolls the
+            // entries back and leaves, at worst, a slightly late time.
+            write_json(&paths.meta, &meta)?;
             // Cut off a torn line a crashed append left, so the new lines
             // start on a line boundary, then append and flush.
             let written = file
@@ -457,6 +471,22 @@ impl StreamStore for FileStreams {
 
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
         self.seal_stream(stream).await
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        let name = stream.to_owned();
+        self.with(stream, move |paths| {
+            let Some(meta) = read_meta(paths, &name)? else {
+                return Ok(None);
+            };
+            Ok(Some(StreamInfo::new(
+                meta.base,
+                stream_len(paths, &meta)?,
+                meta.sealed_ms,
+                meta.last_append_ms,
+            )))
+        })
+        .await
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
