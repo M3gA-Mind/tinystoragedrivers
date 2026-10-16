@@ -216,34 +216,88 @@ impl TargetRecord {
     }
 }
 
-/// The transformation of a [`Step`]: a pure function of its batch, so a re-run
-/// produces the same output.
+/// The transformation of a document [`Step`]: a pure function of its batch, so
+/// a re-run produces the same output.
 pub type StepFn = Arc<dyn Fn(Vec<SourceRecord>) -> Result<Vec<TargetRecord>> + Send + Sync>;
 
-/// Rewrites the records of one collection from body version `from` to `to`.
+/// The transformation of a stream [`Step`]: `(source stream name, its entries
+/// in order)` to `Some((target stream name, new entries))`, or `None` to drop
+/// the stream. Pure, like [`StepFn`]: a resumed run calls it again and must
+/// get the same entries.
+pub type StreamStepFn =
+    Arc<dyn Fn(String, Vec<Value>) -> Result<Option<(String, Vec<Value>)>> + Send + Sync>;
+
+/// What a blob [`Step`] writes: `(target key, content type, bytes)`.
+pub type BlobOutput = (String, Option<String>, Vec<u8>);
+
+/// The transformation of a blob [`Step`]: `(source key, content type, bytes)`
+/// to `Some((target key, content type, bytes))`, or `None` to drop the blob.
+/// Pure, like [`StepFn`].
+pub type BlobStepFn =
+    Arc<dyn Fn(String, Option<String>, Vec<u8>) -> Result<Option<BlobOutput>> + Send + Sync>;
+
+/// What a [`Step`] does, and so which kind of [`Item`] it can target.
+#[derive(Clone)]
+pub enum StepBody {
+    /// Rewrite the documents of a [`Item::Collection`].
+    Documents(StepFn),
+    /// Move the legacy streams under a prefix into an [`Item::Stream`].
+    Streams(StreamStepFn),
+    /// Move the legacy blobs under a prefix into an [`Item::Blobs`].
+    Blobs(BlobStepFn),
+}
+
+impl StepBody {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Documents(_) => "documents",
+            Self::Streams(_) => "streams",
+            Self::Blobs(_) => "blobs",
+        }
+    }
+}
+
+impl fmt::Debug for StepBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StepBody::{}", self.kind())
+    }
+}
+
+/// Brings one item forward from version `from` to `to`.
 ///
-/// By default the source is the collection itself (an in-place rewrite of the
-/// records still below version `to`). [`Step::source`] names another
-/// collection instead, normally a legacy v1 name; its rows are deleted once
-/// the step completes.
+/// - [`Step::new`] rewrites the records of a **collection**. By default the
+///   source is the collection itself (an in-place rewrite of the records
+///   still below version `to`). [`Step::source`] names another collection
+///   instead, normally a legacy v1 name; its rows are deleted once the step
+///   completes.
+/// - [`Step::stream`] moves **streams**: every stream whose name starts with
+///   the [`Step::source_prefix`] is read whole, mapped, written under its new
+///   name inside the item, and deleted.
+/// - [`Step::blobs`] moves **blobs** the same way, one blob at a time.
+///
+/// Stream and blob versions are labels for ordering the steps of an item
+/// (they start at 1 and must not skip); unlike a collection, the item has no
+/// declared version to end at.
 #[derive(Clone)]
 pub struct Step {
     /// Identifies the step in `tsd.migrations`; unique within its item.
     pub id: &'static str,
-    /// The collection the step brings to version `to`.
+    /// The item the step brings to version `to`.
     pub item: &'static str,
     /// The version it reads.
     pub from: u32,
     /// The version it writes.
     pub to: u32,
-    /// A legacy collection to read instead of `item`.
+    /// A legacy collection to read instead of `item` (document steps), or the
+    /// legacy stream name / blob key prefix to migrate (stream and blob
+    /// steps, where it is required).
     pub source: Option<&'static str>,
     /// The transformation.
-    pub run: StepFn,
+    pub run: StepBody,
 }
 
 impl Step {
-    /// A step over `item` from version `from` to `to`.
+    /// A document step over collection `item` from version `from` to `to`.
     #[must_use]
     pub fn new(
         id: &'static str,
@@ -252,13 +306,57 @@ impl Step {
         to: u32,
         run: impl Fn(Vec<SourceRecord>) -> Result<Vec<TargetRecord>> + Send + Sync + 'static,
     ) -> Self {
+        Self::with_body(id, item, from, to, StepBody::Documents(Arc::new(run)))
+    }
+
+    /// A stream step into the stream family `item`. Set the legacy streams
+    /// with [`Step::source_prefix`].
+    ///
+    /// The target name `run` returns must be `item` itself or start with
+    /// `item/`. Migrated streams start at offset 0, whatever the offsets of
+    /// their source were: a source that had been truncated keeps only the
+    /// entries `read_window` can still see, renumbered from 0, because a
+    /// stream's base cannot be set from outside the driver. Owners that keep
+    /// offsets as external references must translate them with the source's
+    /// base. A sealed source produces a sealed target.
+    #[must_use]
+    pub fn stream(
+        id: &'static str,
+        item: &'static str,
+        from: u32,
+        to: u32,
+        run: impl Fn(String, Vec<Value>) -> Result<Option<(String, Vec<Value>)>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_body(id, item, from, to, StepBody::Streams(Arc::new(run)))
+    }
+
+    /// A blob step into the prefix `item`. Set the legacy blobs with
+    /// [`Step::source_prefix`].
+    ///
+    /// The target key `run` returns must start with `item`. An existing
+    /// target is kept (nothing is overwritten).
+    #[must_use]
+    pub fn blobs(
+        id: &'static str,
+        item: &'static str,
+        from: u32,
+        to: u32,
+        run: impl Fn(String, Option<String>, Vec<u8>) -> Result<Option<BlobOutput>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_body(id, item, from, to, StepBody::Blobs(Arc::new(run)))
+    }
+
+    fn with_body(id: &'static str, item: &'static str, from: u32, to: u32, run: StepBody) -> Self {
         Self {
             id,
             item,
             from,
             to,
             source: None,
-            run: Arc::new(run),
+            run,
         }
     }
 
@@ -269,7 +367,15 @@ impl Step {
         self
     }
 
-    /// The collection the step reads.
+    /// The legacy stream name prefix or blob key prefix a stream or blob step
+    /// migrates. It must not overlap the item's own name, so the runner never
+    /// reads its own output.
+    #[must_use]
+    pub fn source_prefix(self, prefix: &'static str) -> Self {
+        self.source(prefix)
+    }
+
+    /// The collection a document step reads.
     pub(super) fn source_collection(&self) -> &'static str {
         self.source.unwrap_or(self.item)
     }
@@ -279,6 +385,7 @@ impl fmt::Debug for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Step")
             .field("id", &self.id)
+            .field("kind", &self.run.kind())
             .field("item", &self.item)
             .field("from", &self.from)
             .field("to", &self.to)

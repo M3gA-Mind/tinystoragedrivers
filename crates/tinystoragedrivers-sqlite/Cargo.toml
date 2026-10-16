@@ -31,6 +31,8 @@ tokio = { workspace = true }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt"] }
 tempfile = "3"
+async-trait = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -284,3 +284,111 @@ fn check_ready_gates_collections_with_unfinished_steps() {
     registry.mark_ready("cron.jobs");
     registry.check_ready("cron.jobs").unwrap();
 }
+
+fn stream_step(id: &'static str, item: &'static str, from: u32, to: u32) -> Step {
+    Step::stream(id, item, from, to, |_, entries| {
+        Ok(Some(("x".into(), entries)))
+    })
+}
+
+fn blob_step(id: &'static str, item: &'static str, from: u32, to: u32) -> Step {
+    Step::blobs(id, item, from, to, |key, ct, bytes| {
+        Ok(Some((key, ct, bytes)))
+    })
+}
+
+fn stream_schema(steps: Vec<Step>) -> Schema {
+    steps.into_iter().fold(
+        Schema::new(owner("cron"))
+            .stream("cron.audit", ScopeClass::Tenant)
+            .blobs("cron/files/", ScopeClass::Tenant),
+        Schema::step,
+    )
+}
+
+#[test]
+fn accepts_stream_and_blob_steps_and_gates_their_items() {
+    let registry = Registry::compose([stream_schema(vec![
+        stream_step("a", "cron.audit", 1, 2).source_prefix("audit:"),
+        stream_step("b", "cron.audit", 2, 3).source_prefix("audit2:"),
+        blob_step("c", "cron/files/", 1, 2).source_prefix("files/"),
+    ])])
+    .unwrap();
+    assert_eq!(
+        registry.check_ready("cron.audit").unwrap_err().message(),
+        "migrating cron.audit"
+    );
+    assert_eq!(
+        registry.check_ready("cron/files/").unwrap_err().kind(),
+        ErrorKind::Unavailable
+    );
+}
+
+#[test]
+fn refuses_stream_and_blob_steps_without_a_source_prefix() {
+    for step in [
+        stream_step("a", "cron.audit", 1, 2),
+        blob_step("a", "cron/files/", 1, 2),
+    ] {
+        let message = refused(vec![stream_schema(vec![step])]);
+        assert!(message.contains("source prefix"), "{message}");
+    }
+}
+
+#[test]
+fn refuses_a_source_prefix_that_overlaps_the_item() {
+    for step in [
+        stream_step("a", "cron.audit", 1, 2).source_prefix("cron.audit/old/"),
+        stream_step("a", "cron.audit", 1, 2).source_prefix("cron."),
+        blob_step("a", "cron/files/", 1, 2).source_prefix("cron/"),
+        blob_step("a", "cron/files/", 1, 2).source_prefix("cron/files/old/"),
+    ] {
+        let message = refused(vec![stream_schema(vec![step])]);
+        assert!(message.contains("overlaps"), "{message}");
+    }
+}
+
+#[test]
+fn refuses_a_blob_source_prefix_over_sealed_streams() {
+    for prefix in ["_tsd/", "_tsd/sealed/x"] {
+        let message = refused(vec![stream_schema(vec![
+            blob_step("a", "cron/files/", 1, 2).source_prefix(prefix),
+        ])]);
+        assert!(message.contains("sealed"), "{message}");
+    }
+}
+
+#[test]
+fn refuses_steps_of_the_wrong_kind_for_their_item() {
+    for step in [
+        stream_step("a", "cron/files/", 1, 2).source_prefix("old/"),
+        blob_step("a", "cron.audit", 1, 2).source_prefix("old/"),
+        noop("a", "cron.audit", 1, 2),
+        noop("a", "cron/files/", 1, 2),
+    ] {
+        let message = refused(vec![stream_schema(vec![step])]);
+        assert!(message.contains("not a"), "{message}");
+    }
+}
+
+#[test]
+fn validates_stream_and_blob_chains_without_a_declared_version() {
+    let message = refused(vec![stream_schema(vec![
+        stream_step("a", "cron.audit", 2, 3).source_prefix("audit:"),
+    ])]);
+    assert!(message.contains("start at version 1"), "{message}");
+    let message = refused(vec![stream_schema(vec![
+        blob_step("a", "cron/files/", 1, 2).source_prefix("a/"),
+        blob_step("b", "cron/files/", 3, 4).source_prefix("b/"),
+    ])]);
+    assert!(message.contains("gap"), "{message}");
+    let message = refused(vec![stream_schema(vec![
+        stream_step("a", "cron.audit", 2, 1).source_prefix("audit:"),
+    ])]);
+    assert!(message.contains("must go up"), "{message}");
+    let message = refused(vec![stream_schema(vec![
+        stream_step("a", "cron.audit", 1, 2).source_prefix("audit:"),
+        stream_step("a", "cron.audit", 2, 3).source_prefix("audit2:"),
+    ])]);
+    assert!(message.contains("step id `a`"), "{message}");
+}

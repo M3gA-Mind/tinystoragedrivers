@@ -47,17 +47,28 @@
 //! # }).unwrap();
 //! ```
 //!
-//! Out of scope here: streams and blob prefixes carry no steps yet, and
-//! legacy-file importers (steps with no source) are run by the host, which
-//! records completion with [`Migrations::mark_done`].
+//! A step targets one kind of item: [`Step::new`] rewrites collection
+//! documents, [`Step::stream`] moves legacy streams (read whole, mapped,
+//! rewritten, sealed again when the source was sealed, then deleted) and
+//! [`Step::blobs`] moves legacy blobs. Stream and blob steps name their legacy
+//! source with [`Step::source_prefix`]; see [`Registry::migrate`] for how they
+//! resume.
+//!
+//! Out of scope here: legacy-file importers (steps with no source) are run by
+//! the host, which records completion with [`Migrations::mark_done`].
 //! The seal policy of a stream is added with stream sealing.
 
 mod compose;
 mod migrations;
 mod runner;
+mod runner_blobs;
+mod runner_streams;
 mod types;
 
 pub use compose::Registry;
 pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
 pub use runner::{MigrateOptions, MigrationReport, StepReport};
-pub use types::{Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepFn, TargetRecord};
+pub use types::{
+    BlobOutput, BlobStepFn, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody, StepFn,
+    StreamStepFn, TargetRecord,
+};
