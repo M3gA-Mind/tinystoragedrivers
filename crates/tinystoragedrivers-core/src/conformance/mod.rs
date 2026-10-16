@@ -23,6 +23,7 @@ mod isolation;
 mod ledger;
 mod purge;
 mod purge_history;
+mod schema;
 mod semantics;
 mod streams;
 mod validated;
@@ -48,6 +49,7 @@ pub async fn run_ports(storage: &ScopedStorage) {
     documents::run(storage).await;
     ledger::run(storage).await;
     semantics::run(storage).await;
+    schema::run(storage).await;
     validated::run(storage).await;
     watch::run(storage).await;
     streams::run(storage).await;

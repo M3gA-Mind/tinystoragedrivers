@@ -2,7 +2,9 @@
 //!
 //! A [`Filter`] names fields by dotted path (see [`value::lookup`]); the
 //! reserved path [`ID_FIELD`] addresses the document id rather than a field of
-//! its body. Equality and ranges use [`value::compare`], so `1` matches `1.0`
+//! its body, and [`SCHEMA_FIELD`], [`CREATED_FIELD`], [`UPDATED_FIELD`] and
+//! [`EXPIRES_FIELD`] address its [`Meta`]. A reserved path never reads the
+//! body, even when the body has a field of that name. Equality and ranges use [`value::compare`], so `1` matches `1.0`
 //! and a range over strings never matches a number. Drivers translate filters
 //! into their query language where they can and must agree with
 //! [`Filter::matches`] where they do.
@@ -12,11 +14,25 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::document::Meta;
 use crate::error::{Result, StorageError};
 use crate::value;
 
 /// The path that addresses a document's id instead of a body field.
 pub const ID_FIELD: &str = "_id";
+
+/// The path that addresses a document's declared [`Meta::schema`].
+pub const SCHEMA_FIELD: &str = "_schema";
+
+/// The path that addresses a document's [`Meta::created_ms`].
+pub const CREATED_FIELD: &str = "_created_ms";
+
+/// The path that addresses a document's [`Meta::updated_ms`].
+pub const UPDATED_FIELD: &str = "_updated_ms";
+
+/// The path that addresses a document's [`Meta::expires_ms`]; absent when the
+/// document never expires.
+pub const EXPIRES_FIELD: &str = "_expires_ms";
 
 /// A predicate over `(id, document)` pairs.
 ///
@@ -271,18 +287,25 @@ impl Filter {
         }
     }
 
-    /// Evaluate the filter against a document and its id.
+    /// Evaluate the filter against a document and its id, with
+    /// [`Meta::unknown`] as its metadata.
     #[must_use]
     pub fn matches(&self, id: &str, doc: &Value) -> bool {
+        self.matches_with(id, doc, &Meta::unknown())
+    }
+
+    /// Evaluate the filter against a document, its id and its metadata.
+    #[must_use]
+    pub fn matches_with(&self, id: &str, doc: &Value, meta: &Meta) -> bool {
         match self {
             Self::All => true,
             Self::Eq { field, value } => {
-                field_value(id, doc, field).is_some_and(|found| value::equal(&found, value))
+                field_value(id, doc, meta, field).is_some_and(|found| value::equal(&found, value))
             }
             Self::Ne { field, value } => {
-                !field_value(id, doc, field).is_some_and(|found| value::equal(&found, value))
+                !field_value(id, doc, meta, field).is_some_and(|found| value::equal(&found, value))
             }
-            Self::In { field, values } => field_value(id, doc, field)
+            Self::In { field, values } => field_value(id, doc, meta, field)
                 .is_some_and(|found| values.iter().any(|v| value::equal(&found, v))),
             Self::Range {
                 field,
@@ -290,16 +313,18 @@ impl Filter {
                 gte,
                 lt,
                 lte,
-            } => field_value(id, doc, field).is_some_and(|found| {
+            } => field_value(id, doc, meta, field).is_some_and(|found| {
                 bound(&found, gt.as_ref(), |o| o == Ordering::Greater)
                     && bound(&found, gte.as_ref(), Ordering::is_ge)
                     && bound(&found, lt.as_ref(), |o| o == Ordering::Less)
                     && bound(&found, lte.as_ref(), Ordering::is_le)
             }),
-            Self::Exists { field, exists } => field_value(id, doc, field).is_some() == *exists,
-            Self::And { filters } => filters.iter().all(|f| f.matches(id, doc)),
-            Self::Or { filters } => filters.iter().any(|f| f.matches(id, doc)),
-            Self::Not { filter } => !filter.matches(id, doc),
+            Self::Exists { field, exists } => {
+                field_value(id, doc, meta, field).is_some() == *exists
+            }
+            Self::And { filters } => filters.iter().all(|f| f.matches_with(id, doc, meta)),
+            Self::Or { filters } => filters.iter().any(|f| f.matches_with(id, doc, meta)),
+            Self::Not { filter } => !filter.matches_with(id, doc, meta),
         }
     }
 }
@@ -313,12 +338,13 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// The value at `path`, treating [`ID_FIELD`] as the document id.
-fn field_value(id: &str, doc: &Value, path: &str) -> Option<Value> {
-    if path == ID_FIELD {
-        Some(Value::String(id.to_owned()))
-    } else {
-        value::lookup(doc, path).cloned()
+/// The value at `path`, treating [`ID_FIELD`] as the document id and the
+/// metadata paths as the document's [`Meta`].
+pub(crate) fn field_value(id: &str, doc: &Value, meta: &Meta, path: &str) -> Option<Value> {
+    match path {
+        ID_FIELD => Some(Value::String(id.to_owned())),
+        SCHEMA_FIELD | CREATED_FIELD | UPDATED_FIELD | EXPIRES_FIELD => meta.field(path),
+        _ => value::lookup(doc, path).cloned(),
     }
 }
 
@@ -347,7 +373,8 @@ pub enum Direction {
 /// One sort key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sort {
-    /// Dotted field path, or [`ID_FIELD`].
+    /// Dotted field path, [`ID_FIELD`], or a metadata path such as
+    /// [`CREATED_FIELD`].
     pub field: String,
     /// Direction.
     #[serde(default)]
@@ -376,16 +403,32 @@ impl Sort {
 
 /// Order `(id, doc)` pairs by `sorts`, then by id so the order is total.
 ///
-/// A missing field sorts before every present value (as `null` would).
+/// A missing field sorts before every present value (as `null` would). The
+/// metadata paths read [`Meta::unknown`]; use [`sort_documents_with_meta`] for
+/// documents that carry their own.
 pub fn sort_documents<T>(items: &mut [T], sorts: &[Sort], key: impl Fn(&T) -> (&str, &Value)) {
+    static UNKNOWN: Meta = Meta::unknown();
+    sort_documents_with_meta(items, sorts, |item| {
+        let (id, doc) = key(item);
+        (id, doc, &UNKNOWN)
+    });
+}
+
+/// As [`sort_documents`], with each item's [`Meta`] so the reserved metadata
+/// paths (`_created_ms` and the rest) order by the real values.
+pub fn sort_documents_with_meta<T>(
+    items: &mut [T],
+    sorts: &[Sort],
+    key: impl Fn(&T) -> (&str, &Value, &Meta),
+) {
     items.sort_by(|a, b| {
-        let (id_a, doc_a) = key(a);
-        let (id_b, doc_b) = key(b);
+        let (id_a, doc_a, meta_a) = key(a);
+        let (id_b, doc_b, meta_b) = key(b);
         sorts
             .iter()
             .map(|sort| {
-                let left = field_value(id_a, doc_a, &sort.field).unwrap_or(Value::Null);
-                let right = field_value(id_b, doc_b, &sort.field).unwrap_or(Value::Null);
+                let left = field_value(id_a, doc_a, meta_a, &sort.field).unwrap_or(Value::Null);
+                let right = field_value(id_b, doc_b, meta_b, &sort.field).unwrap_or(Value::Null);
                 let ordering = value::compare(&left, &right);
                 match sort.direction {
                     Direction::Asc => ordering,

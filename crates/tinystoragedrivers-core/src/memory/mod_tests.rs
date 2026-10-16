@@ -268,11 +268,15 @@ fn an_exhausted_version_fails_the_write() {
             state::StoredDoc {
                 version: crate::Version(u64::MAX),
                 doc: json!({}),
+                meta: crate::Meta::unknown(),
             },
         );
-    let error = state
-        .put("local", "c", "max", json!({}), Precondition::None, 0)
-        .unwrap_err();
+    let write = state::Write {
+        doc: json!({}),
+        precondition: Precondition::None,
+        options: crate::WriteOptions::default(),
+    };
+    let error = state.put("local", "c", "max", write, 0).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
 

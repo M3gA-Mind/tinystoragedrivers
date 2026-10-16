@@ -369,6 +369,7 @@ impl DocumentStore for SqliteDocuments {
                 id: first.id,
                 version,
                 doc,
+                meta: tinystoragedrivers_core::Meta::unknown(),
             }))
         })
         .await

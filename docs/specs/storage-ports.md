@@ -96,6 +96,21 @@ Versioned JSON **objects** in named collections.
     alive. Blobs have no expiry of their own: a cache of blobs keeps one
     document per blob in a TTL collection and removes the blob when the
     document expires (`delete_tree` removes a whole prefix).
+  - `RecordMetadata`: every document carries `Versioned::meta`
+    (`Meta { schema, created_ms, updated_ms, expires_ms }`), described in
+    [`schema-v2.md`](schema-v2.md). `put_with(.., WriteOptions { schema,
+    expires_ms })` declares the schema version and expiry; a plain `put`
+    declares neither, so it clears an earlier expiry, and `claim` carries both
+    over. The driver stamps `created_ms` on the first write (an update keeps
+    it; creating the id again after a delete or expiry starts it afresh) and
+    `updated_ms` on every write (never backwards). A record at or past
+    `expires_ms` reads as absent from `get`, `query`, `count`, `claim` and
+    `search`. Filters and sorts address the fields as `_schema`,
+    `_created_ms`, `_updated_ms` and `_expires_ms`, next to `_id`; a reserved
+    path never reads the body. A driver without the capability returns
+    `Meta::unknown()` (all zero, no expiry) and refuses a `put_with` that
+    declares a schema or expiry with `Unsupported(RecordMetadata)`. Batched
+    puts (`WriteOp::Put`) declare no options yet.
   - `Transactions`: `atomic_batch`, all or nothing.
   - `CollectionEnumeration`: `collections(prefix)` lists collection names with
     stored records in this handle's scope. It filters by a literal string prefix

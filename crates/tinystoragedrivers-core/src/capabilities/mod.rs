@@ -54,10 +54,16 @@ pub enum Capability {
     /// [`BlobStore::put_expiring`](crate::BlobStore::put_expiring): a blob
     /// written with a lifetime reads as absent once it has passed.
     BlobTtl,
+    /// The driver keeps [`Meta`](crate::Meta) for every document: the declared
+    /// schema, creation and update times and an expiry
+    /// ([`DocumentStore::put_with`](crate::DocumentStore::put_with)), and it
+    /// answers the reserved `_schema`, `_created_ms`, `_updated_ms` and
+    /// `_expires_ms` filter and sort paths.
+    RecordMetadata,
 }
 
 impl Capability {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 17] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -74,6 +80,7 @@ impl Capability {
         Self::AtomicScopePurge,
         Self::Watch,
         Self::BlobTtl,
+        Self::RecordMetadata,
     ];
 
     const fn bit(self) -> u32 {
@@ -94,6 +101,7 @@ impl Capability {
             Self::AtomicScopePurge => 1 << 11,
             Self::Watch => 1 << 12,
             Self::BlobTtl => 1 << 15,
+            Self::RecordMetadata => 1 << 16,
         }
     }
 }
@@ -117,6 +125,7 @@ impl fmt::Display for Capability {
             Self::AtomicScopePurge => "atomic_scope_purge",
             Self::Watch => "watch",
             Self::BlobTtl => "blob_ttl",
+            Self::RecordMetadata => "record_metadata",
         })
     }
 }
@@ -166,7 +175,8 @@ impl Capabilities {
                 | Capability::ScopePurge.bit()
                 | Capability::AtomicScopePurge.bit()
                 | Capability::Watch.bit()
-                | Capability::BlobTtl.bit(),
+                | Capability::BlobTtl.bit()
+                | Capability::RecordMetadata.bit(),
         )
     }
 

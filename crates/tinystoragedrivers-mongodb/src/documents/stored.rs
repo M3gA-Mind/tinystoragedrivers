@@ -52,6 +52,7 @@ impl Stored {
             id: self.key,
             version: self.version,
             doc: self.body,
+            meta: tinystoragedrivers_core::Meta::unknown(),
         }
     }
 }

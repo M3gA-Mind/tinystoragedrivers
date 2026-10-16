@@ -29,6 +29,7 @@ async fn directory_mode_gives_each_database_its_own_file() {
             .without(tinystoragedrivers_core::Capability::Watch)
             .without(tinystoragedrivers_core::Capability::PresignedUrls)
             .without(tinystoragedrivers_core::Capability::StreamingBlobs)
+            .without(tinystoragedrivers_core::Capability::RecordMetadata)
     );
     assert!(format!("{storage:?}").contains("storage.db"));
 }
