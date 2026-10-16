@@ -9,7 +9,10 @@ use tinystoragedrivers_core::{
 };
 
 /// Capabilities a host keeps to itself: they are not exposed to bus callers.
-pub(crate) const HOST_ONLY: [Capability; 5] = [
+/// `StreamSeal` is here until the bus contract carries the seal call (schema
+/// v2 task 10); advertising it would promise a call the wire cannot make.
+pub(crate) const HOST_ONLY: [Capability; 6] = [
+    Capability::StreamSeal,
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
