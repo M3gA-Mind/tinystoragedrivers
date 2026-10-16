@@ -2,8 +2,8 @@
 
 use serde_json::json;
 use tinystoragedrivers_core::{
-    Capability, CollectionSpec, ErrorKind, Filter, Precondition, Query, Scope, StorageBackend,
-    WriteOp, conformance,
+    Capability, CollectionSpec, ErrorKind, Precondition, Query, Scope, StorageBackend, WriteOp,
+    conformance,
 };
 use tinystoragedrivers_file::FileStorage;
 
@@ -71,11 +71,6 @@ async fn seed(dir: &std::path::Path, alice: &Scope) -> tinystoragedrivers_core::
         .blobs()
         .put("files/a.txt", b"bytes".to_vec(), Some("text/plain"))
         .await?;
-    let named = storage.database("costs")?.for_scope(alice)?;
-    named
-        .documents()
-        .put("usage", "u", json!({"n": 7}), Precondition::None)
-        .await?;
     Ok(())
 }
 
@@ -129,29 +124,6 @@ async fn data_survives_reopening_the_directory() {
     let blob = scoped.blobs().get("files/a.txt").await.unwrap().unwrap();
     assert_eq!(blob.bytes, b"bytes");
     assert_eq!(blob.meta.content_type.as_deref(), Some("text/plain"));
-
-    let named = storage
-        .database("costs")
-        .unwrap()
-        .for_scope(&alice)
-        .unwrap();
-    assert_eq!(
-        named
-            .documents()
-            .count("usage", &Filter::All)
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(
-        scoped
-            .documents()
-            .get("usage", "u")
-            .await
-            .unwrap()
-            .is_none(),
-        "named databases stay apart from the root"
-    );
 }
 
 #[tokio::test]

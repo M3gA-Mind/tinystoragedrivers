@@ -20,21 +20,20 @@ use tinystoragedrivers_core::{
 };
 use tinystoragedrivers_sqlite::SqliteStorage;
 
-/// The v0.11.0 declarations for the tables of the database named by `prefix`.
-fn v0_ddl(prefix: &str) -> String {
-    format!(
-        "CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_scope_admissions\" (
+/// The v0.11.0 declarations of the tables.
+fn v0_ddl() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS \"_tsd_scope_admissions\" (
              scope TEXT PRIMARY KEY,
              generation INTEGER NOT NULL,
              operation TEXT NOT NULL
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_purge_receipts\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_purge_receipts\" (
              scope TEXT NOT NULL,
              operation TEXT NOT NULL,
              generation INTEGER NOT NULL,
              PRIMARY KEY (scope, operation)
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_docs\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_docs\" (
              scope TEXT NOT NULL,
              coll TEXT NOT NULL,
              id TEXT NOT NULL,
@@ -42,29 +41,29 @@ fn v0_ddl(prefix: &str) -> String {
              doc TEXT NOT NULL,
              PRIMARY KEY (scope, coll, id)
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_collections\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_collections\" (
              coll TEXT PRIMARY KEY,
              spec TEXT NOT NULL
          ) WITHOUT ROWID;
-         CREATE VIRTUAL TABLE IF NOT EXISTS \"{prefix}_tsd_fts\" USING fts5(
+         CREATE VIRTUAL TABLE IF NOT EXISTS \"_tsd_fts\" USING fts5(
              scope UNINDEXED, coll UNINDEXED, id UNINDEXED, body,
              tokenize = 'unicode61'
          );
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_streams\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_streams\" (
              scope TEXT NOT NULL,
              stream TEXT NOT NULL,
              seq INTEGER NOT NULL,
              value TEXT NOT NULL,
              PRIMARY KEY (scope, stream, seq)
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_stream_meta\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_stream_meta\" (
              scope TEXT NOT NULL,
              stream TEXT NOT NULL,
              base INTEGER NOT NULL,
              len INTEGER NOT NULL,
              PRIMARY KEY (scope, stream)
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_blobs\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_blobs\" (
              scope TEXT NOT NULL,
              key TEXT NOT NULL,
              content_type TEXT,
@@ -72,14 +71,13 @@ fn v0_ddl(prefix: &str) -> String {
              expires_at_ms INTEGER,
              PRIMARY KEY (scope, key)
          ) WITHOUT ROWID;
-         CREATE TABLE IF NOT EXISTS \"{prefix}_tsd_tombstones\" (
+         CREATE TABLE IF NOT EXISTS \"_tsd_tombstones\" (
              scope TEXT NOT NULL,
              coll TEXT NOT NULL,
              id TEXT NOT NULL,
              version INTEGER NOT NULL,
              PRIMARY KEY (scope, coll, id)
-         ) WITHOUT ROWID;",
-    )
+         ) WITHOUT ROWID;"
 }
 
 const LOCAL: &str = "local";
@@ -88,25 +86,25 @@ const FAR_FUTURE_MS: i64 = 4_102_444_800_000;
 
 /// Populate a v0.11.0 file: two scopes, three collections, a tombstone, a
 /// three-entry stream, two blobs and a searchable collection.
-fn write_v0_file(path: &Path, prefix: &str) {
+fn write_v0_file(path: &Path) {
     let conn = Connection::open(path).unwrap();
-    conn.execute_batch(&v0_ddl(prefix)).unwrap();
+    conn.execute_batch(v0_ddl()).unwrap();
     let notes = CollectionSpec::new("notes")
         .index(IndexSpec::new("by_title", ["title"]))
         .searchable(["title"]);
     let sessions = CollectionSpec::new("sessions").ttl("expires");
     for spec in [&notes, &sessions, &CollectionSpec::new("plain")] {
         conn.execute(
-            &format!("INSERT INTO {prefix}_tsd_collections (coll, spec) VALUES (?1, ?2)"),
+            "INSERT INTO _tsd_collections (coll, spec) VALUES (?1, ?2)",
             params![spec.name, serde_json::to_string(spec).unwrap()],
         )
         .unwrap();
     }
     // The index the v0.11.0 driver built when `notes` was declared.
-    conn.execute_batch(&format!(
-        "CREATE INDEX \"{prefix}tsd_ix_notes_by_title\" ON \"{prefix}_tsd_docs\"
-             (scope, json_extract(doc, '$.\"title\"')) WHERE coll = 'notes'"
-    ))
+    conn.execute_batch(
+        "CREATE INDEX \"tsd_ix_notes_by_title\" ON \"_tsd_docs\"
+             (scope, json_extract(doc, '$.\"title\"')) WHERE coll = 'notes'",
+    )
     .unwrap();
     let docs = [
         (
@@ -142,15 +140,13 @@ fn write_v0_file(path: &Path, prefix: &str) {
     ];
     for (scope, coll, id, version, doc) in docs {
         conn.execute(
-            &format!("INSERT INTO {prefix}_tsd_docs (scope, coll, id, version, doc) VALUES (?1, ?2, ?3, ?4, ?5)"),
+            "INSERT INTO _tsd_docs (scope, coll, id, version, doc) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![scope, coll, id, version, doc.to_string()],
         )
         .unwrap();
         if coll == "notes" {
             conn.execute(
-                &format!(
-                    "INSERT INTO {prefix}_tsd_fts (scope, coll, id, body) VALUES (?1, ?2, ?3, ?4)"
-                ),
+                "INSERT INTO _tsd_fts (scope, coll, id, body) VALUES (?1, ?2, ?3, ?4)",
                 params![scope, coll, id, doc["title"].as_str().unwrap()],
             )
             .unwrap();
@@ -160,23 +156,23 @@ fn write_v0_file(path: &Path, prefix: &str) {
     // earlier deletion that its re-creation (version 3) superseded.
     for (id, version) in [("gone", 4), ("p1", 2)] {
         conn.execute(
-            &format!("INSERT INTO {prefix}_tsd_tombstones (scope, coll, id, version) VALUES ('local', 'plain', ?1, ?2)"),
+            "INSERT INTO _tsd_tombstones (scope, coll, id, version) VALUES ('local', 'plain', ?1, ?2)",
             params![id, version],
         )
         .unwrap();
     }
     for seq in 0..3 {
         conn.execute(
-            &format!("INSERT INTO {prefix}_tsd_streams (scope, stream, seq, value) VALUES ('local', 'journal', ?1, ?2)"),
+            "INSERT INTO _tsd_streams (scope, stream, seq, value) VALUES ('local', 'journal', ?1, ?2)",
             params![seq, json!({"n": seq}).to_string()],
         )
         .unwrap();
     }
     conn.execute_batch(&format!(
-        "INSERT INTO {prefix}_tsd_stream_meta (scope, stream, base, len) VALUES ('local', 'journal', 0, 3);
-         INSERT INTO {prefix}_tsd_blobs (scope, key, content_type, bytes, expires_at_ms)
+        "INSERT INTO _tsd_stream_meta (scope, stream, base, len) VALUES ('local', 'journal', 0, 3);
+         INSERT INTO _tsd_blobs (scope, key, content_type, bytes, expires_at_ms)
              VALUES ('local', 'files/a', 'text/plain', x'68656c6c6f', NULL);
-         INSERT INTO {prefix}_tsd_blobs (scope, key, content_type, bytes, expires_at_ms)
+         INSERT INTO _tsd_blobs (scope, key, content_type, bytes, expires_at_ms)
              VALUES ('local', 'files/b', NULL, x'0001', {FAR_FUTURE_MS});"
     ))
     .unwrap();
@@ -315,7 +311,7 @@ fn raw(path: &Path) -> Connection {
 async fn a_v0_11_file_upgrades_in_place_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
-    write_v0_file(&path, "");
+    write_v0_file(&path);
     let before = now_ms();
 
     let storage = SqliteStorage::open(&path).unwrap();
@@ -378,7 +374,7 @@ async fn a_v0_11_file_upgrades_in_place_on_open() {
 async fn the_upgrade_is_idempotent_and_survives_reopening() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
-    write_v0_file(&path, "");
+    write_v0_file(&path);
     let before = now_ms();
     drop(SqliteStorage::open(&path).unwrap());
     let created: i64 = raw(&path)
@@ -402,25 +398,6 @@ async fn the_upgrade_is_idempotent_and_survives_reopening() {
 }
 
 #[tokio::test]
-async fn a_named_database_upgrades_with_its_prefix() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("all.db");
-    write_v0_file(&path, "flows__");
-    let before = now_ms();
-    let storage = SqliteStorage::open(&path).unwrap();
-    let flows = storage.database("flows").unwrap();
-    assert_upgraded(flows.as_ref(), before).await;
-    let layout: String = raw(&path)
-        .query_row(
-            "SELECT value FROM flows__meta WHERE key = 'layout'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(layout, "2");
-}
-
-#[tokio::test]
 async fn a_layout_two_file_with_v0_leftovers_is_refused_as_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
@@ -437,7 +414,7 @@ async fn a_layout_two_file_with_v0_leftovers_is_refused_as_corrupt() {
 async fn a_failed_upgrade_rolls_back_to_the_v0_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
-    write_v0_file(&path, "");
+    write_v0_file(&path);
     // A body that is not JSON cannot be copied.
     raw(&path)
         .execute("UPDATE _tsd_docs SET doc = 'not json' WHERE id = 'p1'", [])
@@ -465,7 +442,7 @@ async fn a_failed_upgrade_rolls_back_to_the_v0_file() {
 async fn the_upgrade_writes_large_bodies_compressed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
-    write_v0_file(&path, "");
+    write_v0_file(&path);
     let big = json!({"title": "big", "pad": "lorem ipsum ".repeat(2000)});
     Connection::open(&path)
         .unwrap()

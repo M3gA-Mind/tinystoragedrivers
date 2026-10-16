@@ -38,7 +38,7 @@ impl ScopePurge for MemoryPurge {
         } else {
             0
         };
-        self.db.guard(&state, self.fence.as_deref(), now)?;
+        MemoryDb::guard(&state, self.fence.as_deref(), now)?;
         let receipt_key = (self.scope.as_str().to_owned(), request.operation_id.clone());
         if let Some(generation) = state.purge_receipts.get(&receipt_key) {
             return Ok(PurgeReceipt {
@@ -79,7 +79,7 @@ impl ScopePurge for MemoryPurge {
         } else {
             0
         };
-        self.db.guard(&state, self.fence.as_deref(), now)?;
+        MemoryDb::guard(&state, self.fence.as_deref(), now)?;
         Ok(state
             .purge_receipts
             .get(&(self.scope.as_str().to_owned(), operation_id.to_owned()))

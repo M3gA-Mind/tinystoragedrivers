@@ -1,6 +1,6 @@
 //! Synchronous serde wire shapes for the Documents object.
 //!
-//! These types describe data only. A server binds scope, database, collection
+//! These types describe data only. A server binds scope, collection
 //! authority, schema grants and caller rights out of band.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

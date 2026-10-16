@@ -83,16 +83,10 @@ async fn live(test: &str) -> Option<MongoStorage> {
 
 async fn live_peer(backend: &MongoStorage) -> MongoStorage {
     let url = std::env::var("TSD_MONGO_URL").unwrap();
-    let root = MongoStorage::connect(&url, backend.shared.db.name())
+    // Reconnect independently, keeping the physical database.
+    MongoStorage::connect(&url, backend.shared.db.name())
         .await
-        .unwrap();
-    if backend.shared.prefix.is_empty() {
-        root
-    } else {
-        // Reconnect independently while keeping both physical DB and prefix.
-        root.fixture_named(backend.shared.prefix.strip_suffix(':').unwrap())
-            .unwrap()
-    }
+        .unwrap()
 }
 
 fn unique(label: &str) -> String {
@@ -258,171 +252,6 @@ async fn live_transient_failures_retry_until_the_attempts_run_out() {
         ErrorKind::Conflict
     );
 }
-#[tokio::test]
-async fn live_named_target_holds_default_guard_across_independent_clients() {
-    let Some(backend) =
-        live_root("live_named_target_holds_default_guard_across_independent_clients").await
-    else {
-        return;
-    };
-    if !backend.capabilities().contains(Capability::Fencing) {
-        return;
-    }
-    let leases = unique("leases");
-    let cluster = Scope::new("cluster").unwrap();
-    let guards = backend.for_scope(&cluster).unwrap();
-    guards
-        .documents()
-        .put(&leases, "l", json!({"epoch": 1}), Precondition::Absent)
-        .await
-        .unwrap();
-    let fence = Fence::epoch(cluster.clone(), &leases, "l", "epoch", 1);
-    let target = backend.database(&unique("cross_target")).unwrap();
-    let fenced = target
-        .for_scope_fenced_in_database(
-            &Scope::local(),
-            &fence,
-            &tinystoragedrivers_core::GuardDatabase::Default,
-        )
-        .unwrap();
-    let coll = unique("data");
-    fenced
-        .documents()
-        .put(&coll, "a", json!({}), Precondition::None)
-        .await
-        .unwrap();
-    let raw = backend
-        .shared
-        .raw(&leases)
-        .find_one(doc! {"_id": document_id(&cluster, "l")})
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(raw.get_i64(FENCE).unwrap(), 1, "{raw}");
-    // The hold is invisible to readers and leaves the version alone.
-    let guard = guards.documents().get(&leases, "l").await.unwrap().unwrap();
-    assert_eq!(guard.doc, json!({"epoch": 1}));
-    assert_eq!(guard.version.0, 1);
-    let independent = live_peer(&backend).await;
-    independent
-        .for_scope(&cluster)
-        .unwrap()
-        .documents()
-        .put(&leases, "l", json!({"epoch": 2}), Precondition::None)
-        .await
-        .unwrap();
-    assert_eq!(
-        fenced
-            .documents()
-            .put(&coll, "a", json!({"stale": true}), Precondition::None)
-            .await
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Fenced
-    );
-    assert_eq!(
-        target
-            .for_scope(&Scope::local())
-            .unwrap()
-            .documents()
-            .get(&coll, "a")
-            .await
-            .unwrap()
-            .unwrap()
-            .doc,
-        json!({})
-    );
-    assert_eq!(
-        fenced
-            .streams()
-            .append_batch_if_offset("empty", 0, vec![])
-            .await
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Fenced
-    );
-}
-
-#[tokio::test]
-async fn live_cross_database_guard_snapshot_cannot_survive_a_takeover() {
-    let Some(backend) =
-        live_root("live_cross_database_guard_snapshot_cannot_survive_a_takeover").await
-    else {
-        return;
-    };
-    if !backend
-        .capabilities()
-        .contains(Capability::CrossDatabaseFencing)
-    {
-        return;
-    }
-    let leases = unique("snapshot_leases");
-    let cluster = Scope::new("cluster").unwrap();
-    backend
-        .for_scope(&cluster)
-        .unwrap()
-        .documents()
-        .put(&leases, "l", json!({"epoch": 1}), Precondition::Absent)
-        .await
-        .unwrap();
-    let fence = Fence::epoch(cluster.clone(), &leases, "l", "epoch", 1);
-    let binding = Fencing {
-        fence: fence.clone(),
-        shared: Arc::clone(&backend.shared),
-    };
-    let mut txn = FencedTxn::start(&backend.shared, &binding).await.unwrap();
-    txn.session.start_transaction().await.unwrap();
-    // Establish a snapshot of the default guard without holding it yet.
-    backend
-        .shared
-        .raw(&leases)
-        .find_one(doc! {"_id": document_id(&cluster, "l")})
-        .session(&mut txn.session)
-        .await
-        .unwrap()
-        .unwrap();
-    let independent = live_peer(&backend).await;
-    independent
-        .for_scope(&cluster)
-        .unwrap()
-        .documents()
-        .put(&leases, "l", json!({"epoch": 2}), Precondition::None)
-        .await
-        .unwrap();
-    // A snapshot-only check would still pass epoch 1. The native guard write
-    // must instead abort this transaction before any target write can commit.
-    let error = txn.guard(&CollectionSpec::new(&leases)).await.unwrap_err();
-    assert!(error.is_retryable(), "{error}");
-    txn.session.abort_transaction().await.unwrap();
-    let target = backend.database(&unique("snapshot_target")).unwrap();
-    let stale = target
-        .for_scope_fenced_in_database(
-            &Scope::local(),
-            &fence,
-            &tinystoragedrivers_core::GuardDatabase::Default,
-        )
-        .unwrap();
-    assert_eq!(
-        stale
-            .documents()
-            .put("data", "late", json!({}), Precondition::None)
-            .await
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Fenced
-    );
-    assert!(
-        target
-            .for_scope(&Scope::local())
-            .unwrap()
-            .documents()
-            .get("data", "late")
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
 #[tokio::test]
 async fn live_changed_dependency_prevents_checked_batch_claim() {
     let Some(backend) = live("live_changed_dependency_prevents_checked_batch_claim").await else {
@@ -816,25 +645,16 @@ async fn live_distinct_test_fixtures_keep_schema_mutation_out_of_dependency_snap
         .await
         .unwrap();
     session.commit_transaction().await.unwrap();
-    let configured = std::env::var("TSD_MONGO_URL").unwrap();
-    let same_configured_database = first.shared.db.name() == configured_database(&configured)
-        && other.shared.db.name() == first.shared.db.name();
-    assert!(
-        same_configured_database,
-        "fixtures must stay within the configured database"
-    );
-    let distinct_prefixes =
-        !first.shared.prefix.is_empty() && first.shared.prefix != other.shared.prefix;
-    assert!(
-        distinct_prefixes,
-        "fixtures must have distinct logical namespaces"
+    assert_ne!(
+        first.shared.db.name(),
+        other.shared.db.name(),
+        "fixtures must have distinct databases"
     );
     let peer = live_peer(&first).await;
-    let same_peer_namespace = peer.shared.db.name() == first.shared.db.name()
-        && peer.shared.prefix == first.shared.prefix;
-    assert!(
-        same_peer_namespace,
-        "independent peers must retain the complete fixture namespace"
+    assert_eq!(
+        peer.shared.db.name(),
+        first.shared.db.name(),
+        "independent peers must retain the fixture database"
     );
     let metadata_is_distinct = first.shared.raw("_tsd_validated_batch").namespace()
         != other.shared.raw("_tsd_validated_batch").namespace();

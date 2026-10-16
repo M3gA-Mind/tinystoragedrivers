@@ -30,24 +30,23 @@ use store::Docs;
 pub struct FileDocuments {
     db: Arc<Db>,
     scope: Scope,
-    /// Checked under the database lock before every write, when set.
+    /// Checked under the directory lock before every write, when set.
     fence: Option<Arc<Fencing>>,
     existing: bool,
 }
 
 /// Refuse a write unless `fence` (when there is one) holds. Called under the
-/// database lock, so the check and the write are one step for every handle
+/// directory lock, so the check and the write are one step for every handle
 /// in this process.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::Fenced`](tinystoragedrivers_core::ErrorKind::Fenced), or a
 /// failure reading the guard document.
-pub(crate) fn guard(_db: &Db, fence: Option<&Fencing>) -> Result<()> {
+pub(crate) fn guard(db: &Db, fence: Option<&Fencing>) -> Result<()> {
     let Some(fence) = fence else {
         return Ok(());
     };
-    let db = &fence.db;
     let fence = &fence.fence;
     let docs = Docs {
         db,
@@ -72,7 +71,7 @@ impl FileDocuments {
         }
     }
 
-    /// Run `work` under the database lock with this scope's document view.
+    /// Run `work` under the directory lock with this scope's document view.
     async fn with<T, F>(&self, work: F) -> Result<T>
     where
         T: Send + 'static,
@@ -98,18 +97,15 @@ impl FileDocuments {
     {
         let scope = self.scope.clone();
         self.db
-            .run_with_guard(
-                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
-                move |db| {
-                    guard(db, fence.as_deref())?;
-                    let docs = Docs {
-                        db,
-                        scope: &scope,
-                        now: db.now(),
-                    };
-                    work(&docs)
-                },
-            )
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                let docs = Docs {
+                    db,
+                    scope: &scope,
+                    now: db.now(),
+                };
+                work(&docs)
+            })
             .await
     }
 }

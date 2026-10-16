@@ -13,7 +13,7 @@
 //! [`FileStreams::seal_stream`] runs them in order, and on a stream that is
 //! already sealed only finishes step 3, so sealing again completes what a
 //! crash interrupted. Production sealing runs all three under one hold of the
-//! database lock; tests run them one at a time.
+//! directory lock; tests run them one at a time.
 
 use tinystoragedrivers_core::{
     Result, Scope, SealOutcome, SealedLog, StorageError, sealed_blob_key,

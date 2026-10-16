@@ -1,8 +1,7 @@
 //! Scope-reset refusal is distinct from native lease loss.
 use super::*;
 use crate::{
-    ErrorKind, Fence, GuardDatabase, Precondition, PurgeMode, PurgeRequest, PurgeStatus, Scope,
-    StorageBackend,
+    ErrorKind, Fence, Precondition, PurgeMode, PurgeRequest, PurgeStatus, Scope, StorageBackend,
 };
 use serde_json::json;
 
@@ -18,9 +17,7 @@ async fn generation_rejection_preserves_native_lease_authority() {
         .await
         .unwrap();
     let fence = Fence::epoch(guard_scope, "leases", "active", "epoch", 1);
-    let old = backend
-        .for_scope_fenced_in_database(&owner, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let old = backend.for_scope_fenced(&owner, &fence).unwrap();
     old.documents()
         .put("records", "old", json!({}), Precondition::None)
         .await
@@ -57,12 +54,7 @@ async fn generation_rejection_preserves_native_lease_authority() {
     ];
     // The same actual native lease remains valid after the scope reset.
     let fresh = backend
-        .for_scope_fenced_in_database_generation(
-            &owner,
-            receipt.generation,
-            &fence,
-            &GuardDatabase::Default,
-        )
+        .for_scope_fenced_generation(&owner, receipt.generation, &fence)
         .unwrap();
     assert!(
         fresh

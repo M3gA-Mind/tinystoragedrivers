@@ -15,7 +15,7 @@ use object_store::{
 };
 use tinystoragedrivers_core::{
     Blob, BlobBackend, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability,
-    ErrorKind, Result, Scope, StorageError, async_trait, validate_blob_key, validate_database,
+    ErrorKind, Result, Scope, StorageError, async_trait, validate_blob_key,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
@@ -131,21 +131,20 @@ impl S3Config {
     ///
     /// # Errors
     ///
-    /// `InvalidInput` for an invalid database name, prefix, or client configuration.
-    pub fn blobs(&self, scope: &Scope, database: &str) -> Result<S3Blobs> {
+    /// `InvalidInput` for an invalid prefix or client configuration.
+    pub fn blobs(&self, scope: &Scope) -> Result<S3Blobs> {
         let builder = self.configure(AmazonS3Builder::from_env());
         let client = Arc::new(builder.build().map_err(map_error)?);
-        S3Blobs::with_store(client.clone(), Some(client), &self.prefix, scope, database)
+        S3Blobs::with_store(client.clone(), Some(client), &self.prefix, scope)
     }
 }
 
-/// One connected S3 client shared by all tenant/database blob handles.
+/// One connected S3 client shared by all tenant blob handles.
 #[derive(Debug)]
 pub struct S3Storage {
     store: Arc<dyn ObjectStore>,
     signer: Option<Arc<dyn Signer>>,
     prefix: String,
-    database: String,
 }
 
 impl S3Storage {
@@ -177,7 +176,6 @@ impl S3Storage {
             store,
             signer,
             prefix: prefix.trim_matches('/').to_owned(),
-            database: "default".to_owned(),
         })
     }
 }
@@ -199,21 +197,11 @@ impl BlobBackend for S3Storage {
             self.signer.clone(),
             &self.prefix,
             scope,
-            &self.database,
         )?))
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>> {
-        validate_database(name)?;
-        Ok(Arc::new(Self {
-            store: self.store.clone(),
-            signer: self.signer.clone(),
-            prefix: self.prefix.clone(),
-            database: name.to_owned(),
-        }))
     }
 }
 
-/// Blob port under an unambiguous database/tenant prefix.
+/// Blob port under an unambiguous tenant prefix.
 ///
 /// Writes are not fenced with documents. Upload immutable blobs first, then
 /// fence the document referencing them, and garbage-collect unreferenced blobs.
@@ -231,15 +219,13 @@ impl S3Blobs {
     ///
     /// # Errors
     ///
-    /// `InvalidInput` for an invalid prefix or database name.
+    /// `InvalidInput` for an invalid prefix.
     pub fn with_store(
         store: Arc<dyn ObjectStore>,
         signer: Option<Arc<dyn Signer>>,
         prefix: &str,
         scope: &Scope,
-        database: &str,
     ) -> Result<Self> {
-        validate_database(database)?;
         let prefix = prefix.trim_matches('/');
         if !prefix.is_empty() {
             validate_blob_key(prefix)?;
@@ -257,7 +243,7 @@ impl S3Blobs {
             })
             .collect();
         let prefix = format!(
-            "{}{database}/scopes/{tenant}/",
+            "{}scopes/{tenant}/",
             if prefix.is_empty() {
                 String::new()
             } else {
@@ -266,7 +252,7 @@ impl S3Blobs {
         );
         if prefix.len() >= 1024 {
             return Err(StorageError::invalid_input(
-                "s3 tenant/database prefix leaves no room for a blob key",
+                "s3 tenant prefix leaves no room for a blob key",
             ));
         }
         Ok(Self {

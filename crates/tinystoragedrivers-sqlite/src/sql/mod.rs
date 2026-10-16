@@ -2,8 +2,7 @@
 //!
 //! # Layout 2
 //!
-//! One database holds these tables (names carry the database prefix, empty for
-//! a database that has its file to itself; the three `_tsd_` tables keep the
+//! One database file holds these tables (the three `_tsd_` tables keep the
 //! names they had before layout 2):
 //!
 //! ```text
@@ -26,7 +25,7 @@
 //! read.
 //!
 //! Every name that reaches SQL text is either validated by the core (collection
-//! and database names are `[A-Za-z0-9_.-]`) or quoted here; values are always
+//! names are `[A-Za-z0-9_.-]`) or quoted here; values are always
 //! bound as parameters. The one place a string is inlined is the correlated
 //! `doc_fields` sub-select of a keyset cursor, and it goes through [`literal`].
 
@@ -51,7 +50,7 @@ pub(crate) fn literal(text: &str) -> String {
 /// The `meta.layout` value this driver writes and understands.
 pub(crate) const LAYOUT: &str = "2";
 
-/// The table names of one (possibly prefixed) database.
+/// The table names of the database.
 #[derive(Debug, Clone)]
 pub(crate) struct Tables {
     pub(crate) docs: String,
@@ -64,16 +63,13 @@ pub(crate) struct Tables {
     pub(crate) stream_heads: String,
     pub(crate) blobs: String,
     pub(crate) meta: String,
-    /// Prefix used for table and index names.
-    pub(crate) prefix: String,
 }
 
 impl Tables {
-    /// Tables for a database whose names start with `prefix` (empty for a
-    /// database that has its file to itself).
-    pub(crate) fn new(prefix: &str) -> Self {
-        let internal = |table: &str| format!("{prefix}_tsd_{table}");
-        let plain = |table: &str| format!("{prefix}{table}");
+    /// The table names.
+    pub(crate) fn new() -> Self {
+        let internal = |table: &str| format!("_tsd_{table}");
+        let plain = |table: &str| table.to_owned();
         Self {
             docs: plain("docs"),
             fields: plain("doc_fields"),
@@ -85,7 +81,6 @@ impl Tables {
             stream_heads: plain("stream_heads"),
             blobs: plain("blobs"),
             meta: plain("meta"),
-            prefix: prefix.to_owned(),
         }
     }
 
@@ -252,7 +247,7 @@ impl Tables {
     /// - A layout-2 file that still has v0.x tables is corrupt (an upgrade
     ///   commits atomically, so it cannot be left half done) and is refused.
     pub(crate) fn ensure(&self, conn: &Connection) -> Result<()> {
-        let has_v0 = table_exists(conn, &upgrade::V0::new(&self.prefix).docs)?;
+        let has_v0 = table_exists(conn, &upgrade::V0::new().docs)?;
         if has_v0 {
             if table_exists(conn, &self.meta)? && self.layout(conn)?.is_some() {
                 return Err(StorageError::backend(
@@ -293,9 +288,9 @@ impl Tables {
     }
 
     /// Drop the per-index expression indexes over `docs.body` that layout 2
-    /// first created (`<prefix>tsd_ix_<collection>_<index>`).
+    /// first created (`tsd_ix_<collection>_<index>`).
     fn drop_body_indexes(&self, conn: &Connection) -> Result<()> {
-        let marker = format!("{}tsd_ix_", self.prefix);
+        let marker = "tsd_ix_";
         let mut statement = conn
             .prepare(
                 "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = ?1
@@ -303,7 +298,7 @@ impl Tables {
             )
             .map_err(during("find body indexes"))?;
         let names: Vec<String> = statement
-            .query_map([self.docs.as_str(), marker.as_str()], |row| row.get(0))
+            .query_map([self.docs.as_str(), marker], |row| row.get(0))
             .map_err(during("find body indexes"))?
             .collect::<rusqlite::Result<_>>()
             .map_err(during("find body indexes"))?;

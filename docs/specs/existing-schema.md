@@ -1,6 +1,6 @@
 # Existing schema storage handles
 
-An optional native backend factory returns handles that do not declare, migrate or repair schema. The policy survives named database selection and native fenced constructors. Unsupported implementations refuse; existing unrestricted callers retain their behavior.
+An optional native backend factory returns handles that do not declare, migrate or repair schema. The policy survives native fenced constructors. Unsupported implementations refuse; existing unrestricted callers retain their behavior.
 
 Document validation checks actual persisted declaration presence and compatibility (stored.merge(required) equals stored). Absence is NotFound, malformed or incompatible requests InvalidInput, corrupt metadata Serialization. Native errors retain sources. Restricted ensure refuses; scoped drop_collection remains fenced data deletion.
 
@@ -14,7 +14,7 @@ StorageBackend::prepare_schema is optional trusted async bootstrap; its default 
 
 StorageBackend::existing_schema is a synchronous optional native factory with default Unsupported(ExistingSchema). DocumentStore::validate_collection_spec defaults to Unsupported(CollectionValidation). The native factory does not accept a caller-supplied preparation boolean or change a fence. Classic opening/constructors retain their behavior: the restriction starts when existing_schema is called, so this does not retroactively remove trusted initialization performed before that call.
 
-SQLite named and guard database selection opens existing files without create flags or journal-mode writes and validates the driver's table layout. File named database selection requires an existing directory. Mongo uses fresh declaration and index-catalog reads rather than the classic declaration/preparation caches. Memory preserves the actual shared native database maps and rejects absent named data or guard databases without creating them.
+SQLite validates the driver's table layout of the already open file without create flags or journal-mode writes. Mongo uses fresh declaration and index-catalog reads rather than the classic declaration/preparation caches. Memory preserves the actual shared native state.
 
 Restricted Mongo GridFS uploads refuse Unsupported(ExistingSchema): the SDK may issue create_collection before checking existing indexes. Its native fenced writes retain their existing Unsupported(Fencing). Existing blob reads and unfenced deletion use read-only schema checks. No presigned-upload or cross-driver purge authority is introduced.
 

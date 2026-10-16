@@ -12,11 +12,11 @@ existing handles so they cannot read or write the replacement data.
 
 ## Boundary
 
-The optional native port resets one scope in one addressed logical database.
-The trusted host owns the complete database/scope manifest, authorization,
+The optional native port resets one scope of the connected backend.
+The trusted host owns the complete backend/scope manifest, authorization,
 writer shutdown, operation journal and issuance of replacement handles.
-DatabaseAddress resolves against the trusted root; it never discovers owner
-namespaces or resolves relative to an arbitrary actor handle.
+The host resolves the root backend itself; the port never discovers owner
+namespaces.
 
 The port does not revoke external KMS keys, remove unrelated filesystem paths,
 implement a root-wide transaction, or coordinate composite backends. A composite
@@ -28,13 +28,13 @@ PurgeRequest contains a stable host-issued operation_id and Atomic or Quiescent
 mode. IDs contain 1–128 ASCII letters, digits, underscores or hyphens. The host
 persists an ID before its first attempt and reuses it after interruption.
 
-ScopePurge is bound to a database, scope, generation and any native fence.
+ScopePurge is bound to a backend, scope, generation and any native fence.
 StorageBackend generation constructors preserve those bindings. Ordinary
 constructors select generation zero, rather than discovering the newest
 generation and silently reviving old callers.
 
 PurgeReceipt reports that operation's generation, status and resumable stage.
-Complete means every owned native port in this database has finished. Pending
+Complete means every owned native port in this backend has finished. Pending
 means admission remains closed and the same operation must resume. Native
 admission and receipts live outside erased tenant data.
 
@@ -67,7 +67,7 @@ commit destructive work against replacement data after completion.
 
 ## Invariants
 
-- Scope and database siblings survive every reset stage and retry.
+- Sibling scopes survive every reset stage and retry.
 - Documents, tombstones, streams, stream lifetime cursors and blobs are erased.
 - Shared collection declarations and native authority metadata remain.
 - Old generations cannot read replacement payloads or mutate any port.
@@ -78,7 +78,7 @@ commit destructive work against replacement data after completion.
 
 ## Acceptance
 
-Conformance must exercise default and named databases, supported mode selection,
+Conformance must exercise supported mode selection,
 all-port replacement preservation, and historical status/retry after two resets.
 Native tests must also prove persisted reopen, upgrade backfill, corruption,
 rollback, staged interruption/resume, late GridFS files and stale-generation

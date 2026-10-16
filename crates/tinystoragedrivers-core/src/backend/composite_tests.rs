@@ -71,9 +71,6 @@ impl BlobBackend for OverclaimingBlobs {
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         self.0.for_scope(scope)
     }
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>> {
-        self.0.database(name)
-    }
 }
 
 #[derive(Debug)]
@@ -90,9 +87,6 @@ impl StorageBackend for MaskedRecords {
     }
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         self.0.for_scope(scope)
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        self.0.database(name)
     }
 }
 
@@ -212,8 +206,5 @@ fn native_default_and_erased_nested_composite_database_keep_document_driver() {
     ));
     assert_eq!(outer.driver(), "composite");
     assert_eq!(outer.document_driver(), "memory");
-    let named = outer.database("records").unwrap();
-    assert_eq!(named.driver(), "composite");
-    assert_eq!(named.document_driver(), "memory");
     assert_eq!(outer.document_driver(), "memory");
 }

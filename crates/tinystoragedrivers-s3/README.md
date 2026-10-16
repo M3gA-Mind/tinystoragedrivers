@@ -11,8 +11,8 @@ Do not put credentials in either URL. An explicit endpoint uses path-style
 requests. Plain HTTP is supported for local MinIO; production endpoints
 should use HTTPS.
 
-S3Config::blobs(scope, database) binds one handle to
-prefix/database/scopes/hex-encoded-UTF8-scope/. Hex encoding prevents scope
+S3Config::blobs(scope) binds one handle to
+prefix/scopes/hex-encoded-UTF8-scope/. Hex encoding prevents scope
 names containing slash, percent, colon or Unicode from crossing tenant
 boundaries. Every operation, including presigning and listing, uses this
 prefix. max_key_len reports 1024 minus the prefix's UTF-8 byte length;
@@ -50,7 +50,7 @@ period. Direct presigned PUTs also bypass document fences.
 
 Unit tests use the local object_store memory implementation and injected
 credentials for offline signing. They cover the blob contract, tenant and
-database isolation, multipart publication and length errors, and GET/PUT URL
+scope isolation, multipart publication and length errors, and GET/PUT URL
 signatures. They do not prove compatibility with a particular live service.
 Run .github/scripts/test-minio.sh for live local MinIO conformance, direct
 presigned transfers and a 500 MiB streaming roundtrip. The fixture verifies a

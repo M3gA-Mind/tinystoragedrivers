@@ -48,7 +48,6 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::AtomicScopePurge)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
-        .with(Capability::CrossDatabaseFencing)
         .with(Capability::ConditionalStreamAppend)
         .with(Capability::CollectionEnumeration)
         .with(Capability::ExistingSchema)

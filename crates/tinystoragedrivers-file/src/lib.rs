@@ -24,7 +24,7 @@
 //!
 //! let dir = tempfile::tempdir().unwrap();
 //! let storage = FileStorage::open(dir.path())?;
-//! let threads = storage.database("threads")?.for_scope(&Scope::local())?;
+//! let threads = storage.for_scope(&Scope::local())?;
 //! threads.streams().append("t1", json!({"role": "user", "text": "hi"})).await?;
 //! assert_eq!(threads.streams().len("t1").await?, 1);
 //! # Ok::<(), tinystoragedrivers_core::StorageError>(())
@@ -45,7 +45,7 @@
 //!   `checkpoint` are `Unsupported`: plain files have nothing to reclaim or
 //!   flush, and a caller treats the refusal as nothing to do.
 //! - Queries read the whole collection; there are no on-disk indexes.
-//! - Operations are serialized per database within one process. Several
+//! - Operations are serialized per directory within one process. Several
 //!   processes writing one directory are not coordinated.
 //! - Names are percent-encoded into file names that are distinct on
 //!   case-insensitive filesystems. Encodings over 200 bytes become a hash, with

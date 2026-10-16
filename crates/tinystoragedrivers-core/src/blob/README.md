@@ -3,7 +3,7 @@
 BlobStore stores opaque bytes under validated relative keys within the scope
 chosen by the backend. BlobMeta contains the logical key, byte length, and
 optional content type. max_key_len reports this scoped handle's UTF-8 byte limit; object stores
-subtract tenant/database prefixes from their physical limit. Ranges are half open and clamp to the object size.
+subtract tenant prefixes from their physical limit. Ranges are half open and clamp to the object size.
 
 put_stream accepts an owned BlobReader and an exact byte length. A mismatch
 fails before publishing the replacement. get_stream returns metadata and a

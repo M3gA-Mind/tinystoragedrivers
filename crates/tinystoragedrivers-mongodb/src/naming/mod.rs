@@ -70,11 +70,6 @@ pub(crate) const STREAM_END_INDEX: &str = "_tsd_stream_end";
 /// The `(metadata._scope, filename)` index over GridFS files.
 pub(crate) const BLOB_KEY_INDEX: &str = "_tsd_blob_key";
 
-/// The Mongo collection prefix of a named database.
-pub(crate) fn database_prefix(name: &str) -> String {
-    format!("{name}:")
-}
-
 /// The `_id` of a stored document: unique per scope and key, so the default
 /// `_id` index enforces both.
 pub(crate) fn document_id(scope: &Scope, key: &str) -> Document {

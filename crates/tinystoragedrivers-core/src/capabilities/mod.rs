@@ -41,8 +41,6 @@ pub enum Capability {
     CollectionEnumeration,
     /// Atomic stream append guarded by its persistent next offset.
     ConditionalStreamAppend,
-    /// Native fenced writes whose guard lives in another database.
-    CrossDatabaseFencing,
     /// Document batches validate read-only dependencies atomically with writes.
     ValidatedBatch,
     /// Scoped reset with persistent generation admission.
@@ -74,7 +72,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 19] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -85,7 +83,6 @@ impl Capability {
         Self::StreamingBlobs,
         Self::CollectionEnumeration,
         Self::ConditionalStreamAppend,
-        Self::CrossDatabaseFencing,
         Self::ValidatedBatch,
         Self::ScopePurge,
         Self::AtomicScopePurge,
@@ -109,7 +106,6 @@ impl Capability {
             Self::StreamingBlobs => 1 << 5,
             Self::CollectionEnumeration => 1 << 6,
             Self::ConditionalStreamAppend => 1 << 7,
-            Self::CrossDatabaseFencing => 1 << 8,
             Self::ValidatedBatch => 1 << 9,
             Self::ScopePurge => 1 << 10,
             Self::AtomicScopePurge => 1 << 11,
@@ -136,7 +132,6 @@ impl fmt::Display for Capability {
             Self::StreamingBlobs => "streaming_blobs",
             Self::CollectionEnumeration => "collection_enumeration",
             Self::ConditionalStreamAppend => "conditional_stream_append",
-            Self::CrossDatabaseFencing => "cross_database_fencing",
             Self::ValidatedBatch => "validated_batch",
             Self::ScopePurge => "scope_purge",
             Self::AtomicScopePurge => "atomic_scope_purge",
@@ -190,7 +185,6 @@ impl Capabilities {
                 | Capability::StreamingBlobs.bit()
                 | Capability::CollectionEnumeration.bit()
                 | Capability::ConditionalStreamAppend.bit()
-                | Capability::CrossDatabaseFencing.bit()
                 | Capability::ValidatedBatch.bit()
                 | Capability::ScopePurge.bit()
                 | Capability::AtomicScopePurge.bit()

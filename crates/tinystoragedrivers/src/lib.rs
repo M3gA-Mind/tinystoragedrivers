@@ -11,7 +11,7 @@
 //! use tinystoragedrivers::{Precondition, Scope, StorageConfig};
 //!
 //! let backend = tinystoragedrivers::open(&StorageConfig::parse("memory")?).await?;
-//! let approvals = backend.database("approvals")?.for_scope(&Scope::local())?;
+//! let approvals = backend.for_scope(&Scope::local())?;
 //! approvals
 //!     .documents()
 //!     .put("pending", "req-1", json!({"tool": "shell"}), Precondition::Absent)

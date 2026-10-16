@@ -142,10 +142,8 @@ fn decode(record: &Document) -> Result<PurgeReceipt> {
     })
 }
 
-fn owns_records(prefix: &str, physical: &str) -> bool {
-    let Some(name) = physical.strip_prefix(prefix) else {
-        return false;
-    };
+fn owns_records(name: &str) -> bool {
+    // A `:` marks a collection a pre-1.0 named database prefixed; it is not ours.
     !name.contains(':')
         && ![META, ADMISSIONS, MANIFEST, RECEIPTS].contains(&name)
         && !name.starts_with(&format!("{BLOBS}."))
@@ -310,7 +308,7 @@ impl MongoPurge {
             let receipt = self.pending(operation, &mut *session).await?;
             if receipt.stage != PurgeStage::Records { return Ok(()); }
             for name in &names {
-                if owns_records(&self.shared.prefix, name) {
+                if owns_records(name) {
                     self.shared.db.collection::<Document>(name).delete_many(doc! {"_scope": self.scope.as_str()})
                         .session(&mut *session).await.map_err(errors::failed("erase scoped records"))?;
                 }

@@ -2,7 +2,7 @@
 //! backend.
 //!
 //! The adapter is generic over [`ScopedStorage`], already bound by the host to
-//! one scope and database. Requests carry none of that, and they reject unknown
+//! one scope. Requests carry none of that, and they reject unknown
 //! fields, so there is no way to name another scope. The adapter enforces the
 //! wire limits before native I/O and maps native errors to the sanitized
 //! [`StorageFailure`] category.

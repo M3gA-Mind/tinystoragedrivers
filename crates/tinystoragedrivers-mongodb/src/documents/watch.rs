@@ -30,7 +30,6 @@ fn binding(docs: &MongoDocuments, collection: &str, filter: &Filter) -> Result<[
     let guard = docs.fence.as_ref().map(|guard| {
         (
             guard.shared.db.name(),
-            &guard.shared.prefix,
             guard.scope().as_str(),
             guard.collection(),
             guard.id(),
@@ -40,7 +39,6 @@ fn binding(docs: &MongoDocuments, collection: &str, filter: &Filter) -> Result<[
     let encoded = serde_json::to_vec(&(
         docs.shared.watch_origin.to_hex(),
         docs.shared.db.name(),
-        &docs.shared.prefix,
         docs.scope.as_str(),
         docs.generation,
         collection,

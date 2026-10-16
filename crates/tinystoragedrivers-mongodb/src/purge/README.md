@@ -1,7 +1,7 @@
 # MongoDB scope purge
 
 This module owns durable reset admission, historical receipts and resumable
-quiescent erasure for one scope in one logical database. Public callers use
+quiescent erasure for one scope in the connected database. Public callers use
 the core `ScopePurge` port; `mod_tests.rs` exercises native replica behavior.
 
 Reset closes admission, erases records, records a durable GridFS manifest,

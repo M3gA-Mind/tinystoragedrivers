@@ -289,67 +289,12 @@ async fn pending_reset_blocks_all_generations_and_forced_off_independent_handles
     );
 }
 
-#[tokio::test]
-async fn named_reset_preserves_default_and_reopens_with_issued_generation() {
-    let Some((backend, scope)) = live("named").await else {
-        return;
-    };
-    let name = format!("named_{}", scope.as_str());
-    let named = MongoStorage {
-        shared: backend.named(&name).unwrap(),
-        databases: Arc::default(),
-    };
-    let root = backend.for_scope(&scope).unwrap();
-    let target = named.for_scope(&scope).unwrap();
-    for bound in [&root, &target] {
-        bound
-            .documents()
-            .put("records", "k", json!({}), Precondition::None)
-            .await
-            .unwrap();
-        bound.streams().append("events", json!(1)).await.unwrap();
-        bound
-            .blobs()
-            .put("blob", vec![2; 600_000], None)
-            .await
-            .unwrap();
-    }
-    let request = PurgeRequest {
-        operation_id: "named_reset".into(),
-        mode: PurgeMode::Quiescent,
-    };
-    let receipt = target.purge(&request).await.unwrap();
-    let reopened = live("reopen").await.unwrap().0.database(&name).unwrap();
-    let fresh = reopened
-        .for_scope_generation(&scope, receipt.generation)
-        .unwrap();
-    assert!(
-        fresh
-            .documents()
-            .get("records", "k")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(fresh.streams().append("events", json!(2)).await.unwrap(), 0);
-    assert!(fresh.blobs().get("blob").await.unwrap().is_none());
-    assert!(
-        root.documents()
-            .get("records", "k")
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(root.streams().len("events").await.unwrap(), 1);
-    assert!(root.blobs().get("blob").await.unwrap().is_some());
-}
-
 #[test]
-fn namespace_ownership_excludes_metadata_and_sibling_databases() {
+fn namespace_ownership_excludes_metadata_and_legacy_prefixed_collections() {
     assert_eq!(scope_key(&Scope::local()), "scope:local");
-    assert!(owns_records("", "records"));
-    assert!(owns_records("", "_tsd_stream_heads"));
-    assert!(!owns_records("", "other:records"));
+    assert!(owns_records("records"));
+    assert!(owns_records("_tsd_stream_heads"));
+    assert!(!owns_records("other:records"));
     for metadata in [
         META,
         ADMISSIONS,
@@ -359,12 +304,8 @@ fn namespace_ownership_excludes_metadata_and_sibling_databases() {
         "_tsd_blobs.chunks",
         "system.views",
     ] {
-        assert!(!owns_records("", metadata));
-        assert!(!owns_records("named:", &format!("named:{metadata}")));
+        assert!(!owns_records(metadata));
     }
-    assert!(owns_records("named:", "named:records"));
-    assert!(!owns_records("named:", "records"));
-    assert!(!owns_records("named:", "sibling:records"));
 }
 
 #[tokio::test]
@@ -945,16 +886,12 @@ async fn reset_between_read_admission_and_payload_rejects_replacement_data() {
 }
 
 #[tokio::test]
-async fn issued_generation_keeps_current_default_and_named_native_guards() {
-    use tinystoragedrivers_core::{Fence, GuardDatabase};
+async fn issued_generation_keeps_the_native_guard() {
+    use tinystoragedrivers_core::Fence;
     let Some((backend, scope)) = live("guard_generation").await else {
         return;
     };
-    let name = format!("guard_target_{}", scope.as_str());
-    let target = MongoStorage {
-        shared: backend.named(&name).unwrap(),
-        databases: Arc::default(),
-    };
+    let target = backend;
     let guard_scope = Scope::new(format!("guard_{}", scope.as_str())).unwrap();
     let request = PurgeRequest {
         operation_id: "guard_generation_reset".into(),
@@ -966,20 +903,9 @@ async fn issued_generation_keeps_current_default_and_named_native_guards() {
         .purge(&request)
         .await
         .unwrap();
-    let named_guard = backend.database("generation_guard_database").unwrap();
-    for (index, locator) in [
-        GuardDatabase::Current,
-        GuardDatabase::Default,
-        GuardDatabase::Named("generation_guard_database".into()),
-    ]
-    .into_iter()
-    .enumerate()
     {
-        let guard = match &locator {
-            GuardDatabase::Current => target.for_scope(&guard_scope).unwrap(),
-            GuardDatabase::Default => backend.for_scope(&guard_scope).unwrap(),
-            GuardDatabase::Named(_) => named_guard.for_scope(&guard_scope).unwrap(),
-        };
+        let index = 0;
+        let guard = target.for_scope(&guard_scope).unwrap();
         let id = format!("lease_{index}");
         guard
             .documents()
@@ -993,7 +919,7 @@ async fn issued_generation_keeps_current_default_and_named_native_guards() {
             .unwrap();
         let fence = Fence::epoch(guard_scope.clone(), "generation_guards", &id, "epoch", 1);
         let fenced = target
-            .for_scope_fenced_in_database_generation(&scope, receipt.generation, &fence, &locator)
+            .for_scope_fenced_generation(&scope, receipt.generation, &fence)
             .unwrap();
         fenced
             .documents()

@@ -22,9 +22,8 @@ use tinystoragedrivers_core::{
 /// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
 /// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
 /// the module's own grant, so they are exposed.
-pub(crate) const HOST_ONLY: [Capability; 7] = [
+pub(crate) const HOST_ONLY: [Capability; 6] = [
     Capability::Fencing,
-    Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,

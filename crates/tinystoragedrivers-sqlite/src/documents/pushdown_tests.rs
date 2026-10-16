@@ -12,7 +12,7 @@ fn projection() -> Projection {
         "by_state",
         ["state", "done", "a", "rank", "items.0", "we\"ird"],
     ));
-    let tables = crate::sql::Tables::new("");
+    let tables = crate::sql::Tables::new();
     Projection::new(
         Ctx {
             tables: &tables,

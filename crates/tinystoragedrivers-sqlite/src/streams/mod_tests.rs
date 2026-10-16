@@ -19,7 +19,7 @@ fn handles_render_their_scope() {
     let db = Db::open(&dir.path().join("s.db")).unwrap();
     let streams = SqliteStreams::new(
         db,
-        Arc::new(Tables::new("")),
+        Arc::new(Tables::new()),
         Scope::local(),
         None,
         Arc::new(|| 0),
@@ -49,7 +49,7 @@ mod sealing {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("s.db")).unwrap();
-        let tables = Arc::new(Tables::new(""));
+        let tables = Arc::new(Tables::new());
         db.run_now(|conn| tables.ensure(conn)).unwrap();
         let streams = SqliteStreams::new(
             Arc::clone(&db),

@@ -372,9 +372,6 @@ impl StorageBackend for Plain {
     fn for_scope(&self, scope: &Scope) -> crate::Result<crate::ScopedStorage> {
         MemoryStorage::new().for_scope(scope)
     }
-    fn database(&self, _: &str) -> crate::Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Plain))
-    }
 }
 
 #[tokio::test]

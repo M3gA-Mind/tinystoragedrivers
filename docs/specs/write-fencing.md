@@ -28,8 +28,8 @@ Goals:
 Non-goals:
 
 - Lease acquisition, renewal or expiry policy. Those belong to the host.
-- Fencing across independently connected backends. Guard and target databases
-  must belong to the same connected backend.
+- Fencing across independently connected backends. Guard and target must
+  belong to the same connected backend.
 - Clock-based expiry of the grant. A host that wants "and my grant has not
   expired" puts that in the filter it builds for each binding, or relies on
   the epoch, which a takeover always moves.
@@ -43,31 +43,22 @@ impl Fence {
     pub fn epoch(scope: Scope, collection, id, field, epoch: u64) -> Self;
 }
 
-pub enum GuardDatabase { Current, Default, Named(String) }
-
 trait StorageBackend {
     // default: Err(Unsupported(Capability::Fencing))
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage>;
-    fn for_scope_fenced_in_database(&self, scope: &Scope, fence: &Fence,
-        guard_database: &GuardDatabase) -> Result<ScopedStorage>;
+    // default: Err(Unsupported(Capability::Fencing)) unless generation 0
+    fn for_scope_fenced_generation(&self, scope: &Scope, generation: ScopeGeneration,
+        fence: &Fence) -> Result<ScopedStorage>;
 }
 
 ErrorKind::Fenced          // new, not retryable
 Capability::Fencing
-Capability::CrossDatabaseFencing
 ```
 
-The existing binding checks the guard in the target database. The explicit
-binding selects Current (the target), Default (the connected backend root),
-or Named(name) (the shared named database namespace). The guard scope stays
-independent of the target scope. The host chooses this locator when granting a
-handle; model metadata does not choose a guard address.
-
-Explicit default/named addressing requires CrossDatabaseFencing. Unknown
-adapters default to Unsupported(CrossDatabaseFencing) for these addresses;
-Current delegates to their existing fencing implementation. Invalid names
-fail before a handle is returned. A host must propagate refusal rather than
-replace native enforcement with a preflight read.
+The guard lives in the same backend as the target. Its scope stays independent
+of the target scope. The host chooses the fence when granting a handle; model
+metadata does not choose a guard address. A host must propagate refusal rather
+than replace native enforcement with a preflight read.
 
 A fence *holds* while the document `collection/id` in the fence's scope
 exists, is live (not expired under its collection's `ttl_field`), and matches
@@ -111,8 +102,6 @@ filter) is `InvalidInput` from `for_scope_fenced`.
   absent, success while it matches, refusal after it moves on (with no state
   change), the new holder's fence writing again, an expired guard (with
   `Ttl`), an invalid fence, and `Unsupported(Fencing)` without the capability.
-- Cross-database conformance exercises default and named guards, live holder
-  mutations, stale holder refusal with unchanged target data, and unsupported
-  adapters. Persistent-driver tests cover reopening and independent SQLite
-  guard connections. Mongo standalone never advertises either fence capability.
+- Persistent-driver tests cover reopening and independent SQLite connections.
+  Mongo standalone never advertises the fence capability.
 - Every source file keeps at least 90% line coverage.

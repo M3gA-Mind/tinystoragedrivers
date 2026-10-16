@@ -20,8 +20,7 @@ fn index_names_are_stable_and_reserved() {
 }
 
 #[test]
-fn prefixes_and_ids() {
-    assert_eq!(database_prefix("approvals"), "approvals:");
+fn document_ids() {
     let scope = Scope::new("alice").unwrap();
     assert_eq!(document_id(&scope, "k"), doc! {"s": "alice", "k": "k"});
 }

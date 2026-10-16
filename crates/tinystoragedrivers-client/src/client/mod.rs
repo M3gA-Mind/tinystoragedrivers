@@ -71,7 +71,7 @@ pub(crate) fn wire_error(error: WireError, unsupported_as: Option<Capability>) -
 
 /// A storage backend reached over a bus, bound to the one scope its host chose.
 ///
-/// There is no way to select another scope, database, fence or generation from
+/// There is no way to select another scope, fence or generation from
 /// here: those are fixed by the host's grant, so [`StorageBackend::for_scope`]
 /// accepts only the bound scope and the fenced and generation variants stay
 /// unsupported.
@@ -148,12 +148,6 @@ impl StorageBackend for BusStorage {
             Arc::new(BusDocuments::new(self.wire.clone(), self.capabilities)),
             Arc::new(BusStreams::new(self.wire.clone())),
             Arc::new(BusBlobs::new(self.wire.clone(), self.blob_capabilities)),
-        ))
-    }
-
-    fn database(&self, _name: &str) -> Result<Arc<dyn StorageBackend>> {
-        Err(StorageError::invalid_input(
-            "a bus caller cannot select a database; the host grant fixes it",
         ))
     }
 }

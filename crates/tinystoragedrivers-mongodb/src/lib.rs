@@ -5,8 +5,6 @@
 //! the [`Scope`](tinystoragedrivers_core::Scope) it belongs to in a `_scope`
 //! field, and the driver ANDs `_scope` into every query, write, aggregation
 //! and index, so a handle opened for one scope cannot reach another's data.
-//! [`StorageBackend::database`](tinystoragedrivers_core::StorageBackend::database)
-//! maps a name to a collection prefix inside the same MongoDB database.
 //!
 //! The entry point is [`MongoStorage::connect`]; most hosts reach it through
 //! the `tinystoragedrivers` facade with a `mongodb://…/<db>` URL and the
@@ -19,7 +17,7 @@
 //! use tinystoragedrivers_mongodb::MongoStorage;
 //!
 //! let backend = MongoStorage::connect("mongodb://db.internal/openhuman", "openhuman").await?;
-//! let alice = backend.database("approvals")?.for_scope(&Scope::new("alice")?)?;
+//! let alice = backend.for_scope(&Scope::new("alice")?)?;
 //! alice
 //!     .documents()
 //!     .put("pending", "req-1", json!({"tool": "shell"}), Precondition::Absent)

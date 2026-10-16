@@ -9,38 +9,37 @@ fn quotes_identifiers_and_literals() {
 }
 
 #[test]
-fn creates_prefixed_layout_two_tables_idempotently() {
+fn creates_layout_two_tables_idempotently() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("flows__");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     tables.ensure(&conn).unwrap();
-    assert_eq!(tables.docs, "flows__docs");
+    assert_eq!(tables.docs, "docs");
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
-                 'flows__docs', 'flows___tsd_collections', 'flows__fts', 'flows__streams',
-                 'flows__stream_heads', 'flows__blobs', 'flows__meta', 'flows__doc_fields',
-                 'flows___tsd_scope_admissions', 'flows___tsd_purge_receipts')",
+                 'docs', '_tsd_collections', 'fts', 'streams',
+                 'stream_heads', 'blobs', 'meta', 'doc_fields',
+                 '_tsd_scope_admissions', '_tsd_purge_receipts')",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(count, 10);
     assert_eq!(tables.layout(&conn).unwrap().as_deref(), Some("2"));
-    assert_eq!(Tables::new("").prefix, "");
 }
 
 #[test]
 fn a_foreign_table_in_the_way_is_refused() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE docs (id TEXT)").unwrap();
-    assert!(Tables::new("").ensure(&conn).is_err());
+    assert!(Tables::new().ensure(&conn).is_err());
 }
 
 #[test]
 fn a_layout_two_file_with_v0_tables_is_corrupt() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     conn.execute_batch("CREATE TABLE _tsd_docs (scope TEXT)")
         .unwrap();
@@ -51,7 +50,7 @@ fn a_layout_two_file_with_v0_tables_is_corrupt() {
 #[test]
 fn a_file_without_the_layout_marker_does_not_validate() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     conn.execute_batch(&format!("DELETE FROM {}", ident(&tables.meta)))
         .unwrap();
@@ -61,7 +60,7 @@ fn a_file_without_the_layout_marker_does_not_validate() {
 #[test]
 fn stream_heads_gain_their_time_columns_on_an_older_layout_two_file() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     // A layout-2 file written before heads recorded times.
     conn.execute_batch(

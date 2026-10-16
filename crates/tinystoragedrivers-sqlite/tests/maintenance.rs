@@ -192,20 +192,19 @@ async fn checkpoint_truncate_empties_the_wal() {
 }
 
 #[tokio::test]
-async fn scopes_span_the_named_databases_of_a_single_file_separately() {
+async fn scopes_lists_the_scopes_of_a_single_file() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path().join("all.db")).unwrap();
-    let flows = storage.database("flows").unwrap();
     let ann = Scope::new("u:ann").unwrap();
-    flows
+    storage
         .for_scope(&ann)
         .unwrap()
         .documents()
         .put("runs", "r", json!({}), Precondition::None)
         .await
         .unwrap();
-    assert_eq!(flows.scopes("u:").await.unwrap(), [ann]);
-    assert_eq!(storage.scopes("u:").await.unwrap().len(), 0);
+    assert_eq!(storage.scopes("u:").await.unwrap(), [ann]);
+    assert_eq!(storage.scopes("u:bob").await.unwrap().len(), 0);
 }
 
 #[tokio::test]

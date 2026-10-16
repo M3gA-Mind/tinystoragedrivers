@@ -1,6 +1,6 @@
 //! [`DocumentStore`] on MongoDB.
 //!
-//! A port collection `jobs` is the Mongo collection `<prefix>jobs`, holding
+//! A port collection `jobs` is the Mongo collection `jobs`, holding
 //! `{_id: {s, k}, _scope, _key, _v, d}` per document. The `_id` makes each
 //! `(scope, key)` unique without any declared index, and every access goes
 //! through [`ScopedCollection`], which ANDs `_scope` into the query.
@@ -259,7 +259,6 @@ impl DocumentStore for MongoDocuments {
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
-                .with(Capability::CrossDatabaseFencing)
         } else {
             base
         }
@@ -554,7 +553,6 @@ impl DocumentStore for MongoDocuments {
 
     async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
         crate::purge::admitted!(self, {
-            let physical_prefix = &self.shared.prefix;
             let names = self
                 .shared
                 .db
@@ -562,10 +560,8 @@ impl DocumentStore for MongoDocuments {
                 .await
                 .map_err(errors::failed("list document collections"))?;
             let mut found = Vec::new();
-            for physical in names {
-                let Some(name) = physical.strip_prefix(physical_prefix) else {
-                    continue;
-                };
+            for name in names {
+                let name = name.as_str();
                 if name.starts_with(RESERVED_PREFIX)
                     || !name.starts_with(prefix)
                     || validate_collection(name).is_err()

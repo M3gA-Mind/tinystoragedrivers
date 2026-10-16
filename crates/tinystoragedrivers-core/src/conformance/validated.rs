@@ -232,23 +232,4 @@ pub(super) async fn isolation(backend: &dyn crate::StorageBackend) {
             .await,
         "foreign scope stays absent",
     );
-    let named = ok(backend.database("checked_isolation"), "named read checks");
-    let target = ok(
-        named.for_scope(&crate::Scope::local()),
-        "named read check scope",
-    );
-    ok(
-        local
-            .documents()
-            .put(&collection, "dep", json!({}), Precondition::Absent)
-            .await,
-        "root dependency",
-    );
-    ok(
-        target
-            .documents()
-            .atomic_batch_checked(vec![absent], vec![])
-            .await,
-        "root stays absent in named target",
-    );
 }

@@ -18,17 +18,13 @@ async fn bus() -> BusStorage {
 }
 
 #[tokio::test]
-async fn a_bus_caller_is_bound_to_its_scope_and_cannot_pick_databases_or_fences() {
+async fn a_bus_caller_is_bound_to_its_scope_and_cannot_pick_fences() {
     let bus = bus().await;
     assert_eq!(bus.driver(), "bus");
     assert!(bus.for_scope(&Scope::local()).is_ok());
     let other = Scope::new("bob").unwrap();
     assert_eq!(
         bus.for_scope(&other).unwrap_err().kind(),
-        ErrorKind::InvalidInput
-    );
-    assert_eq!(
-        bus.database("other").unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
     for host_only in [

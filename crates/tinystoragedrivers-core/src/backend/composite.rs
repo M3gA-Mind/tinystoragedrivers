@@ -17,12 +17,6 @@ pub trait BlobBackend: Send + Sync + std::fmt::Debug {
     ///
     /// Unsupported scope or backend failure.
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>>;
-    /// Independently named blob database.
-    ///
-    /// # Errors
-    ///
-    /// Invalid database name or backend failure.
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>>;
 }
 
 /// Use the blob port of an existing complete backend independently.
@@ -54,9 +48,6 @@ impl BlobBackend for BackendBlobs {
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         Ok(self.0.for_scope(scope)?.blobs().clone())
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>> {
-        Ok(Arc::new(Self(self.0.database(name)?)))
     }
 }
 
@@ -133,25 +124,6 @@ impl StorageBackend for CompositeStorage {
     }
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         self.combine(&self.records.for_scope_fenced(scope, fence)?, true)
-    }
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        database: &crate::GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        self.combine(
-            &self
-                .records
-                .for_scope_fenced_in_database(scope, fence, database)?,
-            true,
-        )
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Self::new(
-            self.records.database(name)?,
-            self.blobs.database(name)?,
-        )))
     }
     /// Maintains the records backend; the blob backend is a separate store a
     /// host maintains on its own.
