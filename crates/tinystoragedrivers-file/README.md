@@ -65,6 +65,8 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
 | `Transactions` | no | A batch over several files cannot be crash-atomic with renames, so `atomic_batch` returns `Unsupported`. |
 | `Fencing` | yes | The current-database guard and target mutation share their native directory lock, within one process only. |
 | `CrossDatabaseFencing` | yes | Explicit Default/Named guard and target directories are locked together, within one process only. |
+| `ScopeEnumeration` | yes | `scopes(prefix)` walks `scopes/`, decodes each directory name (rejoining the `+` continuation chunks of long names) and lists those with at least one file under `docs/`, `streams/` or `blobs/`. Undecodable stray directories are skipped. Cost is proportional to the number of scope directories. |
+| `Maintenance` | no | `maintain` and `checkpoint` return `Unsupported`: there is nothing to reclaim or flush. |
 
 ## Concurrency
 
