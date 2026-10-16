@@ -10,6 +10,9 @@ use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
 use crate::key::Key;
 
+/// The largest value every driver can store (`i64::MAX`).
+const MAX_VALUE: u64 = i64::MAX as u64;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Body {
     value: u64,
@@ -19,8 +22,10 @@ struct Body {
 ///
 /// Each step is one compare-and-swap [`update`](Repo::update), so two tasks
 /// (or two processes on a shared backend) never receive the same number.
-/// Counts live in a JSON number: keep them below 2^63 for portability across
-/// drivers.
+/// Counts live in a JSON number, so every driver stores the same range: 0 to
+/// `i64::MAX`. [`next`](Self::next) and [`set_at_least`](Self::set_at_least)
+/// refuse to go past it with `InvalidInput` rather than store a value some
+/// backend could not hold.
 #[derive(Debug, Clone)]
 pub struct Counters {
     repo: Repo<Body>,
@@ -52,13 +57,15 @@ impl Counters {
     /// # Errors
     ///
     /// A storage error, a conflict past the retry budget, or `InvalidInput`
-    /// when the counter would overflow.
+    /// when the counter would pass `i64::MAX`.
     pub async fn next(&self, owner: &str, name: &str) -> Result<u64> {
         let id = id(owner, name)?;
         let stored = self
             .repo
             .update(&id, |body| {
-                let value = body.map_or(Some(1), |b| b.value.checked_add(1));
+                let value = body.map_or(Some(1), |b| {
+                    b.value.checked_add(1).filter(|v| *v <= MAX_VALUE)
+                });
                 value
                     .map(|value| Some(Body { value }))
                     .ok_or_else(|| StorageError::invalid_input("counter overflow"))
@@ -85,8 +92,12 @@ impl Counters {
     ///
     /// # Errors
     ///
-    /// A storage error or a conflict past the retry budget.
+    /// `InvalidInput` when `minimum` is above `i64::MAX`, a storage error, or a
+    /// conflict past the retry budget.
     pub async fn set_at_least(&self, owner: &str, name: &str, minimum: u64) -> Result<u64> {
+        if minimum > MAX_VALUE {
+            return Err(StorageError::invalid_input("counter value out of range"));
+        }
         let id = id(owner, name)?;
         let stored = self
             .repo

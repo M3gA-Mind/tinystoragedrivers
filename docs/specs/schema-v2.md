@@ -168,10 +168,10 @@ Composition then runs `ensure_collection` once for each item, from trusted boots
 
 | Collection | API | Body |
 |---|---|---|
-| `tsd.leases` | `Leases::acquire(owner, key, holder, ttl_ms) / renew / release / current`; `Lease::fence(scope)`; id `Key::of([owner, key])` | `{holder, epoch, expires_ms}`; `epoch` doubles as the write fence ([`write-fencing.md`](write-fencing.md)) |
+| `tsd.leases` | `Leases::acquire(owner, key, holder, ttl_ms) / renew / release / current`; `Lease::fence(scope)`; id `Key::of([owner, key])` | `{holder, epoch, expires_ms}`; `epoch` bumps on every acquisition after a lapse or release (even by the same holder), stays on renew and on a live re-acquire, and doubles as the write fence ([`write-fencing.md`](write-fencing.md)) |
 | `tsd.migrations` | used by the registry runner; `Migrations::done(owner, step)` for importers | `{owner, step, from, to, cursor, written, done}` |
-| `tsd.kv` | `Kv::ns(docs, owner, ns).get/put/delete/list(prefix)` | `{owner, ns, key, value}` (a body must be an object, so the value sits in a field); id `Key::of([owner, ns, key])`; index over `(owner, ns, key)` |
-| `tsd.counters` | `Counters::next(owner, name) -> u64` (atomic), `peek`, `set_at_least` | `{value}` |
+| `tsd.kv` | `Kv::ns(docs, owner, ns).get/put/delete/list(prefix)` | `{owner, ns, key, value}` (a body must be an object, so the value sits in a field and may be any JSON shape: scalar, string, array or object; a migration that "unwraps `value`" moves the legacy value into this field); id `Key::of([owner, ns, key])`; index over `(owner, ns, key)` |
+| `tsd.counters` | `Counters::next(owner, name) -> u64` (atomic), `peek`, `set_at_least` | `{value}`; counts stay in `0..=i64::MAX` on every driver (`InvalidInput` past it) |
 | `tsd.secrets` | `SecretStore` over documents (exists as `secrets`) | `{ciphertext}` |
 | `tsd.secret_keys` | KMS envelope (exists as `secret_keys`) | `{format, key_id, wrapped}` |
 

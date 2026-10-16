@@ -139,7 +139,8 @@ impl Leases {
     /// Take the lease `(owner, key)` for `holder` for `ttl_ms` milliseconds.
     ///
     /// Succeeds when the lease is absent (epoch 1), expired or released
-    /// (epoch + 1 when the holder differs), or already held by `holder` (the
+    /// (epoch + 1, even for the holder that had it, so a fence from the
+    /// earlier tenure stays dead), or still live and held by `holder` (the
     /// epoch stays, the expiry is extended). Returns `None` while another
     /// holder's lease is live. Racing acquirers get exactly one winner.
     ///
@@ -160,8 +161,13 @@ impl Leases {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 let epoch = match current {
                     None => 1,
-                    Some(lease) if lease.holder == holder => lease.epoch,
-                    Some(lease) if lease.expires_ms > now => return Ok(None),
+                    Some(lease) if lease.expires_ms > now => {
+                        if lease.holder == holder {
+                            lease.epoch
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                     Some(lease) => lease
                         .epoch
                         .checked_add(1)

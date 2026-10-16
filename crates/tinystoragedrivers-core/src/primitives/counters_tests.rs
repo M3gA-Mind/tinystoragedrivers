@@ -27,9 +27,21 @@ async fn set_at_least_raises_but_never_lowers() {
 }
 
 #[tokio::test]
-async fn next_refuses_to_overflow() {
+async fn next_refuses_to_pass_the_portable_maximum() {
     let c = counters();
-    c.set_at_least("cron", "max", u64::MAX).await.unwrap();
+    let max = i64::MAX as u64;
+    assert_eq!(c.set_at_least("cron", "max", max).await.unwrap(), max);
     let error = c.next("cron", "max").await.unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::InvalidInput);
+    assert_eq!(c.peek("cron", "max").await.unwrap(), max);
+}
+
+#[tokio::test]
+async fn set_at_least_refuses_values_outside_the_portable_range() {
+    let c = counters();
+    for minimum in [i64::MAX as u64 + 1, u64::MAX] {
+        let error = c.set_at_least("cron", "big", minimum).await.unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::InvalidInput);
+    }
+    assert_eq!(c.peek("cron", "big").await.unwrap(), 0);
 }

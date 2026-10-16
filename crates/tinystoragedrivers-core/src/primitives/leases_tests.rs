@@ -251,3 +251,46 @@ async fn the_fence_follows_the_epoch() {
 fn debug_does_not_need_the_clock() {
     assert!(format!("{:?}", rig().leases).contains("Leases"));
 }
+
+#[tokio::test]
+async fn reacquiring_a_lapsed_or_released_lease_advances_the_epoch_for_the_same_holder() {
+    let rig = rig();
+    let first = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    // Lapse: the earlier tenure's fence must not authorize the new one.
+    rig.now.store(2_000, Ordering::SeqCst);
+    let second = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((first.epoch, second.epoch), (1, 2));
+    // Release, then the same holder takes it again.
+    assert!(rig.leases.release("host", "p1", "a").await.unwrap());
+    let third = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.epoch, 3);
+    // A live re-acquire and a renew keep the epoch.
+    let live = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let renewed = rig
+        .leases
+        .renew("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((live.epoch, renewed.epoch), (3, 3));
+}
