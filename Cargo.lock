@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-client"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-file"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-mongodb"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-s3"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3333,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-sqlite"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -3376,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-tinybus"
-version = "0.11.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "serde",
