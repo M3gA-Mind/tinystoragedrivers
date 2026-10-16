@@ -26,9 +26,9 @@ use crate::error::StorageError;
 #[non_exhaustive]
 pub struct MaintenanceBudget {
     /// Stop reclaiming once about this many bytes have been returned. A driver
-    /// that reclaims in fixed units (SQLite pages) rounds down to whole units
-    /// but always does at least one when the budget is not zero. `None` means
-    /// reclaim everything reclaimable.
+    /// that reclaims in fixed units (SQLite pages) rounds down to whole units,
+    /// so a budget under one unit reclaims nothing, and `Some(0)` does no
+    /// work. `None` means reclaim everything reclaimable.
     pub max_reclaim_bytes: Option<u64>,
 }
 

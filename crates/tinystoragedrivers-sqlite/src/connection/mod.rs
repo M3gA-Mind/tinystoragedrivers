@@ -85,6 +85,12 @@ impl Db {
         }
         let conn = Connection::open(&path).map_err(during("open"))?;
         conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
+        // Must come before anything else touches a new file: the setting is
+        // fixed by the first table (and WAL mode writes the header). It is
+        // inert on a file that already has tables; `maintenance::maintain`
+        // converts those.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .map_err(during("open"))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(during("open"))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
