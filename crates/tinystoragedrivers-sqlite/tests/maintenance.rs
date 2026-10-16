@@ -173,9 +173,7 @@ async fn checkpoint_truncate_empties_the_wal() {
     assert_eq!(wal_size(storage.path()), 0);
     let conn = Connection::open(storage.path()).unwrap();
     let doc: String = conn
-        .query_row("SELECT doc FROM _tsd_docs WHERE id = 'd'", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT body FROM docs WHERE id = 'd'", [], |row| row.get(0))
         .unwrap();
     assert!(doc.contains("\"n\":1"), "{doc}");
 }

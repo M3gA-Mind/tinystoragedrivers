@@ -12,10 +12,27 @@ backend and passes the shared conformance suite in both layouts.
     OpenHuman already splits its stores today.
 - **File mode** is used for a path ending in `.db` or `.sqlite`.
   - Everything lives in that one file.
-  - Each named database's tables are prefixed `<name>__`.
+  - Each named database's tables are prefixed `<name>__` (`<name>__docs`).
 
 ## Storage
 
+- **Layout 2.** Tables are `docs`, `streams`, `stream_heads`, `blobs`, `fts`
+  and `meta` (plus the internal `_tsd_collections`, `_tsd_scope_admissions` and
+  `_tsd_purge_receipts`). `meta.layout` records `2`.
+  - A file written by v0.x (`_tsd_docs` and friends) is upgraded in place, in one
+    transaction, the first time it is opened: tombstones become `deleted` rows,
+    `created_ms`/`updated_ms` are backfilled from a recognised body field
+    (`created_ms`, RFC 3339 `created_at` or `createdAt`) or the open time, a
+    declared v1 `ttl` field fills `expires_ms`, and the v0.x tables are dropped.
+    The upgrade is not reversible; back the file up first. A layout-2 file that
+    still holds v0.x tables is corrupt and refused.
+  - `auto_vacuum` is not changed by the upgrade: a file still at `NONE` converts
+    at the first `maintain` call (see below).
+  - A deleted document keeps its row (`deleted = 1`, body `{}`) so versions
+    continue; every read skips it.
+  - `RecordMetadata` is supported: `put_with` records `schema` and `expires_ms`,
+    and the reserved paths `_schema`, `_created_ms`, `_updated_ms` and
+    `_expires_ms` filter and sort through the columns.
 - **Documents** are stored in one `WITHOUT ROWID` table per database, keyed by
   `(scope, collection, id)`.
   - Declared indexes become partial `json_extract` expression indexes.
@@ -68,7 +85,7 @@ The driver reports `Capability::Maintenance` and `Capability::ScopeEnumeration`.
   copying the file. If a reader or writer keeps it from finishing it fails with
   `ErrorKind::Unavailable`, which is safe to retry.
 - **`scopes(prefix)`.** One `SELECT` over the scope column of the document,
-  tombstone, stream and blob tables, de-duplicated and ordered by byte. The
+  document, stream and blob tables, de-duplicated and ordered by byte. The
   prefix is literal (`%` and `_` have no special meaning). The purge ledger
   does not count: an erased scope drops out of the listing.
 - In single-file layout the file is shared, so `maintain` and `checkpoint`

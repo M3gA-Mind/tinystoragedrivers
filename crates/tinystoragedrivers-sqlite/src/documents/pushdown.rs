@@ -9,7 +9,10 @@
 
 use rusqlite::types::Value as SqlValue;
 use serde_json::Value;
-use tinystoragedrivers_core::{CursorPosition, Direction, Filter, ID_FIELD, Sort};
+use tinystoragedrivers_core::{
+    CREATED_FIELD, CursorPosition, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort,
+    UPDATED_FIELD,
+};
 
 use crate::sql::{json_path, literal};
 
@@ -29,6 +32,24 @@ fn pushable(value: &Value) -> Option<SqlValue> {
     }
 }
 
+/// The column that holds a reserved metadata path (`_created_ms` and the
+/// rest), `None` for any other path.
+fn meta_column(field: &str) -> Option<&'static str> {
+    match field {
+        SCHEMA_FIELD => Some("schema"),
+        CREATED_FIELD => Some("created_ms"),
+        UPDATED_FIELD => Some("updated_ms"),
+        EXPIRES_FIELD => Some("expires_ms"),
+        _ => None,
+    }
+}
+
+/// A whole-number bound on a metadata column. The columns are `INTEGER`, so
+/// comparing them with an integer is exact; any other number is left to Rust.
+fn integer(value: &Value) -> Option<SqlValue> {
+    value.as_i64().map(SqlValue::Integer)
+}
+
 /// The column expression for `field` and its parameters, or `None` when the
 /// path cannot be expressed in SQLite.
 fn column(field: &str) -> Option<(String, Vec<SqlValue>)> {
@@ -36,7 +57,7 @@ fn column(field: &str) -> Option<(String, Vec<SqlValue>)> {
         Some(("id".to_owned(), Vec::new()))
     } else {
         Some((
-            "json_extract(doc, ?)".to_owned(),
+            "json_extract(body, ?)".to_owned(),
             vec![SqlValue::Text(json_path(field)?)],
         ))
     }
@@ -45,6 +66,45 @@ fn column(field: &str) -> Option<(String, Vec<SqlValue>)> {
 /// A superset condition for `filter`, or `None` when nothing can be pushed.
 pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
     match filter {
+        Filter::Eq { field, value } if meta_column(field).is_some() => Some(Clause {
+            sql: format!("{} = ?", meta_column(field)?),
+            params: vec![integer(value)?],
+        }),
+        Filter::In { field, values } if meta_column(field).is_some() => {
+            let bound: Vec<SqlValue> = values.iter().map(integer).collect::<Option<_>>()?;
+            if bound.is_empty() {
+                return None;
+            }
+            Some(Clause {
+                sql: format!(
+                    "{} IN ({})",
+                    meta_column(field)?,
+                    vec!["?"; bound.len()].join(", ")
+                ),
+                params: bound,
+            })
+        }
+        Filter::Range {
+            field,
+            gt,
+            gte,
+            lt,
+            lte,
+        } if meta_column(field).is_some() => {
+            let column = meta_column(field)?;
+            let mut terms = Vec::new();
+            let mut params = Vec::new();
+            for (operator, bound) in [(">", gt), (">=", gte), ("<", lt), ("<=", lte)] {
+                if let Some(bound) = bound {
+                    terms.push(format!("{column} {operator} ?"));
+                    params.push(integer(bound)?);
+                }
+            }
+            (!terms.is_empty()).then(|| Clause {
+                sql: terms.join(" AND "),
+                params,
+            })
+        }
         Filter::Eq { field, value } => {
             let bound = pushable(value)?;
             if field == ID_FIELD && !value.is_string() {
@@ -177,12 +237,21 @@ fn expressions(field: &str) -> Option<(String, String)> {
     if field == ID_FIELD {
         return Some(("3".to_owned(), "id".to_owned()));
     }
+    if let Some(column) = meta_column(field) {
+        // Metadata is a number when present; only `expires_ms` can be absent.
+        let rank = if field == EXPIRES_FIELD {
+            "CASE WHEN expires_ms IS NULL THEN 0 ELSE 2 END".to_owned()
+        } else {
+            "2".to_owned()
+        };
+        return Some((rank, column.to_owned()));
+    }
     let path = literal(&json_path(field)?);
-    let kind = format!("json_type(doc, {path})");
+    let kind = format!("json_type(body, {path})");
     let rank = format!(
         "CASE WHEN {kind} IS NULL OR {kind} = 'null' THEN 0 WHEN {kind} IN ('false', 'true') THEN 1 WHEN {kind} IN ('integer', 'real') THEN 2 WHEN {kind} = 'text' THEN 3 WHEN {kind} = 'array' THEN 4 ELSE 5 END"
     );
-    Some((rank, format!("json_extract(doc, {path})")))
+    Some((rank, format!("json_extract(body, {path})")))
 }
 
 fn rank(value: &Value) -> i64 {

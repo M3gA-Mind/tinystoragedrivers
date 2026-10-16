@@ -134,10 +134,11 @@ impl Fencing {
             Some(text) => serde_json::from_str(&text)?,
             None => CollectionSpec::new(self.fence.collection()),
         };
-        let stored: Option<(String, i64, String)> = conn
+        let stored: Option<(String, i64, tinystoragedrivers_core::Meta, String)> = conn
             .query_row(
                 &format!(
-                    "SELECT id, version, doc FROM {} WHERE scope = ?1 AND coll = ?2 AND id = ?3",
+                    "SELECT id, version, schema, created_ms, updated_ms, expires_ms, body FROM {}
+                     WHERE scope = ?1 AND coll = ?2 AND id = ?3 AND deleted = 0",
                     table(&guard_tables.docs)
                 ),
                 params![
@@ -145,21 +146,33 @@ impl Fencing {
                     self.fence.collection(),
                     self.fence.id()
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        tinystoragedrivers_core::Meta {
+                            schema: u32::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                            created_ms: row.get(3)?,
+                            updated_ms: row.get(4)?,
+                            expires_ms: row.get(5)?,
+                        },
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()
             .map_err(during("read guard document"))?;
         let guard = stored
-            .map(|(id, version, text)| -> Result<_> {
+            .map(|(id, version, meta, text)| -> Result<_> {
                 Ok(Versioned {
                     id,
                     version: Version(u64::try_from(version).unwrap_or(0)),
                     doc: serde_json::from_str(&text)?,
-                    meta: tinystoragedrivers_core::Meta::unknown(),
+                    meta,
                 })
             })
             .transpose()?
-            .filter(|found| !ops::expired(&spec, &found.doc, (self.clock)()));
+            .filter(|found| !ops::lapsed(&spec, &found.doc, found.meta.expires_ms, (self.clock)()));
         self.fence.check(guard.as_ref())
     }
 }
