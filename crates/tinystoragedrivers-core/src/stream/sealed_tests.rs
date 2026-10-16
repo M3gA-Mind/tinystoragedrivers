@@ -140,3 +140,49 @@ fn window_pages_by_offset_and_skips_below_base() {
     assert_eq!(offsets(u64::MAX, 3), Vec::<u64>::new());
     assert_eq!(log.window(11, 1)[0].value, json!(1));
 }
+
+#[test]
+fn emptiness_follows_the_retained_entries_not_the_base() {
+    assert!(SealedLog::new(0, Vec::new()).is_empty());
+    assert!(SealedLog::new(5, Vec::new()).is_empty());
+    assert!(!SealedLog::new(0, vec![json!(null)]).is_empty());
+}
+
+#[test]
+fn decoding_refuses_a_body_missing_required_fields() {
+    for body in [
+        json!({"version": 1, "base": 0}),
+        json!({"version": 1, "values": []}),
+        json!({"base": 0, "values": []}),
+        json!({"version": 1, "base": -1, "values": []}),
+        json!([1, 2]),
+    ] {
+        let bytes = zstd::encode_all(&serde_json::to_vec(&body).unwrap()[..], 0).unwrap();
+        let error = SealedLog::decode(&bytes).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Backend, "{body}");
+    }
+}
+
+#[test]
+fn the_version_refusal_names_the_version() {
+    let bytes = zstd::encode_all(
+        &serde_json::to_vec(&json!({"version": 2, "base": 0, "values": []})).unwrap()[..],
+        0,
+    )
+    .unwrap();
+    let message = SealedLog::decode(&bytes).unwrap_err().to_string();
+    assert!(message.contains("version 2"), "{message}");
+}
+
+#[test]
+fn a_window_that_starts_past_the_end_is_empty_even_with_a_huge_limit() {
+    let log = SealedLog::new(0, vec![json!(1), json!(2)]);
+    assert!(log.window(2, usize::MAX).is_empty());
+    assert_eq!(log.window(1, usize::MAX).len(), 1);
+}
+
+#[test]
+fn a_dotted_stream_name_gets_a_distinct_valid_key() {
+    assert_eq!(sealed_blob_key(".").unwrap(), "_tsd/sealed/%2E");
+    assert_eq!(sealed_blob_key("..").unwrap(), "_tsd/sealed/%2E.");
+}
