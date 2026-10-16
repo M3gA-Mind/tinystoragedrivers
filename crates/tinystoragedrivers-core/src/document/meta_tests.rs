@@ -131,3 +131,10 @@ fn versioned_carries_meta_and_reads_older_payloads_without_it() {
         serde_json::from_value(json!({"id": "a", "version": 2, "doc": {}})).unwrap();
     assert_eq!(legacy.meta, Meta::unknown());
 }
+
+#[test]
+fn created_ms_makes_write_options_non_default() {
+    let options = WriteOptions::new().created_ms(5);
+    assert_eq!(options.created_ms, Some(5));
+    assert!(!options.is_default());
+}

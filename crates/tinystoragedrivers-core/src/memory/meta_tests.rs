@@ -343,3 +343,25 @@ async fn metadata_paths_filter_and_sort_with_stable_paging() {
         2
     );
 }
+
+#[tokio::test]
+async fn a_supplied_created_ms_is_kept_and_the_update_time_stays_the_clock() {
+    let rig = Rig::at(1_000);
+    rig.docs
+        .put_with(
+            "c",
+            "a",
+            json!({}),
+            Precondition::Absent,
+            WriteOptions::new().schema(2).created_ms(40),
+        )
+        .await
+        .unwrap();
+    let meta = rig.meta("a").await;
+    assert_eq!(meta.created_ms, 40);
+    assert_eq!(meta.updated_ms, 1_000);
+    assert_eq!(meta.schema, 2);
+    rig.set(2_000);
+    rig.put("a").await;
+    assert_eq!(rig.meta("a").await.created_ms, 40);
+}
