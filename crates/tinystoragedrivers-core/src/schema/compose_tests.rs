@@ -281,7 +281,11 @@ fn check_ready_gates_collections_with_unfinished_steps() {
         registry.check_ready("cron.ghost").unwrap_err().kind(),
         ErrorKind::NotFound
     );
-    registry.mark_ready("cron.jobs");
+    let scope = Scope::local();
+    registry.set_pending(&scope, ["cron.jobs".to_owned()].into());
+    assert!(registry.check_ready_in(&scope, "cron.jobs").is_err());
+    registry.mark_ready(&scope, "cron.jobs");
+    registry.check_ready_in(&scope, "cron.jobs").unwrap();
     registry.check_ready("cron.jobs").unwrap();
 }
 

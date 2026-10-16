@@ -74,19 +74,28 @@ impl Registry {
     /// records below version `to`, or the legacy collection named by
     /// [`Step::source`]) by id with a keyset cursor, `batch_size` records at a
     /// time. It writes every output with `Precondition::Absent` and the
-    /// schema version `to`; an output that already exists counts as written,
-    /// which makes a re-run idempotent. An in-place rewrite of a record under
-    /// the same id replaces it instead, guarded by the version it read. After
-    /// each batch it stores `{cursor, written}` in `tsd.migrations`. Only when
-    /// the source is exhausted does it delete a legacy source's rows and mark
-    /// the step done. A crash or error anywhere leaves the progress of the
+    /// schema version `to`. The batch's writes and its progress record are
+    /// two steps, so a crash between them leaves outputs the cursor does not
+    /// know; on resume the same outputs are produced again, and an output
+    /// that already exists counts as written **only when it holds exactly the
+    /// body the step produced**. A different document under the id, or a
+    /// unique-index collision with another document, stops the step with the
+    /// driver's `AlreadyExists` or `Conflict`. An in-place rewrite of a record
+    /// under the same id replaces it instead, guarded by the version it read;
+    /// a source record of an in-place step that is not re-emitted under its
+    /// id (the step renamed or dropped it) is deleted once the batch's
+    /// outputs are written. After each batch it stores `{cursor, written}` in
+    /// `tsd.migrations`. Only when the source is exhausted does it delete a
+    /// legacy source's rows and mark the step done. A crash or error anywhere leaves the progress of the
     /// last finished batch; calling `migrate` again resumes there and yields
     /// the same final state as an uninterrupted run, because steps are pure.
     ///
     /// **Stream steps** ([`Step::stream`]) list the streams under the step's
     /// source prefix and move them one at a time: read the source whole (paged
     /// by `batch_size`), map it, append the result to its new name in batches,
-    /// seal the target if the source was sealed, then delete the source. The
+    /// seal the target if the source was sealed (as the stream backend
+    /// reports it), then delete the source. Appends are conditional on the
+    /// length the run observed. The
     /// per-source progress (target name and entries appended) is saved before
     /// the first append and after every batch. On resume the target's length
     /// says where to continue, so no entry is appended twice; a target that
@@ -97,8 +106,14 @@ impl Registry {
     /// target (an existing target is kept), then delete the source. The step's
     /// count is saved after every blob and a resume lists what is left.
     ///
-    /// Run one `migrate` per scope at a time (hold a lease): two concurrent
-    /// runners are safe for the data (writes are idempotent) but waste work.
+    /// Run one `migrate` per scope at a time (hold a lease). Two concurrent
+    /// runners do not corrupt the data (document writes are idempotent and
+    /// stream appends are conditional, so the loser gets a `Conflict`) but
+    /// waste work or fail.
+    ///
+    /// Readiness is recorded per scope (`storage.scope()`): see
+    /// [`Registry::check_ready_in`]. Run `migrate` over every scope the host
+    /// serves before relying on the unscoped [`Registry::check_ready`].
     /// The target collections must have been declared with
     /// [`Registry::prepare`]; the progress collection and a legacy source are
     /// declared here.
@@ -133,6 +148,7 @@ impl Registry {
             plan.push((owner, step, key, progress));
         }
         self.set_pending(
+            storage.scope(),
             remaining
                 .keys()
                 .map(|item| (*item).to_owned())
@@ -190,7 +206,7 @@ impl Registry {
             if let Some(left) = remaining.get_mut(step.item) {
                 *left -= 1;
                 if *left == 0 {
-                    self.mark_ready(step.item);
+                    self.mark_ready(storage.scope(), step.item);
                 }
             }
         }
@@ -299,6 +315,17 @@ impl StepRun<'_> {
             .map(|output| self.target_schema(output))
             .collect::<Result<Vec<_>>>()?;
         let count = outputs.len() as u64;
+        // Ids the step re-emitted in place; every other source record was
+        // replaced (or dropped) by the batch and goes once the outputs landed.
+        let kept: HashSet<String> = if self.in_place() {
+            outputs
+                .iter()
+                .filter(|output| output.collection == self.step.item)
+                .map(|output| output.id.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
         for (output, schema) in outputs.into_iter().zip(schemas) {
             let mut write = WriteOptions::new().schema(schema);
             if let Some(created) = output.created_ms {
@@ -313,26 +340,55 @@ impl StepRun<'_> {
             } else {
                 Precondition::Absent
             };
+            let (collection, id, body) = (output.collection, output.id, output.body);
             match self
                 .docs
-                .put_with(
-                    &output.collection,
-                    &output.id,
-                    output.body,
-                    precondition,
-                    write,
-                )
+                .put_with(&collection, &id, body.clone(), precondition, write)
                 .await
             {
-                // Written by an earlier, interrupted run of this step.
+                Ok(_) => {}
+                // Only an interrupted run of this step may have left the
+                // output behind, and then it holds exactly this body. Any
+                // other conflict (a stranger under the id, a unique-index
+                // collision with another document, a concurrent edit) stops
+                // the step.
                 Err(error)
-                    if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::Conflict) => {}
-                other => {
-                    other?;
+                    if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::Conflict) =>
+                {
+                    let stored = self.docs.get(&collection, &id).await?;
+                    if stored.is_none_or(|found| found.doc != body) {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if self.in_place() {
+            for (id, version) in &versions {
+                if !kept.contains(id) {
+                    self.remove_replaced(id, *version).await?;
                 }
             }
         }
         Ok(count)
+    }
+
+    /// Delete an in-place source record the step replaced under another id.
+    /// One already gone was removed by an earlier, interrupted run.
+    async fn remove_replaced(&self, id: &str, version: Version) -> Result<()> {
+        match self
+            .docs
+            .delete(self.step.item, id, Precondition::Version(version))
+            .await
+        {
+            Err(error) if error.kind() == ErrorKind::Conflict => {
+                if self.docs.get(self.step.item, id).await?.is_some() {
+                    return Err(error);
+                }
+                Ok(())
+            }
+            other => other.map(|_| ()),
+        }
     }
 
     /// The schema version stamped on an output, after checking it targets a

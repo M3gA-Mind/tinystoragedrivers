@@ -17,8 +17,9 @@ use super::types::{Item, Owner, Schema, Step, StepBody};
 /// The composed declarations of every owner in a process.
 ///
 /// Built once by the host with [`Registry::compose`]. The registry itself is
-/// immutable apart from the readiness set [`Registry::check_ready`] reads,
-/// which [`Registry::migrate`](Registry::migrate) keeps current.
+/// immutable apart from the per-scope readiness sets [`Registry::check_ready`]
+/// and [`Registry::check_ready_in`] read, which
+/// [`Registry::migrate`](Registry::migrate) keeps current.
 ///
 /// ```
 /// use tinystoragedrivers_core::schema::{Owner, Registry, Schema, ScopeClass};
@@ -39,8 +40,11 @@ pub struct Registry {
     pub(super) collections: HashMap<String, CollectionInfo>,
     /// Every declared name or prefix, for [`Registry::check_ready`].
     declared: HashSet<String>,
-    /// Collections with at least one step that has not finished.
-    pending: Mutex<HashSet<String>>,
+    /// Items that have at least one step.
+    stepped: HashSet<String>,
+    /// For each scope [`Registry::migrate`] has run over, the items whose
+    /// steps have not all finished there.
+    pending: Mutex<HashMap<Scope, HashSet<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,9 +55,10 @@ pub(super) struct CollectionInfo {
 impl Registry {
     /// Validate and combine `schemas`.
     ///
-    /// Nothing touches a backend. Collections that have steps start out
-    /// *pending*: [`Registry::check_ready`] refuses them until
-    /// [`Registry::migrate`](Registry::migrate) has seen every step finished.
+    /// Nothing touches a backend. Items that have steps start out
+    /// *pending*: [`Registry::check_ready`] and [`Registry::check_ready_in`]
+    /// refuse them until [`Registry::migrate`](Registry::migrate) has seen
+    /// every step finished.
     ///
     /// # Errors
     ///
@@ -81,7 +86,7 @@ impl Registry {
         let mut claims: HashMap<&str, &Owner> = HashMap::new();
         let mut collections = HashMap::new();
         let mut declared = HashSet::new();
-        let mut pending = HashSet::new();
+        let mut stepped = HashSet::new();
         for schema in &schemas {
             for item in &schema.items {
                 check_item(&schema.owner, item, &owners)?;
@@ -98,13 +103,14 @@ impl Registry {
                 }
             }
             check_steps(schema)?;
-            pending.extend(schema.steps.iter().map(|step| step.item.to_owned()));
+            stepped.extend(schema.steps.iter().map(|step| step.item.to_owned()));
         }
         Ok(Self {
             schemas,
             collections,
             declared,
-            pending: Mutex::new(pending),
+            stepped,
+            pending: Mutex::new(HashMap::new()),
         })
     }
 
@@ -149,42 +155,87 @@ impl Registry {
         Ok(())
     }
 
-    /// Whether `item` may be written now. Typed repositories and hosts call it
-    /// before a write; drivers do not enforce it.
+    /// Whether `item` may be written in `scope` now. Typed repositories and
+    /// hosts call it before a write; drivers do not enforce it.
     ///
-    /// A collection with a step that has not finished is not open for writes
-    /// until [`Registry::migrate`](Registry::migrate) completes the chain.
+    /// Migration progress lives in each scope's own `tsd.migrations`, so
+    /// readiness is per scope: an item with steps is open in `scope` only
+    /// after [`Registry::migrate`](Registry::migrate) has finished every one of
+    /// its steps over that scope. A scope `migrate` has not run over is not
+    /// ready. Use this for any item whose data is split across scopes.
     ///
     /// # Errors
     ///
     /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) with the
-    /// message `migrating <owner>.<item>` while steps are pending;
+    /// message `migrating <owner>.<item>` while steps are pending in `scope`;
     /// [`ErrorKind::NotFound`](crate::ErrorKind::NotFound) when no owner
     /// declares `item`.
-    pub fn check_ready(&self, item: &str) -> Result<()> {
-        if !self.declared.contains(item) {
-            return Err(StorageError::not_found(format!(
-                "unknown storage item `{item}`"
-            )));
+    pub fn check_ready_in(&self, scope: &Scope, item: &str) -> Result<()> {
+        self.check_declared(item)?;
+        if !self.stepped.contains(item) {
+            return Ok(());
         }
-        if self.pending().contains(item) {
-            return Err(StorageError::unavailable(format!("migrating {item}")));
+        let ready = self
+            .pending()
+            .get(scope)
+            .is_some_and(|pending| !pending.contains(item));
+        if ready { Ok(()) } else { Err(migrating(item)) }
+    }
+
+    /// Whether `item` may be written now, without naming a scope: for a
+    /// process that migrates one scope, or a host that has no use for the
+    /// distinction.
+    ///
+    /// An item with steps is open once `migrate` has run over at least one
+    /// scope and no scope it has run over still has steps pending for it.
+    /// The registry cannot know scopes it has not been asked to migrate, so
+    /// this does **not** vouch for them; a host with several scopes calls
+    /// [`Registry::check_ready_in`] instead.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) with the
+    /// message `migrating <owner>.<item>` while steps are pending (or before
+    /// any scope was migrated); [`ErrorKind::NotFound`](crate::ErrorKind::NotFound)
+    /// when no owner declares `item`.
+    pub fn check_ready(&self, item: &str) -> Result<()> {
+        self.check_declared(item)?;
+        if !self.stepped.contains(item) {
+            return Ok(());
+        }
+        let pending = self.pending();
+        if pending.is_empty() || pending.values().any(|items| items.contains(item)) {
+            return Err(migrating(item));
         }
         Ok(())
     }
 
-    fn pending(&self) -> MutexGuard<'_, HashSet<String>> {
+    fn check_declared(&self, item: &str) -> Result<()> {
+        if self.declared.contains(item) {
+            Ok(())
+        } else {
+            Err(StorageError::not_found(format!(
+                "unknown storage item `{item}`"
+            )))
+        }
+    }
+
+    fn pending(&self) -> MutexGuard<'_, HashMap<Scope, HashSet<String>>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Replace the pending set (the runner, after reading `tsd.migrations`).
-    pub(super) fn set_pending(&self, items: HashSet<String>) {
-        *self.pending() = items;
+    /// Record the items `scope` still has steps pending for (the runner,
+    /// after reading that scope's `tsd.migrations`). Other scopes are not
+    /// touched.
+    pub(super) fn set_pending(&self, scope: &Scope, items: HashSet<String>) {
+        self.pending().insert(scope.clone(), items);
     }
 
-    /// Open `item` for writes.
-    pub(super) fn mark_ready(&self, item: &str) {
-        self.pending().remove(item);
+    /// Open `item` for writes in `scope`.
+    pub(super) fn mark_ready(&self, scope: &Scope, item: &str) {
+        if let Some(items) = self.pending().get_mut(scope) {
+            items.remove(item);
+        }
     }
 
     /// Every step with its owner, in run order.
@@ -193,6 +244,10 @@ impl Registry {
             .iter()
             .flat_map(|schema| schema.steps.iter().map(|step| (&schema.owner, step)))
     }
+}
+
+fn migrating(item: &str) -> StorageError {
+    StorageError::unavailable(format!("migrating {item}"))
 }
 
 fn check_item(owner: &Owner, item: &Item, owners: &HashSet<&str>) -> Result<()> {

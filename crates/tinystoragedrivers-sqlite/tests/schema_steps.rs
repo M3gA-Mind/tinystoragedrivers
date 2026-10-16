@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tinystoragedrivers_core::schema::{MigrateOptions, Owner, Registry, Schema, ScopeClass, Step};
 use tinystoragedrivers_core::{
     Result, Scope, ScopedStorage, SealOutcome, StorageBackend, StorageError, StreamEntry,
-    StreamStore, sealed_blob_key,
+    StreamInfo, StreamStore, sealed_blob_key,
 };
 use tinystoragedrivers_sqlite::SqliteStorage;
 
@@ -52,11 +52,25 @@ impl StreamStore for Flaky {
         self.spend()?;
         self.inner.append_batch(stream, values).await
     }
+    async fn append_batch_if_offset(
+        &self,
+        stream: &str,
+        expected_next_offset: u64,
+        values: Vec<Value>,
+    ) -> Result<u64> {
+        self.spend()?;
+        self.inner
+            .append_batch_if_offset(stream, expected_next_offset, values)
+            .await
+    }
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         self.inner.read_window(stream, from, limit).await
     }
     async fn len(&self, stream: &str) -> Result<u64> {
         self.inner.len(stream).await
+    }
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        self.inner.info(stream).await
     }
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         self.inner.truncate_before(stream, offset).await
