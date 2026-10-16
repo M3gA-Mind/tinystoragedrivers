@@ -26,13 +26,14 @@ use tinystoragedrivers_core::{
     sealed_blob_key, validate_stream,
 };
 
-use super::{MongoStreams, Segment, stored_offset};
+use super::{MongoStreams, Segment, head_id, stored_offset};
 use crate::convert::from_bson;
 use crate::errors;
 use crate::fence::in_write;
 use crate::naming::STREAM_SEGMENT_INDEX;
 use crate::scoped::ScopedCollection;
 use futures_util::TryStreamExt;
+use mongodb::ClientSession;
 use mongodb::bson::doc;
 use mongodb::options::FindOptions;
 
@@ -297,6 +298,80 @@ impl MongoStreams {
             Err(error) => return Err(errors::map(error, "seal a stream")),
         }
         self.seal_generation_unchanged(stream, generation).await
+    }
+
+    /// Delete `stream` only while it is the incarnation sealed at `sealed_ms`;
+    /// see [`StreamStore::delete_sealed_stream`](tinystoragedrivers_core::StreamStore::delete_sealed_stream).
+    ///
+    /// The incarnation is its generation: the seal marker is read from the
+    /// current generation, and the generation is then advanced with a
+    /// compare-and-swap on the value read (inside the write transaction when
+    /// the deployment has them). A stream deleted and recreated in between
+    /// has a newer generation, so the swap matches nothing and the new
+    /// incarnation stays.
+    pub(super) async fn delete_sealed_stream_impl(
+        &self,
+        stream: &str,
+        sealed_ms: i64,
+    ) -> Result<bool> {
+        validate_stream(stream)?;
+        let handle = self.segments().await?;
+        let deleted = if self.shared.physical_transactions {
+            self.shared.prepare_validation(Some(&self.scope)).await?;
+            in_write!(&self.shared, self.fence.as_deref(), session => {
+                self.hold_admission(&mut *session).await?;
+                self.delete_sealed_in(&handle, stream, sealed_ms, Some(session)).await
+            })?
+        } else {
+            self.delete_sealed_in(&handle, stream, sealed_ms, None)
+                .await?
+        };
+        if deleted {
+            self.purge_stale_sealed_blobs(stream).await?;
+        }
+        Ok(deleted)
+    }
+
+    async fn delete_sealed_in(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        sealed_ms: i64,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<bool> {
+        let current = self.generation(stream, session.as_deref_mut()).await?;
+        let Some(last) = self
+            .edge(handle, stream, current, -1, session.as_deref_mut())
+            .await?
+        else {
+            return Ok(false);
+        };
+        if last.sealed_base.is_none() || last.at_ms != Some(sealed_ms) {
+            return Ok(false);
+        }
+        // Advance only from the generation the marker was read in. A head
+        // that exists holds a positive generation, so only a missing one
+        // (generation 0) is created by the upsert.
+        let advanced = self
+            .heads()
+            .update_one(
+                doc! {"_id": head_id(&self.scope, stream), "n": stream, "g": current},
+                doc! {"$inc": {"g": 1_i64}},
+                current == 0,
+                session.as_deref_mut(),
+            )
+            .await;
+        match advanced {
+            Ok(result) if result.matched_count > 0 || result.upserted_id.is_some() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if errors::duplicate_index(&error).is_some() => return Ok(false),
+            Err(error) => return Err(errors::map(error, "delete a sealed stream")),
+        }
+        handle
+            .delete_many(doc! {"s": stream, "g": {"$lte": current}}, session)
+            .await
+            .map_err(errors::failed("delete a sealed stream"))?;
+        Ok(true)
     }
 
     /// Refuse to report a seal of a stream that was deleted meanwhile: the

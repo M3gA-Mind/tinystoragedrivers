@@ -616,6 +616,13 @@ impl StreamStore for MongoStreams {
         crate::purge::admitted!(self, self.seal_stream(stream).await)
     }
 
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        crate::purge::admitted!(
+            self,
+            self.delete_sealed_stream_impl(stream, sealed_ms).await
+        )
+    }
+
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
         crate::purge::admitted!(self, {
             let handle = self.segments().await?;

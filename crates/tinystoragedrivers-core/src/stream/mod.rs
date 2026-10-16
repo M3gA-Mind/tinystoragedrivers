@@ -137,6 +137,30 @@ pub trait StreamStore: Send + Sync + std::fmt::Debug {
         ))
     }
 
+    /// Remove `stream` only if it is sealed and was sealed at exactly
+    /// `sealed_ms` (the value [`info`](Self::info) reported), atomically with
+    /// that check, and report whether it did. Retention uses this so that a
+    /// stream deleted and recreated after it was inspected is never removed
+    /// in the old one's place.
+    ///
+    /// Returns `false`, and changes nothing, when the stream is missing, is
+    /// not sealed, or was sealed at another time. A recreated stream that is
+    /// sealed again within the same millisecond is indistinguishable; the
+    /// instant is the incarnation's identity.
+    ///
+    /// # Errors
+    ///
+    /// An invalid stream name, `Fenced` for a stale fence,
+    /// `Unsupported(StreamSeal)` when the driver cannot seal (the default), or
+    /// a backend error.
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        let _ = (stream, sealed_ms);
+        Err(StorageError::unsupported(
+            crate::Capability::StreamSeal,
+            "this driver cannot conditionally delete a sealed stream",
+        ))
+    }
+
     /// The extent and recorded times of `stream`, or `None` when it does not
     /// exist. A sealed stream still reports (its head outlives the seal) with
     /// `sealed_ms` set; `len` and `base` equal what [`len`](Self::len) and

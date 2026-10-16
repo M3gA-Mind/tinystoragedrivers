@@ -51,9 +51,11 @@ impl Allowance {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Action {
     Seal,
-    Delete,
+    /// Delete the incarnation sealed at this instant.
+    Delete(i64),
 }
 
 /// What `policy` wants done to a stream with `info` at `now_ms`. A missing
@@ -61,7 +63,7 @@ enum Action {
 fn due(policy: &SealPolicy, info: &StreamInfo, now_ms: i64) -> Option<Action> {
     if let Some(sealed) = info.sealed_ms {
         let retain = policy.retain_ms?;
-        (sealed.saturating_add(retain) < now_ms).then_some(Action::Delete)
+        (sealed.saturating_add(retain) < now_ms).then_some(Action::Delete(sealed))
     } else {
         let SealWhen::Idle(idle_ms) = policy.when else {
             return None;
@@ -87,8 +89,9 @@ impl Registry {
     /// - a stream that is not sealed, under [`SealWhen::Idle`]`(ms)`, whose
     ///   last append is more than `ms` before `now_ms`, is sealed;
     /// - a sealed stream under a policy with `retain_ms`, sealed more than
-    ///   `retain_ms` before `now_ms`, is deleted (`delete_stream`, which
-    ///   removes the sealed blob too).
+    ///   `retain_ms` before `now_ms`, is deleted (`delete_sealed_stream`,
+    ///   which removes the sealed blob too, and only if the stream is still
+    ///   the one inspected: sealed at the same instant).
     ///
     /// [`SealWhen::OnFinish`] streams are sealed by their owners and
     /// [`SealWhen::Never`] ones never, but retention applies to any sealed
@@ -97,8 +100,11 @@ impl Registry {
     ///
     /// `budget.max_streams` bounds the streams sealed or deleted in this
     /// call; when it runs out the report says `exhausted` and the host calls
-    /// again later. A race (another writer appended, sealed or deleted the
-    /// stream first) is counted in `conflicts`, not returned.
+    /// again later. A race (another writer sealed or deleted the stream
+    /// first, or deleted and recreated it so it is no longer the one
+    /// inspected) is counted in `conflicts`, not returned. An idle stream
+    /// appended to after inspection is still sealed: idleness was the
+    /// trigger, and `seal` keeps every entry.
     ///
     /// The policy applies to every scope class: the host chooses which scopes
     /// to hand in. Run the backend's own
@@ -193,12 +199,16 @@ impl Registry {
                     }
                     allowance.touch();
                     let outcome = match action {
-                        Action::Seal => streams.seal(&name).await.map(|_| ()),
-                        Action::Delete => streams.delete_stream(&name).await.map(|_| ()),
+                        Action::Seal => streams.seal(&name).await.map(|_| true),
+                        Action::Delete(sealed_ms) => {
+                            streams.delete_sealed_stream(&name, sealed_ms).await
+                        }
                     };
                     match (outcome, action) {
-                        (Ok(()), Action::Seal) => report.sealed += 1,
-                        (Ok(()), Action::Delete) => report.deleted += 1,
+                        (Ok(true), Action::Seal) => report.sealed += 1,
+                        (Ok(true), Action::Delete(_)) => report.deleted += 1,
+                        // The stream is no longer the sealed one inspected.
+                        (Ok(false), _) => report.conflicts += 1,
                         (Err(error), _)
                             if matches!(
                                 error.kind(),

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 
 use super::*;
+use crate::StreamStore;
 use crate::schema::{Owner, Schema, ScopeClass};
 use crate::{
     ErrorKind, MaintenanceBudget, MemoryStorage, Scope, SealPolicy, SealWhen, StorageBackend,
@@ -420,4 +421,97 @@ async fn maintain_all_needs_scope_enumeration() {
         error.kind(),
         ErrorKind::Unsupported(crate::Capability::ScopeEnumeration)
     );
+}
+
+/// A store that, once armed, deletes and recreates the stream right after
+/// `info` reports it, as another writer racing maintenance would.
+#[derive(Debug)]
+struct Recreating {
+    inner: Arc<dyn StreamStore>,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl StreamStore for Recreating {
+    async fn append(&self, stream: &str, value: serde_json::Value) -> crate::Result<u64> {
+        self.inner.append(stream, value).await
+    }
+    async fn append_batch(
+        &self,
+        stream: &str,
+        values: Vec<serde_json::Value>,
+    ) -> crate::Result<u64> {
+        self.inner.append_batch(stream, values).await
+    }
+    async fn read_window(
+        &self,
+        stream: &str,
+        from: u64,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::StreamEntry>> {
+        self.inner.read_window(stream, from, limit).await
+    }
+    async fn len(&self, stream: &str) -> crate::Result<u64> {
+        self.inner.len(stream).await
+    }
+    async fn truncate_before(&self, stream: &str, offset: u64) -> crate::Result<u64> {
+        self.inner.truncate_before(stream, offset).await
+    }
+    async fn delete_stream(&self, stream: &str) -> crate::Result<bool> {
+        self.inner.delete_stream(stream).await
+    }
+    async fn seal(&self, stream: &str) -> crate::Result<crate::SealOutcome> {
+        self.inner.seal(stream).await
+    }
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> crate::Result<bool> {
+        self.inner.delete_sealed_stream(stream, sealed_ms).await
+    }
+    async fn info(&self, stream: &str) -> crate::Result<Option<crate::StreamInfo>> {
+        let info = self.inner.info(stream).await?;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.inner.delete_stream(stream).await?;
+            self.inner.append(stream, json!("fresh")).await?;
+        }
+        Ok(info)
+    }
+    async fn streams(&self, prefix: &str) -> crate::Result<Vec<String>> {
+        self.inner.streams(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn retention_never_deletes_a_stream_recreated_after_inspection() {
+    let rig = rig();
+    let registry = registry(idle(100).retaining_ms(500));
+    rig.append("shop.log/a").await;
+    rig.at(1_200);
+    registry
+        .maintain(&rig.storage, 1_200, MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert!(rig.sealed("shop.log/a").await);
+
+    let racing = Arc::new(Recreating {
+        inner: Arc::clone(rig.storage.streams()),
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let storage = crate::ScopedStorage::new(
+        Scope::local(),
+        "memory",
+        Arc::clone(rig.storage.documents()),
+        racing.clone(),
+        Arc::clone(rig.storage.blobs()),
+    );
+    racing.armed.store(true, Ordering::SeqCst);
+    let report = registry
+        .maintain(&storage, 1_800, MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+
+    assert!(
+        rig.exists("shop.log/a").await,
+        "the new incarnation survives"
+    );
+    assert!(!rig.sealed("shop.log/a").await);
+    assert_eq!((report.deleted, report.conflicts), (0, 1));
 }

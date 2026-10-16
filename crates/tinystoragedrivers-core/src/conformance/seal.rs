@@ -36,6 +36,24 @@ pub(super) async fn run(storage: &ScopedStorage) {
     info_records_times(storage).await;
 }
 
+/// The checks of host-only sealing primitives, which the storage bus does not
+/// carry (retention runs in the host, beside `maintain`): a bus client is not
+/// expected to pass these, so [`run_ports`](super::run_ports) leaves them out.
+pub(super) async fn run_host(storage: &ScopedStorage) {
+    if !has(storage, Capability::StreamSeal) {
+        fails(
+            storage
+                .streams()
+                .delete_sealed_stream(&unique("seal_cond_unsupported"), 1)
+                .await,
+            ErrorKind::Unsupported(Capability::StreamSeal),
+            "delete_sealed_stream on a driver without StreamSeal",
+        );
+        return;
+    }
+    delete_sealed_stream_removes_only_the_inspected_incarnation(storage).await;
+}
+
 /// Every entry of `stream`, read in pages of `PAGE`.
 async fn paged(streams: &dyn StreamStore, stream: &str) -> Vec<StreamEntry> {
     let mut out = Vec::new();
@@ -328,6 +346,91 @@ async fn delete_removes_the_blob(storage: &ScopedStorage) {
         "a deleted sealed stream starts over unsealed"
     );
     assert_eq!(ok(streams.read_window(&name, 0, 10).await, "read").len(), 1);
+}
+
+/// `delete_sealed_stream` removes a stream only while it is the sealed
+/// incarnation that was inspected, so a stream recreated since survives.
+async fn delete_sealed_stream_removes_only_the_inspected_incarnation(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("seal_cond_delete");
+    assert!(
+        !ok(
+            streams.delete_sealed_stream(&name, 1).await,
+            "conditional delete of a missing stream"
+        ),
+        "a missing stream is not deleted"
+    );
+    fails(
+        streams.delete_sealed_stream("", 1).await,
+        ErrorKind::InvalidInput,
+        "conditional delete of an empty name",
+    );
+
+    ok(streams.append_batch(&name, values(3)).await, "fill");
+    assert!(
+        !ok(
+            streams.delete_sealed_stream(&name, 1).await,
+            "conditional delete of an open stream"
+        ),
+        "an unsealed stream is not deleted"
+    );
+    assert_eq!(ok(streams.len(&name).await, "len"), 3, "open stream kept");
+
+    ok(streams.seal(&name).await, "seal");
+    let first = ok(streams.info(&name).await, "info")
+        .and_then(|info| info.sealed_ms)
+        .expect("sealed time");
+    assert!(
+        !ok(
+            streams.delete_sealed_stream(&name, first + 1).await,
+            "conditional delete at another instant"
+        ),
+        "a different sealed instant does not match"
+    );
+    assert_eq!(ok(streams.len(&name).await, "len"), 3, "sealed stream kept");
+
+    // Another actor deletes and recreates the stream after it was inspected.
+    assert!(ok(streams.delete_stream(&name).await, "delete"));
+    ok(streams.append(&name, json!("fresh")).await, "recreate");
+    assert!(
+        !ok(
+            streams.delete_sealed_stream(&name, first).await,
+            "conditional delete of a recreated stream"
+        ),
+        "the new incarnation is not the one inspected"
+    );
+    assert_eq!(ok(streams.len(&name).await, "len"), 1, "fresh stream kept");
+
+    // Recreated and sealed again later: still not the inspected instant.
+    clock_past(&**streams, first).await;
+    ok(streams.seal(&name).await, "seal again");
+    let second = ok(streams.info(&name).await, "info")
+        .and_then(|info| info.sealed_ms)
+        .expect("sealed time");
+    assert!(second > first, "a later seal records a later instant");
+    assert!(
+        !ok(
+            streams.delete_sealed_stream(&name, first).await,
+            "conditional delete with the old instant"
+        ),
+        "the old instant does not match the new incarnation"
+    );
+    assert!(
+        ok(
+            streams.delete_sealed_stream(&name, second).await,
+            "conditional delete at the sealed instant"
+        ),
+        "the matching incarnation is deleted"
+    );
+    assert_eq!(ok(streams.info(&name).await, "info"), None, "stream gone");
+    assert_eq!(
+        ok(
+            streams.append(&name, json!("again")).await,
+            "reuse the name"
+        ),
+        0,
+        "a deleted sealed stream starts over unsealed"
+    );
 }
 
 /// Wait until the driver's own clock reads later than `stamp_ms`, observed

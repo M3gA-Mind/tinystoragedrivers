@@ -341,6 +341,7 @@ impl StepRun<'_> {
                 Precondition::Absent
             };
             let (collection, id, body) = (output.collection, output.id, output.body);
+            let created_ms = output.created_ms;
             match self
                 .docs
                 .put_with(&collection, &id, body.clone(), precondition, write)
@@ -348,7 +349,8 @@ impl StepRun<'_> {
             {
                 Ok(_) => {}
                 // Only an interrupted run of this step may have left the
-                // output behind, and then it holds exactly this body. Any
+                // output behind, and then it holds exactly this body, schema
+                // and (when the step supplies one) creation time. Any
                 // other conflict (a stranger under the id, a unique-index
                 // collision with another document, a concurrent edit) stops
                 // the step.
@@ -356,7 +358,12 @@ impl StepRun<'_> {
                     if matches!(error.kind(), ErrorKind::AlreadyExists | ErrorKind::Conflict) =>
                 {
                     let stored = self.docs.get(&collection, &id).await?;
-                    if stored.is_none_or(|found| found.doc != body) {
+                    let identical = stored.is_some_and(|found| {
+                        found.doc == body
+                            && found.meta.schema == schema
+                            && created_ms.is_none_or(|created| found.meta.created_ms == created)
+                    });
+                    if !identical {
                         return Err(error);
                     }
                 }
