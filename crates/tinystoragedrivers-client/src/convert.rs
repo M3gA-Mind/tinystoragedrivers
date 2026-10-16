@@ -11,8 +11,10 @@ use tinystoragedrivers_core::{
 /// Capabilities bus callers never see: a host keeps them to itself, or the
 /// storage-bus wire cannot carry what they promise yet (`RecordMetadata`
 /// until the contract carries `Meta`; `Maintenance` and `ScopeEnumeration`
-/// until it carries `maintain`, `checkpoint` and `scopes`).
-pub(crate) const HOST_ONLY: [Capability; 8] = [
+/// until it carries `maintain`, `checkpoint` and `scopes`; `StreamSeal` until
+/// it carries the seal call).
+pub(crate) const HOST_ONLY: [Capability; 9] = [
+    Capability::StreamSeal,
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,

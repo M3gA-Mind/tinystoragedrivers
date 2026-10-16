@@ -68,10 +68,13 @@ pub enum Capability {
     /// [`StorageBackend::scopes`](crate::StorageBackend::scopes) lists the
     /// scopes that hold records.
     ScopeEnumeration,
+    /// [`StreamStore::seal`](crate::StreamStore::seal): close a stream to
+    /// appends and keep its entries as one compressed blob.
+    StreamSeal,
 }
 
 impl Capability {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -91,6 +94,7 @@ impl Capability {
         Self::RecordMetadata,
         Self::Maintenance,
         Self::ScopeEnumeration,
+        Self::StreamSeal,
     ];
 
     const fn bit(self) -> u32 {
@@ -114,6 +118,7 @@ impl Capability {
             Self::RecordMetadata => 1 << 16,
             Self::Maintenance => 1 << 17,
             Self::ScopeEnumeration => 1 << 18,
+            Self::StreamSeal => 1 << 19,
         }
     }
 }
@@ -140,6 +145,7 @@ impl fmt::Display for Capability {
             Self::RecordMetadata => "record_metadata",
             Self::Maintenance => "maintenance",
             Self::ScopeEnumeration => "scope_enumeration",
+            Self::StreamSeal => "stream_seal",
         })
     }
 }
@@ -192,7 +198,8 @@ impl Capabilities {
                 | Capability::BlobTtl.bit()
                 | Capability::RecordMetadata.bit()
                 | Capability::Maintenance.bit()
-                | Capability::ScopeEnumeration.bit(),
+                | Capability::ScopeEnumeration.bit()
+                | Capability::StreamSeal.bit(),
         )
     }
 

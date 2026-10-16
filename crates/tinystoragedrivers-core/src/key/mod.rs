@@ -65,7 +65,7 @@ pub struct Key(String);
 
 impl Key {
     /// Join `parts` into one escaped key, hashing it if it exceeds
-    /// [`MAX_ID_LEN`] bytes (see the [module docs](self)).
+    /// [`MAX_ID_LEN`] bytes.
     ///
     /// Empty parts are allowed and encode as nothing, so `["a", "", "b"]`
     /// becomes `a//b`.

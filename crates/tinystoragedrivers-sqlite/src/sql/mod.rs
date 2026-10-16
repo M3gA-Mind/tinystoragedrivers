@@ -121,6 +121,7 @@ impl Tables {
                  stream TEXT NOT NULL,
                  base INTEGER NOT NULL,
                  len INTEGER NOT NULL,
+                 sealed INTEGER NOT NULL DEFAULT 0,
                  PRIMARY KEY (scope, stream)
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS {blobs} (
@@ -154,11 +155,36 @@ impl Tables {
         conn.execute_batch(&self.declaration_sql())
             .map_err(during("create tables"))?;
         self.migrate_blob_expiry(conn)?;
+        self.migrate_stream_sealing(conn)?;
         conn.execute_batch(&format!(
             "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
             ident(&self.purge_receipts), ident(&self.admissions),
         )).map_err(during("migrate purge receipts"))
     }
+    /// Add the sealed flag to a stream head table created before streams
+    /// could be sealed. Every existing stream stays unsealed.
+    ///
+    /// The column lands ahead of the table constraints, as in
+    /// [`Self::migrate_blob_expiry`], so the stored declaration matches a
+    /// fresh one.
+    fn migrate_stream_sealing(&self, conn: &Connection) -> Result<()> {
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = 'sealed'",
+                [&self.stream_meta],
+                |row| row.get(0),
+            )
+            .map_err(during("inspect stream table"))?;
+        if !has_column {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0",
+                ident(&self.stream_meta)
+            ))
+            .map_err(during("add stream sealed column"))?;
+        }
+        Ok(())
+    }
+
     /// Add the blob lifetime column to a table created before it existed.
     ///
     /// SQLite places an added column ahead of the table constraints, so the

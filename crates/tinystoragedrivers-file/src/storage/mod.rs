@@ -64,7 +64,8 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::ExistingSchema)
     .with(Capability::CollectionValidation)
     .with(Capability::BlobTtl)
-    .with(Capability::ScopeEnumeration);
+    .with(Capability::ScopeEnumeration)
+    .with(Capability::StreamSeal);
 
 fn system_clock() -> u64 {
     SystemTime::now()
@@ -209,7 +210,7 @@ impl Db {
 #[derive(Clone)]
 pub struct FileStorage {
     root: PathBuf,
-    db: Arc<Db>,
+    pub(crate) db: Arc<Db>,
     existing: bool,
 }
 

@@ -92,7 +92,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [x] 3 metadata (core + memory driver; other drivers in task 9, bus in task 10)
 - [ ] 4 registry
 - [ ] 5 primitives
-- [ ] 6 sealing
+- [x] 6 sealing
 - [x] 7 maintenance
 - [ ] 8 sqlite v2
 - [ ] 9 mongodb, file, s3

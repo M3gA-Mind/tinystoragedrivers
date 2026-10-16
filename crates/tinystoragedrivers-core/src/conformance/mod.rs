@@ -25,6 +25,7 @@ mod maintenance;
 mod purge;
 mod purge_history;
 mod schema;
+mod seal;
 mod semantics;
 mod streams;
 mod validated;
@@ -54,6 +55,7 @@ pub async fn run_ports(storage: &ScopedStorage) {
     validated::run(storage).await;
     watch::run(storage).await;
     streams::run(storage).await;
+    seal::run(storage).await;
     blobs::run(storage).await;
 }
 

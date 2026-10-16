@@ -50,6 +50,7 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::BlobTtl)
         .with(Capability::Maintenance)
         .with(Capability::ScopeEnumeration)
+        .with(Capability::StreamSeal)
 }
 
 /// SQLite documents bound to one scope.

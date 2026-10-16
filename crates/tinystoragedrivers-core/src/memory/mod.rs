@@ -380,3 +380,7 @@ mod blob_ttl_tests;
 #[cfg(test)]
 #[path = "meta_tests.rs"]
 mod meta_tests;
+
+#[cfg(test)]
+#[path = "seal_tests.rs"]
+mod seal_tests;

@@ -43,6 +43,7 @@ fn all_holds_every_capability() {
             Capability::RecordMetadata,
             Capability::Maintenance,
             Capability::ScopeEnumeration,
+            Capability::StreamSeal,
         ]
     );
 }
@@ -88,6 +89,7 @@ fn renders_names() {
         (Capability::RecordMetadata, "record_metadata"),
         (Capability::Maintenance, "maintenance"),
         (Capability::ScopeEnumeration, "scope_enumeration"),
+        (Capability::StreamSeal, "stream_seal"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

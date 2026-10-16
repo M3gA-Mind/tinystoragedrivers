@@ -140,6 +140,7 @@ Versioned JSON **objects** in named collections.
 Append-only logs of JSON values.
 - Offsets are dense, start at 0, and are never reused.
 - `truncate_before` discards old records but leaves `len` unchanged.
+- `seal` (capability `StreamSeal`) closes a stream to appends and stores its entries as one zstd blob at `_tsd/sealed/<escaped name>` in the same scope. Reads are unchanged; appends and `truncate_before` are `Conflict`; sealing is idempotent; a missing stream is `NotFound`; `delete_stream` removes the blob. See `schema-v2.md` section 6.
 
 Optional ConditionalStreamAppend provides append_batch_if_offset(stream,
 expected_next_offset, values). Compare the persistent next offset and append

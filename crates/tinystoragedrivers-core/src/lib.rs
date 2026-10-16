@@ -101,7 +101,10 @@ pub use scope::{
     AGENT_INFIX, CLUSTER, MAX_SCOPE_LEN, MAX_SEGMENT_LEN, MODULE_INFIX, ParsedScope, Principal,
     Scope, Tenant, USER_PREFIX,
 };
-pub use stream::{StreamEntry, StreamStore, validate_stream};
+pub use stream::{
+    SEALED_BLOB_PREFIX, SealOutcome, SealPolicy, SealWhen, SealedLog, StreamEntry, StreamStore,
+    sealed_blob_key, validate_stream,
+};
 
 /// The `async_trait` attribute the port traits are declared with, re-exported
 /// so a driver implements them without naming the dependency itself.
