@@ -32,17 +32,30 @@ fn wal_size(file: &Path) -> u64 {
     std::fs::metadata(wal).map_or(0, |meta| meta.len())
 }
 
+/// 8 KiB of text that zstd cannot shrink, so a document's size on disk is its
+/// size in the file (bodies over 4 KiB are stored compressed).
+fn filler(seed: usize) -> String {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (seed as u64).wrapping_mul(0xA24B_AED4_963E_E407);
+    (0..8 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(b'!' + u8::try_from(state % 90).unwrap())
+        })
+        .collect()
+}
+
 /// Fill the local scope with large documents, then delete them all, so the
 /// file is mostly free pages.
 async fn fill_and_empty(storage: &SqliteStorage) {
     let docs = storage.for_scope(&Scope::local()).unwrap();
     let docs = docs.documents();
-    let filler = "x".repeat(8 * 1024);
     for n in 0..DOCS {
         docs.put(
             "bulk",
             &format!("doc-{n}"),
-            json!({"filler": filler}),
+            json!({"filler": filler(n)}),
             Precondition::None,
         )
         .await

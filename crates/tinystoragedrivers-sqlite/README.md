@@ -35,7 +35,7 @@ backend and passes the shared conformance suite in both layouts.
     `_expires_ms` filter and sort through the columns.
 - **Documents** are stored in one `WITHOUT ROWID` table per database, keyed by
   `(scope, collection, id)`.
-  - Declared indexes become partial `json_extract` expression indexes.
+  - A body over 4 KiB is stored zstd-compressed. Declared index and search fields are projected into a `doc_fields` side table, which indexes and SQL filters read; other filters run in Rust.
   - Unique constraints are checked in the write transaction with the same
     equality the memory driver uses.
   - Declared search fields are mirrored into an FTS5 table.
