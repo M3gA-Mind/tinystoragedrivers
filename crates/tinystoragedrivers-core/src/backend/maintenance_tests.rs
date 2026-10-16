@@ -1,7 +1,5 @@
 //! Maintenance values and the refusals a driver without the abilities gives.
 
-use std::sync::Arc;
-
 use super::*;
 use crate::{Capabilities, ErrorKind, MemoryStorage, Result, Scope, ScopedStorage, StorageBackend};
 
@@ -17,9 +15,6 @@ impl StorageBackend for Plain {
     }
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         MemoryStorage::new().for_scope(scope)
-    }
-    fn database(&self, _: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Plain))
     }
 }
 

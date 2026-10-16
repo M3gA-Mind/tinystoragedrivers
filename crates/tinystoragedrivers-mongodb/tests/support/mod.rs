@@ -40,6 +40,20 @@ pub(crate) async fn connect() -> Option<MongoStorage> {
     )
 }
 
+/// The name of the database `connect_isolated(label)` uses.
+pub(crate) fn isolated_name(label: &str) -> String {
+    format!("tsd_{label}_{}", std::process::id())
+}
+
+/// A backend on its own database of the configured server, so a test shares
+/// no collections with the others. Call only after `connect` found a server.
+pub(crate) async fn connect_isolated(label: &str) -> MongoStorage {
+    let url = url().expect("TSD_MONGO_URL is set");
+    MongoStorage::connect(&url, &isolated_name(label))
+        .await
+        .expect("TSD_MONGO_URL is set but the server cannot be reached")
+}
+
 /// Note a skipped live test.
 pub(crate) fn skip(name: &str) {
     eprintln!("{name}: TSD_MONGO_URL is not set; skipping");

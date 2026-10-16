@@ -232,7 +232,7 @@ impl Shared {
         let names = self
             .db
             .list_collection_names()
-            .filter(doc! {"name": format!("{}{name}", self.prefix)})
+            .filter(doc! {"name": name})
             .await
             .map_err(errors::failed("inspect existing collection"))?;
         Ok(!names.is_empty())
@@ -347,7 +347,7 @@ impl Shared {
         if self.existing {
             return self.validate_indexes(name, &models).await;
         }
-        let key = format!("{}{name}", self.prefix);
+        let key = name.to_owned();
         if self.specs.is_prepared(&key) {
             return Ok(());
         }
@@ -509,8 +509,7 @@ impl Shared {
             .create_indexes(models)
             .await
             .map_err(errors::failed("build the declared indexes"))?;
-        self.specs
-            .mark_prepared(&format!("{}{}", self.prefix, merged.name));
+        self.specs.mark_prepared(&merged.name);
         // Search fields only accumulate (`CollectionSpec::merge`), so a
         // declaration never goes from searchable to not searchable.
         let Some(model) = text else {

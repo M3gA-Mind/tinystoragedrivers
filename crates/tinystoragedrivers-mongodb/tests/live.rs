@@ -38,7 +38,6 @@ async fn live_true_standalone_keeps_single_document_writes_and_refuses_checked_b
         Capability::Transactions,
         Capability::ValidatedBatch,
         Capability::Fencing,
-        Capability::CrossDatabaseFencing,
         Capability::ScopePurge,
         Capability::AtomicScopePurge,
     ] {

@@ -1,7 +1,7 @@
 //! Streaming S3-compatible blob storage without an AWS SDK dependency.
 //!
 //! This crate supplies only blobs: pair it with a document/stream backend.
-//! Each scope and database occupies a distinct object key prefix.
+//! Each scope occupies a distinct object key prefix.
 //!
 //! ```
 //! use tinystoragedrivers_s3::S3Config;

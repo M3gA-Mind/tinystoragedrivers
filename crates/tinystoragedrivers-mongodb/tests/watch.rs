@@ -11,8 +11,7 @@ async fn live_watch_subscribe_before_read_sees_insert_and_filter_exit() {
     let Some(backend) = support::connect().await else {
         return support::skip("live_watch_subscribe_before_read");
     };
-    let name = format!("watch_{}", std::process::id());
-    let db = backend.database(&name).unwrap();
+    let db = backend;
     let a = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     let independent = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     let bob = db.for_scope(&Scope::new("bob").unwrap()).unwrap();
@@ -88,12 +87,10 @@ async fn live_watch_subscribe_before_read_sees_insert_and_filter_exit() {
 #[tokio::test]
 async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_context() {
     use tinystoragedrivers_core::ErrorKind;
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_cursor_binding");
     };
-    let db = backend
-        .database(&format!("cursor_{}", std::process::id()))
-        .unwrap();
+    let db = support::connect_isolated("cursor").await;
     let a = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     let docs = a.documents();
     let filter = Filter::eq("state", "queued");
@@ -142,9 +139,8 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
         Some(WatchNotice::Invalidated { .. })
     ));
     let b = db.for_scope(&Scope::new("bob").unwrap()).unwrap();
-    let other_db = backend
-        .database(&format!("other_{}", std::process::id()))
-        .unwrap()
+    let other_db = support::connect_isolated("other")
+        .await
         .for_scope(&Scope::new("alice").unwrap())
         .unwrap();
     for (handle, collection, query) in [
@@ -163,10 +159,8 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
             ErrorKind::InvalidInput
         );
     }
-    let fresh = support::connect().await.unwrap();
-    let same_db_new_context = fresh
-        .database(&format!("cursor_{}", std::process::id()))
-        .unwrap()
+    let same_db_new_context = support::connect_isolated("cursor")
+        .await
         .for_scope(&Scope::new("alice").unwrap())
         .unwrap();
     assert_eq!(
@@ -184,12 +178,10 @@ async fn live_watch_cursor_binding_refuses_cross_scope_database_filter_and_conte
 #[tokio::test]
 async fn live_watch_stale_fence_refuses_open_delivery_and_cursor_rebinding() {
     use tinystoragedrivers_core::{ErrorKind, Fence};
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_stale_fence");
     };
-    let db = backend
-        .database(&format!("fenced_watch_{}", std::process::id()))
-        .unwrap();
+    let db = support::connect_isolated("fenced_watch").await;
     let cluster = db.for_scope(&Scope::local()).unwrap();
     cluster
         .documents()
@@ -264,15 +256,14 @@ async fn live_watch_logical_expiry_invalidates_before_physical_sweep() {
         atomic::{AtomicU64, Ordering},
     };
     use tinystoragedrivers_core::CollectionSpec;
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_logical_expiry");
     };
     let clock = Arc::new(AtomicU64::new(1_000));
     let time = Arc::clone(&clock);
-    let backend = backend.with_clock(Arc::new(move || time.load(Ordering::SeqCst)));
-    let db = backend
-        .database(&format!("ttl_watch_{}", std::process::id()))
-        .unwrap();
+    let db = support::connect_isolated("ttl_watch")
+        .await
+        .with_clock(Arc::new(move || time.load(Ordering::SeqCst)));
     let a = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     a.documents()
         .ensure_collection(&CollectionSpec::new("tasks").ttl("expires_at"))
@@ -310,12 +301,10 @@ async fn live_watch_logical_expiry_invalidates_before_physical_sweep() {
 async fn live_watch_lost_history_requires_terminal_reset_with_native_source() {
     use std::error::Error;
     use tinystoragedrivers_core::{WatchCursor, WatchReset};
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_lost_history");
     };
-    let db = backend
-        .database(&format!("resume_loss_{}", std::process::id()))
-        .unwrap();
+    let db = support::connect_isolated("resume_loss").await;
     let scoped = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     let options = WatchOptions {
         interval: Duration::from_secs(10),
@@ -391,12 +380,11 @@ async fn live_watch_lost_history_requires_terminal_reset_with_native_source() {
 #[tokio::test]
 async fn live_watch_collection_drop_requires_terminal_reset_and_fresh_subscription() {
     use tinystoragedrivers_core::WatchReset;
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_collection_drop");
     };
     let url = support::url().unwrap();
-    let name = format!("drop_watch_{}", std::process::id());
-    let db = backend.database(&name).unwrap();
+    let db = support::connect_isolated("drop_watch").await;
     let scoped = db.for_scope(&Scope::new("alice").unwrap()).unwrap();
     scoped
         .documents()
@@ -416,8 +404,8 @@ async fn live_watch_collection_drop_requires_terminal_reset_and_fresh_subscripti
     // Native namespace destruction, rather than scoped DocumentStore deletion.
     // This fixture owns this exact prefix and never drops the shared database.
     client
-        .database(&support::database(&url))
-        .collection::<mongodb::bson::Document>(&format!("{name}:tasks"))
+        .database(&support::isolated_name("drop_watch"))
+        .collection::<mongodb::bson::Document>("tasks")
         .drop()
         .await
         .unwrap();
@@ -490,12 +478,10 @@ async fn live_standalone_watch_is_typed_unsupported() {
 #[tokio::test]
 async fn live_watch_retired_generation_refuses_open_and_delivery() {
     use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
-    let Some(backend) = support::connect().await else {
+    let Some(_) = support::connect().await else {
         return support::skip("live_watch_retired_generation");
     };
-    let db = backend
-        .database(&format!("generation_watch_{}", std::process::id()))
-        .unwrap();
+    let db = support::connect_isolated("generation_watch").await;
     let scope = Scope::new("alice").unwrap();
     let original = db.for_scope(&scope).unwrap();
     let options = WatchOptions {

@@ -193,7 +193,7 @@ impl MongoBlobs {
                 .prepare(&format!("{BLOBS}.chunks"), vec![chunk_index()])
                 .await?;
         }
-        let name = format!("{}{BLOBS}", self.shared.prefix);
+        let name = BLOBS.to_owned();
         let models = if self.shared.existing {
             vec![file_index(), standard_file_index()]
         } else {

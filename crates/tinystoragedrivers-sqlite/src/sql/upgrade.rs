@@ -47,8 +47,8 @@ pub(super) struct V0 {
 }
 
 impl V0 {
-    pub(super) fn new(prefix: &str) -> Self {
-        let name = |table: &str| format!("{prefix}_tsd_{table}");
+    pub(super) fn new() -> Self {
+        let name = |table: &str| format!("_tsd_{table}");
         Self {
             docs: name("docs"),
             fts: name("fts"),
@@ -95,7 +95,7 @@ pub(super) fn has_column(conn: &Connection, table: &str, column: &str) -> Result
 }
 
 fn convert(conn: &Connection, tables: &Tables, now_ms: i64) -> Result<()> {
-    let old = V0::new(&tables.prefix);
+    let old = V0::new();
     let ddl: Vec<String> = tables
         .declarations()
         .into_iter()

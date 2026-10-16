@@ -26,10 +26,8 @@ pub(crate) async fn list(shared: &Shared, prefix: &str) -> Result<Vec<Scope>> {
         ("_scope", STREAM_HEADS.to_owned()),
         ("metadata._scope", format!("{BLOBS}.files")),
     ];
-    for physical in names {
-        let Some(name) = physical.strip_prefix(&shared.prefix) else {
-            continue;
-        };
+    for name in names {
+        let name = name.as_str();
         if !name.starts_with(RESERVED_PREFIX) && validate_collection(name).is_ok() {
             sources.push(("_scope", name.to_owned()));
         }

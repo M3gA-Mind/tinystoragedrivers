@@ -1,4 +1,4 @@
-//! The document rules applied to files, run under the database lock.
+//! The document rules applied to files, run under the directory lock.
 //!
 //! These mirror the memory driver's `DbState` one for one: expired documents
 //! stay on disk (so versions keep rising across expiry) but read as absent.
@@ -87,7 +87,7 @@ pub(super) fn collision() -> StorageError {
     StorageError::backend("file storage name hash collision; refusing to overwrite another entry")
 }
 
-/// One scope's documents in one database.
+/// One scope's documents.
 #[derive(Debug)]
 pub(super) struct Docs<'a> {
     pub(super) db: &'a Db,

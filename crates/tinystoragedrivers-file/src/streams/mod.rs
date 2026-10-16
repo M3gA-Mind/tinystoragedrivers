@@ -84,7 +84,7 @@ struct Line {
 pub struct FileStreams {
     db: Arc<Db>,
     scope: Scope,
-    /// Checked under the database lock before every write, when set.
+    /// Checked under the directory lock before every write, when set.
     fence: Option<Arc<Fencing>>,
 }
 
@@ -112,7 +112,7 @@ impl FileStreams {
         }
     }
 
-    /// Run `work` under the database lock with this stream's paths.
+    /// Run `work` under the directory lock with this stream's paths.
     async fn with<T, F>(&self, name: &str, work: F) -> Result<T>
     where
         T: Send + 'static,
@@ -154,13 +154,10 @@ impl FileStreams {
         validate_stream(name)?;
         let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
         self.db
-            .run_with_guard(
-                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
-                move |db| {
-                    guard(db, fence.as_deref())?;
-                    work(db, &scope, &Self::paths(db, &scope, &name))
-                },
-            )
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                work(db, &scope, &Self::paths(db, &scope, &name))
+            })
             .await
     }
 }

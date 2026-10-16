@@ -8,7 +8,7 @@ use super::*;
 
 fn projection() -> Projection {
     let spec = CollectionSpec::new("jobs").index(IndexSpec::new("by", ["state", "rank"]));
-    let tables = crate::sql::Tables::new("");
+    let tables = crate::sql::Tables::new();
     Projection::new(
         Ctx {
             tables: &tables,

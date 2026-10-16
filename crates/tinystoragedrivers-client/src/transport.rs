@@ -79,7 +79,7 @@ impl std::error::Error for WireError {}
 /// Sends storage bus messages to a server bound to one caller.
 ///
 /// The transport carries no scope: the server end is already bound to the
-/// caller's scope, database, backend and grant by the host.
+/// caller's scope, backend and grant by the host.
 #[async_trait]
 pub trait StorageTransport: Send + Sync + fmt::Debug {
     /// One request/reply on `object`'s `selector`. `request` and the reply are

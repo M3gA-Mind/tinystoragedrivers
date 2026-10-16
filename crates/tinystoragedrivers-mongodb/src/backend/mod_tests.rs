@@ -220,15 +220,14 @@ async fn live_records_are_stamped_scoped_and_buried() {
         2
     );
 
-    let named = backend.database("stamped").unwrap();
-    named
+    backend
         .for_scope(&Scope::local())
         .unwrap()
         .documents()
         .put(&coll, "k", json!({}), Precondition::None)
         .await
         .unwrap();
-    let prefixed = backend.shared.raw(&format!("stamped:{coll}"));
+    let prefixed = backend.shared.raw(&coll);
     assert_eq!(prefixed.count_documents(doc! {}).await.unwrap(), 1);
 }
 
@@ -339,34 +338,6 @@ async fn live_an_append_racing_a_delete_never_leaves_a_gap() {
         Vec::<Document>::new(),
         "the next delete clears leftovers"
     );
-}
-
-#[tokio::test]
-async fn live_cross_database_capability_is_projected_on_document_handles() {
-    let Some(backend) =
-        live("live_cross_database_capability_is_projected_on_document_handles").await
-    else {
-        return;
-    };
-    let expected = backend
-        .capabilities()
-        .contains(Capability::CrossDatabaseFencing);
-    for storage in [
-        backend.for_scope(&Scope::local()).unwrap(),
-        backend
-            .database("capability_projection")
-            .unwrap()
-            .for_scope(&Scope::local())
-            .unwrap(),
-    ] {
-        assert_eq!(
-            storage
-                .documents()
-                .capabilities()
-                .contains(Capability::CrossDatabaseFencing),
-            expected
-        );
-    }
 }
 
 #[tokio::test]

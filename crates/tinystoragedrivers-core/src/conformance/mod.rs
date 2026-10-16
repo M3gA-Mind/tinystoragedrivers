@@ -45,8 +45,8 @@ use crate::scope::Scope;
 /// against one already-scoped handle.
 ///
 /// This is the part of [`run`] that needs nothing from the backend itself, so
-/// a client that cannot choose scopes, databases or fences (a storage-bus
-/// client bound by its host) runs it directly. The scope, database, purge and
+/// a client that cannot choose scopes or fences (a storage-bus
+/// client bound by its host) runs it directly. The scope, purge and
 /// fencing checks stay in [`run`].
 pub async fn run_ports(storage: &ScopedStorage) {
     documents::run(storage).await;
@@ -89,7 +89,6 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         purge_history::run(backend).await;
         maintenance::run(backend).await;
     }
-    isolation::databases(backend).await;
     fencing::run(backend, single_scope).await;
 }
 

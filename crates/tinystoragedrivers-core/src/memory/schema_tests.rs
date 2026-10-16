@@ -1,7 +1,7 @@
 //! Existing-schema admission preserves native identity and data operations.
 
 use super::*;
-use crate::{Capability, CollectionSpec, ErrorKind, Filter, GuardDatabase, Precondition};
+use crate::{Capability, CollectionSpec, ErrorKind, Filter, Precondition};
 use serde_json::json;
 
 #[tokio::test]
@@ -20,10 +20,10 @@ async fn existing_schema_rejects_malformed_collection_before_missing_declaration
 }
 
 #[tokio::test]
-async fn existing_schema_reuses_declared_database_and_refuses_declaration() {
+async fn existing_schema_reuses_declared_collection_and_refuses_declaration() {
     let storage = MemoryStorage::new();
     storage.prepare_schema().await.unwrap();
-    let declared = storage.database("sessions").unwrap();
+    let declared = &storage;
     let spec = CollectionSpec::new("notes").ttl("until");
     declared
         .for_scope(&Scope::local())
@@ -32,11 +32,7 @@ async fn existing_schema_reuses_declared_database_and_refuses_declaration() {
         .ensure_collection(&spec)
         .await
         .unwrap();
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
     let docs = restricted
         .for_scope(&Scope::local())
         .unwrap()
@@ -84,7 +80,7 @@ async fn existing_schema_validates_presence_without_creating_bare_declarations()
 }
 
 #[tokio::test]
-async fn existing_schema_keeps_cross_database_native_fence_after_replacement() {
+async fn existing_schema_keeps_native_fence_after_replacement() {
     let storage = MemoryStorage::new();
     let cluster = Scope::new("cluster").unwrap();
     let profile = Scope::new("alice").unwrap();
@@ -103,8 +99,6 @@ async fn existing_schema_keeps_cross_database_native_fence_after_replacement() {
         .await
         .unwrap();
     storage
-        .database("sessions")
-        .unwrap()
         .for_scope(&profile)
         .unwrap()
         .documents()
@@ -112,14 +106,8 @@ async fn existing_schema_keeps_cross_database_native_fence_after_replacement() {
         .await
         .unwrap();
     let fence = Fence::new(cluster.clone(), "leases", "alice", Filter::eq("epoch", 1));
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
-    let old = restricted
-        .for_scope_fenced_in_database(&profile, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
+    let old = restricted.for_scope_fenced(&profile, &fence).unwrap();
     old.documents()
         .put("notes", "n", json!({}), Precondition::None)
         .await
@@ -324,38 +312,6 @@ async fn existing_schema_validates_all_operation_inputs_before_declaration_looku
     assert!(root.db.lock().unwrap().specs.is_empty());
 }
 
-#[test]
-fn existing_schema_rejects_missing_named_target_and_guard_without_creating_them() {
-    let root = MemoryStorage::new();
-    let actor = root.existing_schema().unwrap();
-    let target = actor.database("missing").err().map(|e| e.kind());
-    let fence = Fence::new(Scope::local(), "leases", "n", Filter::All);
-    let guard = actor
-        .for_scope_fenced_in_database(
-            &Scope::local(),
-            &fence,
-            &GuardDatabase::Named("guard".into()),
-        )
-        .err()
-        .map(|e| e.kind());
-    let generation_guard = actor
-        .for_scope_fenced_in_database_generation(
-            &Scope::local(),
-            crate::ScopeGeneration::default(),
-            &fence,
-            &GuardDatabase::Named("generation_guard".into()),
-        )
-        .err()
-        .map(|e| e.kind());
-    assert_eq!(
-        [target, guard, generation_guard],
-        [Some(ErrorKind::NotFound); 3]
-    );
-    assert!(root.databases.lock().unwrap().is_empty());
-    root.database("prepared").unwrap();
-    actor.database("prepared").unwrap();
-}
-
 #[tokio::test]
 async fn existing_schema_validation_refuses_retired_generation_after_purge() {
     let root = MemoryStorage::new();
@@ -447,43 +403,4 @@ async fn existing_schema_validates_inputs_before_missing_declarations() {
     for error in errors {
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
-}
-
-#[test]
-fn existing_schema_rejects_missing_named_databases_without_creating_them() {
-    let storage = MemoryStorage::new();
-    let restricted = storage.existing_schema().unwrap();
-    assert_eq!(
-        restricted.database("missing").unwrap_err().kind(),
-        ErrorKind::NotFound
-    );
-    let fence = Fence::new(Scope::local(), "leases", "n", Filter::All);
-    for generation in [crate::ScopeGeneration::default(), crate::ScopeGeneration(1)] {
-        assert_eq!(
-            restricted
-                .for_scope_fenced_in_database_generation(
-                    &Scope::local(),
-                    generation,
-                    &fence,
-                    &GuardDatabase::Named("missing".into())
-                )
-                .unwrap_err()
-                .kind(),
-            ErrorKind::NotFound
-        );
-    }
-    assert_eq!(
-        restricted
-            .for_scope_fenced_in_database(
-                &Scope::local(),
-                &fence,
-                &GuardDatabase::Named("missing".into())
-            )
-            .unwrap_err()
-            .kind(),
-        ErrorKind::NotFound
-    );
-    assert!(storage.databases.lock().unwrap().is_empty());
-    storage.database("present").unwrap();
-    restricted.database("present").unwrap();
 }

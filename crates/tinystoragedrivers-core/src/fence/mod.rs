@@ -58,36 +58,10 @@ use crate::error::{Result, StorageError};
 use crate::filter::Filter;
 use crate::scope::Scope;
 
-/// Database containing a fence guard, relative to one connected backend.
-/// This address is selected by the host when binding a native fenced handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuardDatabase {
-    /// The database of the target handle (the existing fencing behavior).
-    Current,
-    /// The connected backend's default database.
-    Default,
-    /// A named database in the connected backend's namespace.
-    Named(String),
-}
-impl GuardDatabase {
-    /// Check a named guard database address.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidInput` for an invalid named database.
-    pub fn validate(&self) -> Result<()> {
-        match self {
-            Self::Named(name) => crate::validate_database(name),
-            Self::Current | Self::Default => Ok(()),
-        }
-    }
-}
-
 /// A guard document every fenced write re-checks atomically. See the module
 /// docs.
 ///
-/// The binding selects the guard database in the same connected backend.
-/// The guard has its own [`Scope`] (often a shared cluster scope that holds the
+/// The guard lives in the same backend as the writes it fences. It has its own [`Scope`] (often a shared cluster scope that holds the
 /// lease records).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fence {

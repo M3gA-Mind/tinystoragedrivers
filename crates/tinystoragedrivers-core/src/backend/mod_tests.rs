@@ -1,16 +1,7 @@
-//! Database names and the scoped handle bundle.
+//! The scoped handle bundle.
 
 use super::*;
 use crate::MemoryStorage;
-
-#[test]
-fn database_names_validate() {
-    assert!(validate_database("approvals").is_ok());
-    assert!(validate_database("flows-v2_1").is_ok());
-    for bad in ["", "Upper", "dot.ted", "sp ace", &"a".repeat(65)] {
-        assert!(validate_database(bad).is_err(), "{bad}");
-    }
-}
 
 #[test]
 fn scoped_storage_exposes_its_parts() {
@@ -33,7 +24,7 @@ fn scoped_storage_exposes_its_parts() {
 }
 
 #[tokio::test]
-async fn unknown_adapters_refuse_explicit_guard_addresses() {
+async fn unknown_adapters_refuse_fencing() {
     #[derive(Debug)]
     struct Adapter;
     impl StorageBackend for Adapter {
@@ -46,9 +37,6 @@ async fn unknown_adapters_refuse_explicit_guard_addresses() {
         fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
             MemoryStorage::new().for_scope(scope)
         }
-        fn database(&self, _: &str) -> Result<Arc<dyn StorageBackend>> {
-            Ok(Arc::new(Adapter))
-        }
     }
     assert_eq!(
         Adapter.prepare_schema().await.unwrap_err().kind(),
@@ -59,34 +47,11 @@ async fn unknown_adapters_refuse_explicit_guard_addresses() {
         crate::ErrorKind::Unsupported(Capability::ExistingSchema)
     ));
     let fence = Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
-    for locator in [
-        crate::GuardDatabase::Default,
-        crate::GuardDatabase::Named("guards".into()),
-    ] {
-        assert_eq!(
-            Adapter
-                .for_scope_fenced_in_database(&Scope::local(), &fence, &locator)
-                .unwrap_err()
-                .kind(),
-            crate::ErrorKind::Unsupported(Capability::CrossDatabaseFencing)
-        );
-    }
     assert_eq!(
         Adapter
-            .for_scope_fenced_in_database(&Scope::local(), &fence, &crate::GuardDatabase::Current)
+            .for_scope_fenced(&Scope::local(), &fence)
             .unwrap_err()
             .kind(),
         crate::ErrorKind::Unsupported(Capability::Fencing)
-    );
-    assert_eq!(
-        Adapter
-            .for_scope_fenced_in_database(
-                &Scope::local(),
-                &fence,
-                &crate::GuardDatabase::Named("invalid space".into())
-            )
-            .unwrap_err()
-            .kind(),
-        crate::ErrorKind::InvalidInput
     );
 }

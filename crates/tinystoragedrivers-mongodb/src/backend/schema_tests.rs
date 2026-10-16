@@ -33,12 +33,10 @@ fn default_fixture(fixture: &MongoStorage) -> MongoStorage {
                 "tsd_schema_default_{}",
                 mongodb::bson::oid::ObjectId::new().to_hex()
             )),
-            String::new(),
             Arc::new(|| 0),
             fixture.shared.transactions,
             fixture.shared.physical_transactions,
         )),
-        databases: Arc::default(),
     }
 }
 
@@ -226,18 +224,12 @@ async fn existing_schema_refuses_declaration_before_backend_network() {
         shared: Arc::new(Shared::new(
             client.clone(),
             client.database("no_network"),
-            String::new(),
             Arc::new(|| 0),
             true,
             true,
         )),
-        databases: Arc::default(),
     };
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
     assert!(restricted.prepare_schema().await.is_err());
     let fence = Fence::new(Scope::local(), "leases", "l", Filter::All);
     let docs = restricted
@@ -291,15 +283,12 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
         shared: Arc::new(Shared::new(
             client.clone(),
             db.clone(),
-            format!("{prefix}:"),
             Arc::new(|| 0),
             transactions,
             transactions,
         )),
-        databases: Arc::default(),
     };
-    let target = format!("{prefix}_sessions");
-    let named = storage.database(&target).unwrap();
+    let named = &storage;
     named.prepare_schema().await.unwrap();
     let scope = Scope::new("alice").unwrap();
     let spec = CollectionSpec::new("notes")
@@ -311,7 +300,7 @@ async fn live_existing_schema_fresh_handles_do_not_issue_ddl() {
     trusted.blobs().put("b", vec![1, 2], None).await.unwrap();
     // Rebuild native caches so classic preparation cannot mask lazy DDL.
     let fresh = storage.rebuild(Arc::new(|| 0), transactions);
-    let restricted = fresh.existing_schema().unwrap().database(&target).unwrap();
+    let restricted = fresh.existing_schema().unwrap();
     let actor = restricted.for_scope(&scope).unwrap();
     ddl.store(0, Ordering::SeqCst);
     assert_eq!(
@@ -412,8 +401,6 @@ async fn live_existing_schema_missing_and_corrupt_metadata_never_repairs() {
     assert!(std::error::Error::source(&error).is_some());
     assert_eq!(
         restricted
-            .database(&format!("{prefix}_absent"))
-            .unwrap()
             .for_scope(&Scope::local())
             .unwrap()
             .streams()
@@ -450,8 +437,7 @@ async fn live_existing_schema_keeps_captured_native_grant() {
         )
         .await
         .unwrap();
-    let target = format!("{prefix}_sessions");
-    let named = storage.database(&target).unwrap();
+    let named = &storage;
     named.prepare_schema().await.unwrap();
     named
         .for_scope(&scope)
@@ -461,18 +447,8 @@ async fn live_existing_schema_keeps_captured_native_grant() {
         .await
         .unwrap();
     let fence = Fence::new(cluster, &lease_collection, "alice", Filter::eq("epoch", 1));
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database(&target)
-        .unwrap();
-    let actor = restricted
-        .for_scope_fenced_in_database(
-            &scope,
-            &fence,
-            &tinystoragedrivers_core::GuardDatabase::Default,
-        )
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
+    let actor = restricted.for_scope_fenced(&scope, &fence).unwrap();
     actor
         .documents()
         .put("notes", "n", json!({}), Precondition::None)
@@ -677,7 +653,6 @@ async fn live_existing_schema_missing_purge_metadata_refuses_before_data_erasure
         .await
         .unwrap();
     let mut before = storage.shared.db.list_collection_names().await.unwrap();
-    before.retain(|name| name.starts_with(&storage.shared.prefix));
     before.sort();
     let mut before_metadata = Vec::new();
     for name in [
@@ -707,7 +682,6 @@ async fn live_existing_schema_missing_purge_metadata_refuses_before_data_erasure
         })
         .await;
     let mut after = storage.shared.db.list_collection_names().await.unwrap();
-    after.retain(|name| name.starts_with(&storage.shared.prefix));
     after.sort();
     let mut after_metadata = Vec::new();
     for name in [
@@ -830,7 +804,7 @@ async fn live_existing_schema_purge_does_not_create_missing_internal_collections
                 storage
                     .shared
                     .db
-                    .create_collection(format!("{}{name}", storage.shared.prefix))
+                    .create_collection(name.to_string())
                     .await
                     .unwrap();
             }
@@ -879,8 +853,7 @@ async fn live_existing_schema_generation_default_guard_requires_declaration() {
         )
         .await
         .unwrap();
-    let target = format!("{prefix}_sessions");
-    let named = storage.database(&target).unwrap();
+    let named = &storage;
     named.prepare_schema().await.unwrap();
     named
         .for_scope(&scope)
@@ -890,17 +863,12 @@ async fn live_existing_schema_generation_default_guard_requires_declaration() {
         .await
         .unwrap();
     let fence = Fence::new(cluster, &lease_collection, "alice", Filter::eq("epoch", 1));
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database(&target)
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
     let actor = restricted
-        .for_scope_fenced_in_database_generation(
+        .for_scope_fenced_generation(
             &scope,
             tinystoragedrivers_core::ScopeGeneration::default(),
             &fence,
-            &GuardDatabase::Default,
         )
         .unwrap();
     storage

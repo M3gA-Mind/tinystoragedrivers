@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use tinystoragedrivers_core::{CollectionSpec, GuardDatabase, Precondition};
+use tinystoragedrivers_core::{CollectionSpec, Precondition};
 
 use super::*;
 
@@ -16,12 +16,15 @@ fn picks_the_layout_from_the_extension() {
 }
 
 #[tokio::test]
-async fn directory_mode_gives_each_database_its_own_file() {
+async fn a_directory_path_maps_to_the_storage_file_inside_it() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
     assert!(storage.path().ends_with(ROOT_FILE));
-    storage.database("flows").unwrap();
-    assert!(dir.path().join("flows.db").exists());
+    assert!(dir.path().join(ROOT_FILE).exists());
+    let missing = dir.path().join("not").join("yet");
+    let created = SqliteStorage::open(&missing).unwrap();
+    assert!(created.path().ends_with(ROOT_FILE));
+    assert!(missing.join(ROOT_FILE).exists());
     assert_eq!(storage.driver(), "sqlite");
     assert_eq!(
         storage.capabilities(),
@@ -34,12 +37,11 @@ async fn directory_mode_gives_each_database_its_own_file() {
 }
 
 #[tokio::test]
-async fn file_mode_prefixes_database_tables() {
+async fn a_file_path_is_the_database_and_creates_no_storage_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("one.sqlite");
     let storage = SqliteStorage::open(&file).unwrap();
-    let flows = storage.database("flows").unwrap();
-    flows
+    storage
         .for_scope(&Scope::local())
         .unwrap()
         .documents()
@@ -50,7 +52,7 @@ async fn file_mode_prefixes_database_tables() {
         .native()
         .with_connection(|conn| {
             conn.query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = 'flows__docs'",
+                "SELECT count(*) FROM sqlite_master WHERE name = 'docs'",
                 [],
                 |row| row.get(0),
             )
@@ -58,18 +60,8 @@ async fn file_mode_prefixes_database_tables() {
         .await
         .unwrap();
     assert_eq!(tables, 1);
-    assert_eq!(
-        std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter(|e| e
-                .as_ref()
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|x| x == "db"))
-            .count(),
-        0
-    );
+    assert!(file.exists());
+    assert!(!dir.path().join(ROOT_FILE).exists());
 }
 
 #[tokio::test]
@@ -132,15 +124,8 @@ async fn expiry_follows_the_injected_clock() {
     assert!(system_clock() > 0);
 }
 
-#[test]
-fn rejects_invalid_database_names() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = SqliteStorage::open(dir.path()).unwrap();
-    assert!(storage.database("Bad Name").is_err());
-}
-
 #[tokio::test]
-async fn reopened_named_target_observes_default_guard_takeover() {
+async fn reopened_target_observes_guard_takeover() {
     let dir = tempfile::tempdir().unwrap();
     let root = SqliteStorage::open(dir.path()).unwrap();
     let scope = Scope::new("alice").unwrap();
@@ -156,14 +141,9 @@ async fn reopened_named_target_observes_default_guard_takeover() {
         )
         .await
         .unwrap();
-    let target = SqliteStorage::open(dir.path())
-        .unwrap()
-        .database("target")
-        .unwrap();
+    let target = SqliteStorage::open(dir.path()).unwrap();
     let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
-    let held = target
-        .for_scope_fenced_in_database(&scope, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let held = target.for_scope_fenced(&scope, &fence).unwrap();
     held.documents()
         .put(
             "docs",
@@ -225,12 +205,12 @@ async fn reopened_named_target_observes_default_guard_takeover() {
 }
 
 #[test]
-fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes() {
-    const CHILD: &str = "TSD_RELATIVE_LAYOUT_GUARD_CHILD";
+fn relative_paths_keep_the_opened_root_after_working_directory_changes() {
+    const CHILD: &str = "TSD_RELATIVE_PATH_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let dir = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "storage::tests::relative_layout_guards_keep_the_opened_root_after_working_directory_changes", "--nocapture"])
+            .args(["--exact", "storage::tests::relative_paths_keep_the_opened_root_after_working_directory_changes", "--nocapture"])
             .env(CHILD, "1")
             .current_dir(dir.path())
             .output().unwrap();
@@ -251,36 +231,24 @@ fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes()
         for path in ["", "relative_directory", "relative_file.db"] {
             std::env::set_current_dir(&root).unwrap();
             let backend = SqliteStorage::open(path).unwrap();
-            let target = backend.database("target").unwrap();
-            let guards = backend.database("guards").unwrap();
             let scope = Scope::local();
             let fence = Fence::epoch(scope.clone(), "leases", "holder", "epoch", 7);
-            for source in [
-                backend.for_scope(&scope).unwrap(),
-                guards.for_scope(&scope).unwrap(),
-            ] {
-                source
-                    .documents()
-                    .put("leases", "holder", json!({"epoch": 7}), Precondition::None)
-                    .await
-                    .unwrap();
-            }
+            backend
+                .for_scope(&scope)
+                .unwrap()
+                .documents()
+                .put("leases", "holder", json!({"epoch": 7}), Precondition::None)
+                .await
+                .unwrap();
             let moved = root.join(format!("moved-{path}"));
             std::fs::create_dir(&moved).unwrap();
             std::env::set_current_dir(&moved).unwrap();
-            for locator in [
-                GuardDatabase::Default,
-                GuardDatabase::Named("guards".into()),
-            ] {
-                let bound = target
-                    .for_scope_fenced_in_database(&scope, &fence, &locator)
-                    .unwrap();
-                bound
-                    .documents()
-                    .put("records", "one", json!({"value": 1}), Precondition::None)
-                    .await
-                    .unwrap();
-            }
+            let bound = backend.for_scope_fenced(&scope, &fence).unwrap();
+            bound
+                .documents()
+                .put("records", "one", json!({"value": 1}), Precondition::None)
+                .await
+                .unwrap();
             assert!(
                 !moved
                     .join(if path.is_empty() { ROOT_FILE } else { path })
@@ -292,7 +260,7 @@ fn relative_layout_guards_keep_the_opened_root_after_working_directory_changes()
 }
 
 #[tokio::test]
-async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
+async fn scope_purge_persists_revocation_across_reopen() {
     use tinystoragedrivers_core::{
         ErrorKind, PurgeMode, PurgeRequest, PurgeStatus, ScopeGeneration,
     };
@@ -302,10 +270,8 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
         let storage = SqliteStorage::open(&location).unwrap();
         let scope = Scope::new("reset").unwrap();
         let other = Scope::new("keep").unwrap();
-        for backend in [
-            Arc::new(storage.clone()) as Arc<dyn StorageBackend>,
-            storage.database("sessions").unwrap(),
-        ] {
+        {
+            let backend = Arc::new(storage.clone()) as Arc<dyn StorageBackend>;
             let target = backend.for_scope(&scope).unwrap();
             let keep = backend.for_scope(&other).unwrap();
             for ports in [&target, &keep] {
@@ -383,11 +349,7 @@ async fn scope_purge_persists_revocation_across_reopen_and_named_databases() {
 async fn verify_reopened_generation(location: &Path, scope: &Scope) {
     use tinystoragedrivers_core::{ErrorKind, ScopeGeneration};
     let reopened = SqliteStorage::open(location).unwrap();
-    let old = reopened
-        .database("sessions")
-        .unwrap()
-        .for_scope(scope)
-        .unwrap();
+    let old = reopened.for_scope(scope).unwrap();
     assert_eq!(
         old.streams()
             .append("events", json!({}))
@@ -397,8 +359,6 @@ async fn verify_reopened_generation(location: &Path, scope: &Scope) {
         ErrorKind::ScopeGenerationRejected
     );
     let fresh = reopened
-        .database("sessions")
-        .unwrap()
         .for_scope_generation(scope, ScopeGeneration(1))
         .unwrap();
     assert_eq!(
@@ -472,7 +432,7 @@ async fn failed_scope_purge_rolls_back_data_and_generation() {
 }
 
 #[tokio::test]
-async fn historical_reset_receipts_survive_reopen_in_each_database_layout() {
+async fn historical_reset_receipts_survive_reopen_in_each_path_layout() {
     use tinystoragedrivers_core::{PurgeMode, PurgeRequest, ScopeGeneration};
     for filename in ["directory", "single.db"] {
         let dir = tempfile::tempdir().unwrap();
@@ -489,10 +449,8 @@ async fn historical_reset_receipts_survive_reopen_in_each_database_layout() {
         let original_receipts = {
             let storage = SqliteStorage::open(&location).unwrap();
             let mut receipts = Vec::new();
-            for backend in [
-                Arc::new(storage.clone()) as Arc<dyn StorageBackend>,
-                storage.database("sessions").unwrap(),
-            ] {
+            {
+                let backend = Arc::new(storage.clone()) as Arc<dyn StorageBackend>;
                 let original = backend.for_scope(&scope).unwrap();
                 let receipt = original.purge(&first).await.unwrap();
                 let next = backend
@@ -527,12 +485,9 @@ async fn historical_reset_receipts_survive_reopen_in_each_database_layout() {
             receipts
         };
         let reopened = SqliteStorage::open(&location).unwrap();
-        for (backend, receipt) in [
-            Arc::new(reopened.clone()) as Arc<dyn StorageBackend>,
-            reopened.database("sessions").unwrap(),
-        ]
-        .into_iter()
-        .zip(original_receipts)
+        for (backend, receipt) in [Arc::new(reopened) as Arc<dyn StorageBackend>]
+            .into_iter()
+            .zip(original_receipts)
         {
             let current = backend
                 .for_scope_generation(&scope, ScopeGeneration(2))

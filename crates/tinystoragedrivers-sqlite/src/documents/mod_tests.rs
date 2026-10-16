@@ -42,7 +42,7 @@ fn handles_render_their_scope_and_file() {
     let db = Db::open(&dir.path().join("d.db")).unwrap();
     let docs = SqliteDocuments::new(
         db,
-        Arc::new(Tables::new("")),
+        Arc::new(Tables::new()),
         Scope::local(),
         Arc::new(|| 0),
         None,
@@ -57,7 +57,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("snapshot.db");
     let db = Db::open(&path).unwrap();
-    let tables = Arc::new(Tables::new(""));
+    let tables = Arc::new(Tables::new());
     db.run_now(|conn| tables.ensure(conn)).unwrap();
     let scope = Scope::new("snapshot_reader").unwrap();
     let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None, false);

@@ -93,26 +93,23 @@ impl FileBlobs {
     pub async fn sweep_expired(&self) -> Result<u64> {
         let (scope, fence) = (self.scope.clone(), self.fence.clone());
         self.db
-            .run_with_guard(
-                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
-                move |db| {
-                    guard(db, fence.as_deref())?;
-                    let dir = Self::dir(db, &scope);
-                    let now = db.now();
-                    let mut swept = 0;
-                    for path in files_with_suffix(&dir, META_SUFFIX)? {
-                        let Some(sidecar) = read_json::<Sidecar>(&path)? else {
-                            continue;
-                        };
-                        if sidecar.expired(now) {
-                            remove_optional(&dir.join(file_stem(&sidecar.key)))?;
-                            remove_optional(&path)?;
-                            swept += 1;
-                        }
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                let dir = Self::dir(db, &scope);
+                let now = db.now();
+                let mut swept = 0;
+                for path in files_with_suffix(&dir, META_SUFFIX)? {
+                    let Some(sidecar) = read_json::<Sidecar>(&path)? else {
+                        continue;
+                    };
+                    if sidecar.expired(now) {
+                        remove_optional(&dir.join(file_stem(&sidecar.key)))?;
+                        remove_optional(&path)?;
+                        swept += 1;
                     }
-                    Ok(swept)
-                },
-            )
+                }
+                Ok(swept)
+            })
             .await
     }
 
@@ -143,13 +140,10 @@ impl FileBlobs {
         validate_blob_key(key)?;
         let (scope, key) = (self.scope.clone(), key.to_owned());
         self.db
-            .run_with_guard(
-                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
-                move |db| {
-                    guard(db, fence.as_deref())?;
-                    work(&Self::paths(db, &scope, &key), &key)
-                },
-            )
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                work(&Self::paths(db, &scope, &key), &key)
+            })
             .await
     }
 

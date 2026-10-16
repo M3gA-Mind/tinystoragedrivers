@@ -74,9 +74,9 @@ mod blocking;
 pub mod conformance;
 
 pub use backend::{
-    BackendBlobs, BlobBackend, Checkpoint, CompositeStorage, DatabaseAddress, MaintenanceBudget,
-    MaintenanceReport, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
-    ScopeGeneration, ScopePurge, ScopedStorage, StorageBackend, validate_database,
+    BackendBlobs, BlobBackend, Checkpoint, CompositeStorage, MaintenanceBudget, MaintenanceReport,
+    PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge,
+    ScopedStorage, StorageBackend,
 };
 pub use blob::{
     Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
@@ -92,7 +92,7 @@ pub use document::{
     validate_collection, validate_doc, validate_id,
 };
 pub use error::{ErrorKind, Result, StorageError};
-pub use fence::{Fence, GuardDatabase};
+pub use fence::Fence;
 pub use filter::{
     CREATED_FIELD, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort, UPDATED_FIELD,
     sort_documents, sort_documents_with_meta,

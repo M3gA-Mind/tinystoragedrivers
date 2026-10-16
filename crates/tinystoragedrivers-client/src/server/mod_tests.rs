@@ -39,9 +39,9 @@ async fn unknown_objects_and_selectors_are_refused() {
 }
 
 #[tokio::test]
-async fn a_forged_scope_or_database_field_is_a_decode_failure() {
+async fn a_forged_scope_or_grant_field_is_a_decode_failure() {
     let server = server();
-    for forged in ["scope", "database", "grant", "generation"] {
+    for forged in ["scope", "grant", "generation"] {
         let mut request = json!({"collection": "notes", "document_id": "n1"});
         request[forged] = json!("bob");
         assert_eq!(

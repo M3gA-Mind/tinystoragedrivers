@@ -16,11 +16,8 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         PurgeMode::Quiescent
     };
     let owner = Scope::new(unique("reset_history")).expect("valid scope");
-    let named = ok(
-        backend.database(&unique("reset_history_db")),
-        "history database",
-    );
-    for target in [backend, named.as_ref()] {
+    {
+        let target = backend;
         let first = PurgeRequest {
             operation_id: unique("first_reset"),
             mode,

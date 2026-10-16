@@ -19,14 +19,7 @@ fn scope_generation_refusal_has_a_distinct_content_free_wire_kind() {
 use serde_json::json;
 #[test]
 fn requests_refuse_arbitrary_authority_fields() {
-    for field in [
-        "scope",
-        "collection",
-        "url",
-        "database",
-        "generation",
-        "sender",
-    ] {
+    for field in ["scope", "collection", "url", "generation", "sender"] {
         let mut get = json!({"document_id":"entry"});
         get[field] = json!("forged");
         assert!(serde_json::from_value::<GetRequest>(get).is_err());

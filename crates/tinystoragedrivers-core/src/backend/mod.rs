@@ -13,8 +13,7 @@ mod purge;
 pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
 pub use maintenance::{Checkpoint, MaintenanceBudget, MaintenanceReport};
 pub use purge::{
-    DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
-    ScopeGeneration, ScopePurge,
+    PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge,
 };
 
 use std::fmt;
@@ -120,31 +119,6 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         ))
     }
 
-    /// Bind native fenced handles with an explicit guard database address.
-    /// The guard check and every supported mutation share one native lock or
-    /// transaction across the target and guard databases. Existing adapters
-    /// support `Current` through their existing fencing method.
-    ///
-    /// # Errors
-    ///
-    /// `Unsupported(CrossDatabaseFencing)` when explicit default/named guard
-    /// addressing is unavailable; `InvalidInput` for invalid addresses.
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        guard_database: &crate::GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        guard_database.validate()?;
-        match guard_database {
-            crate::GuardDatabase::Current => self.for_scope_fenced(scope, fence),
-            _ => Err(StorageError::unsupported(
-                Capability::CrossDatabaseFencing,
-                "this driver cannot fence writes across databases",
-            )),
-        }
-    }
-
     /// Bind an explicitly issued native data-access generation.
     ///
     /// # Errors
@@ -160,31 +134,21 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         purge::unsupported_generation(scope, generation)
     }
 
-    /// Bind a generation and native guard database together.
+    /// Bind a generation and a fence together.
     ///
     /// # Errors
-    /// Unsupported generation/fencing or invalid native binding.
-    fn for_scope_fenced_in_database_generation(
+    /// Unsupported generation/fencing or an invalid fence.
+    fn for_scope_fenced_generation(
         &self,
         scope: &Scope,
         generation: ScopeGeneration,
         fence: &Fence,
-        guard_database: &crate::GuardDatabase,
     ) -> Result<ScopedStorage> {
         if generation == ScopeGeneration::default() {
-            return self.for_scope_fenced_in_database(scope, fence, guard_database);
+            return self.for_scope_fenced(scope, fence);
         }
         purge::unsupported_generation(scope, generation)
     }
-
-    /// The named database `name` on this backend. The same name always
-    /// addresses the same data.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
-    /// invalid name (see [`validate_database`]), or a backend error.
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>>;
 
     /// Reclaim the lapsed blobs of `scope` (see [`BlobStore::sweep_expired`])
     /// and return how many went.
@@ -245,8 +209,7 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// `"u:ann/agent:x"` but not `"u:bob"`. A host drives a tenant purge by
     /// listing the tenant's scope and everything under it.
     ///
-    /// Requires [`Capability::ScopeEnumeration`]. On a database-splitting
-    /// backend it lists the scopes of the database this handle addresses.
+    /// Requires [`Capability::ScopeEnumeration`].
     ///
     /// # Errors
     ///
@@ -255,27 +218,6 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
         let _ = prefix;
         Err(maintenance::unsupported_scopes())
-    }
-}
-
-/// Validate a database name: 1 to 64 ASCII lowercase letters, digits, `_` or
-/// `-`, so it is safe as a file stem and a collection prefix.
-///
-/// # Errors
-///
-/// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput).
-pub fn validate_database(name: &str) -> Result<()> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
-    if ok {
-        Ok(())
-    } else {
-        Err(StorageError::invalid_input(
-            "database name must be 1 to 64 lowercase ASCII letters, digits, `_` or `-`",
-        ))
     }
 }
 

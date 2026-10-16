@@ -161,9 +161,6 @@ mod baseline {
                 Arc::clone(inner.blobs()),
             ))
         }
-        fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-            self.0.database(name)
-        }
     }
 }
 

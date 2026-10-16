@@ -1,8 +1,8 @@
 //! Optional complete native scope purge, generation admission and fencing.
 use super::{fails, ok, unique};
 use crate::{
-    Capability, CollectionSpec, ErrorKind, Fence, GuardDatabase, Precondition, PurgeMode,
-    PurgeRequest, PurgeStatus, Scope, ScopeGeneration, ScopedStorage, StorageBackend,
+    Capability, CollectionSpec, ErrorKind, Fence, Precondition, PurgeMode, PurgeRequest,
+    PurgeStatus, Scope, ScopeGeneration, ScopedStorage, StorageBackend,
 };
 use serde_json::json;
 
@@ -35,15 +35,11 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         "seed purge guard",
     );
     let fence = Fence::epoch(guard_scope.clone(), &leases, "lease", "epoch", 1);
-    let named = ok(
-        backend.database(&unique("purge_target")),
-        "purge named target",
-    );
     let target = ok(
-        named.for_scope_fenced_in_database(&owner, &fence, &GuardDatabase::Default),
+        backend.for_scope_fenced(&owner, &fence),
         "native purge handle",
     );
-    let keep = ok(named.for_scope(&guard_scope), "other scoped data");
+    let keep = ok(backend.for_scope(&guard_scope), "other scoped data");
     seed(&target).await;
     seed(&keep).await;
     let request = request();
@@ -65,7 +61,7 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         .is_none()
     );
     let verified = ok(
-        named.for_scope_generation(&owner, receipt.generation),
+        backend.for_scope_generation(&owner, receipt.generation),
         "verify issued purge generation",
     );
     empty(&verified).await;
@@ -86,20 +82,11 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         ok(target.purge(&request).await, "idempotent purge retry"),
         receipt
     );
-    resumption(
-        named.as_ref(),
-        &owner,
-        &receipt,
-        &fence,
-        &guard,
-        &leases,
-        &request,
-    )
-    .await;
+    resumption(backend, &owner, &receipt, &fence, &guard, &leases, &request).await;
 }
 
 async fn resumption(
-    named: &dyn StorageBackend,
+    backend: &dyn StorageBackend,
     owner: &Scope,
     receipt: &crate::PurgeReceipt,
     fence: &Fence,
@@ -108,12 +95,7 @@ async fn resumption(
     request: &PurgeRequest,
 ) {
     let resumed = ok(
-        named.for_scope_fenced_in_database_generation(
-            owner,
-            receipt.generation,
-            fence,
-            &GuardDatabase::Default,
-        ),
+        backend.for_scope_fenced_generation(owner, receipt.generation, fence),
         "resume with generation",
     );
     // Deleting tombstones permits a new lifetime starting at version/offset 1/0.
@@ -169,12 +151,7 @@ async fn resumption(
     );
     let self_guard = Fence::epoch(owner.clone(), "records", "removed", "epoch", 1);
     let refused = ok(
-        named.for_scope_fenced_in_database_generation(
-            owner,
-            receipt.generation,
-            &self_guard,
-            &GuardDatabase::Default,
-        ),
+        backend.for_scope_fenced_generation(owner, receipt.generation, &self_guard),
         "same-scope purge binding",
     );
     fails(

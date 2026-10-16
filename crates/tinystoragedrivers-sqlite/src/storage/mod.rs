@@ -1,21 +1,17 @@
-//! The SQLite [`StorageBackend`]: file layout and handle construction.
+//! The SQLite [`StorageBackend`]: file location and handle construction.
 //!
-//! - **Directory mode** (any path not ending in `.db` or `.sqlite`): the root
-//!   database is `<dir>/storage.db`, and `database(name)` is `<dir>/<name>.db`.
-//!   This is the desktop layout: each owner keeps its own file, the way
-//!   OpenHuman already splits `approval.db`, `flows.db` and `sessions.db`.
-//! - **File mode** (a `.db` or `.sqlite` path): everything lives in that one
-//!   file, and `database(name)` prefixes its tables with `<name>__`.
-//!
-//! Any scope may be used; rows carry their scope.
+//! One storage is one database file. A path ending in `.db` or `.sqlite` is
+//! that file; any other path is a directory, and the database is
+//! `<dir>/storage.db` (the directory is created if it is missing). Any scope
+//! may be used; rows carry their scope.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tinystoragedrivers_core::{
-    Capabilities, Checkpoint, Fence, GuardDatabase, MaintenanceBudget, MaintenanceReport, Result,
-    Scope, ScopedStorage, StorageBackend, validate_database,
+    Capabilities, Checkpoint, Fence, MaintenanceBudget, MaintenanceReport, Result, Scope,
+    ScopedStorage, StorageBackend,
 };
 
 use crate::blobs::SqliteBlobs;
@@ -34,12 +30,6 @@ pub use tinystoragedrivers_core::Clock;
 /// File name of the root database in directory mode.
 pub const ROOT_FILE: &str = "storage.db";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Layout {
-    Directory(PathBuf),
-    File(PathBuf),
-}
-
 /// A SQLite-backed [`StorageBackend`].
 ///
 /// ```
@@ -48,14 +38,12 @@ enum Layout {
 ///
 /// let dir = tempfile::tempdir().unwrap();
 /// let storage = SqliteStorage::open(dir.path())?;
-/// let approvals = storage.database("approvals")?;
-/// assert!(dir.path().join("approvals.db").exists());
-/// assert_eq!(approvals.for_scope(&Scope::local())?.driver(), "sqlite");
+/// assert!(dir.path().join("storage.db").exists());
+/// assert_eq!(storage.for_scope(&Scope::local())?.driver(), "sqlite");
 /// # Ok::<(), tinystoragedrivers_core::StorageError>(())
 /// ```
 #[derive(Clone)]
 pub struct SqliteStorage {
-    layout: Layout,
     db: Arc<Db>,
     tables: Arc<Tables>,
     clock: Clock,
@@ -66,7 +54,6 @@ impl fmt::Debug for SqliteStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteStorage")
             .field("path", &self.db.path())
-            .field("prefix", &self.tables.prefix)
             .finish_non_exhaustive()
     }
 }
@@ -87,78 +74,34 @@ fn is_file_path(path: &Path) -> bool {
 }
 
 impl SqliteStorage {
-    /// Open storage at `path`, choosing directory or file mode from its
-    /// extension, and create the driver's tables.
+    /// Open storage at `path` and create the driver's tables. A path ending
+    /// in `.db` or `.sqlite` is the database file; any other path is a
+    /// directory holding `storage.db`.
     ///
     /// # Errors
     ///
     /// When the directory or file cannot be created or opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let layout = if is_file_path(path) {
-            Layout::File(path.to_path_buf())
+        let file = if is_file_path(path) {
+            path.to_path_buf()
         } else {
-            Layout::Directory(path.to_path_buf())
+            path.join(ROOT_FILE)
         };
-        let file = match &layout {
-            Layout::Directory(dir) => dir.join(ROOT_FILE),
-            Layout::File(file) => file.clone(),
-        };
-        Self::assemble(layout, &file, "", Arc::new(system_clock))
+        Self::assemble(&file, Arc::new(system_clock))
     }
 
-    fn assemble(layout: Layout, file: &Path, prefix: &str, clock: Clock) -> Result<Self> {
+    fn assemble(file: &Path, clock: Clock) -> Result<Self> {
         let db = Db::open(file)?;
-        // Keep the opened namespace independent of later cwd changes. Resolve
-        // the directory itself, since storage.db may be a symlink elsewhere.
-        let layout = match layout {
-            Layout::Directory(dir) => {
-                let dir = if dir.as_os_str().is_empty() {
-                    Path::new(".")
-                } else {
-                    dir.as_path()
-                };
-                Layout::Directory(dir.canonicalize().map_err(|error| {
-                    tinystoragedrivers_core::StorageError::backend(
-                        "cannot resolve the sqlite layout directory",
-                    )
-                    .with_source(error)
-                })?)
-            }
-            Layout::File(_) => Layout::File(db.path().to_path_buf()),
-        };
-        let tables = Arc::new(Tables::new(prefix));
+        let tables = Arc::new(Tables::new());
         let create = Arc::clone(&tables);
         db.run_now(move |conn| create.ensure(conn))?;
         Ok(Self {
-            layout,
             db,
             tables,
             clock,
             existing: false,
         })
-    }
-
-    fn assemble_existing(layout: Layout, file: &Path, prefix: &str, clock: Clock) -> Result<Self> {
-        let db = Db::open_existing(file)?;
-        let tables = Arc::new(Tables::new(prefix));
-        let inspect = Arc::clone(&tables);
-        db.run_now(move |conn| inspect.validate(conn))?;
-        Ok(Self {
-            layout,
-            db,
-            tables,
-            clock,
-            existing: true,
-        })
-    }
-
-    fn select(&self, file: &Path, prefix: &str) -> Result<Self> {
-        if self.existing {
-            Self::assemble_existing(self.layout.clone(), file, prefix, Arc::clone(&self.clock))
-        } else {
-            Self::assemble(self.layout.clone(), file, prefix, Arc::clone(&self.clock))
-        }
     }
 
     /// Read document and blob expiry time from `clock` instead of the system clock.
@@ -285,61 +228,18 @@ impl StorageBackend for SqliteStorage {
     ) -> Result<ScopedStorage> {
         Ok(self.handles_generation(scope, None, generation))
     }
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        locator: &GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        self.for_scope_fenced_in_database_generation(
-            scope,
-            tinystoragedrivers_core::ScopeGeneration::default(),
-            fence,
-            locator,
-        )
-    }
-
-    fn for_scope_fenced_in_database_generation(
+    fn for_scope_fenced_generation(
         &self,
         scope: &Scope,
         generation: tinystoragedrivers_core::ScopeGeneration,
         fence: &Fence,
-        locator: &GuardDatabase,
     ) -> Result<ScopedStorage> {
         fence.validate()?;
-        locator.validate()?;
-        if *locator == GuardDatabase::Current {
-            let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
-            return Ok(self.handles_generation(scope, Some(&fencing), generation));
-        }
-        let (file, prefix) = match (&self.layout, locator) {
-            (Layout::Directory(dir), GuardDatabase::Default) => {
-                (dir.join(ROOT_FILE), String::new())
-            }
-            (Layout::Directory(dir), GuardDatabase::Named(name)) => {
-                (dir.join(format!("{name}.db")), String::new())
-            }
-            (Layout::File(file), GuardDatabase::Default) => (file.clone(), String::new()),
-            (Layout::File(file), GuardDatabase::Named(name)) => (file.clone(), format!("{name}__")),
-            (_, GuardDatabase::Current) => unreachable!(),
-        };
-        let guard = self.select(&file, &prefix)?;
-        let attached = if guard.db.path() == self.db.path() {
-            None
-        } else {
-            Some(guard.db.path().to_path_buf())
-        };
-        let fencing = Arc::new(Fencing::in_database(
-            fence.clone(),
-            Arc::clone(&self.clock),
-            attached,
-            guard.tables,
-        ));
+        let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
         Ok(self.handles_generation(scope, Some(&fencing), generation))
     }
 
-    /// Returns freed pages to the filesystem. It acts on the whole database
-    /// file, so in single-file layout it covers every named database in it.
+    /// Returns freed pages to the filesystem. It acts on the whole database file.
     /// The first call on a file made without `auto_vacuum` runs a one-time
     /// `VACUUM`, which rewrites the whole file (see the crate README).
     async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
@@ -360,15 +260,6 @@ impl StorageBackend for SqliteStorage {
         self.db
             .run(move |conn| scopes::list(conn, &tables, &prefix))
             .await
-    }
-
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        validate_database(name)?;
-        let storage = match &self.layout {
-            Layout::Directory(dir) => self.select(&dir.join(format!("{name}.db")), "")?,
-            Layout::File(file) => self.select(file, &format!("{name}__"))?,
-        };
-        Ok(Arc::new(storage))
     }
 }
 

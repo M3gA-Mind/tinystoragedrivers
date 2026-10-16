@@ -140,7 +140,6 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::ValidatedBatch)
             .with(Capability::Ttl)
             .with(Capability::Fencing)
-            .with(Capability::CrossDatabaseFencing)
             .with(Capability::ConditionalStreamAppend)
             .with(Capability::StreamSeal)
             .with(Capability::CollectionEnumeration)

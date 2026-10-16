@@ -7,7 +7,7 @@ use super::*;
 
 fn setup() -> (Connection, Tables) {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     (conn, tables)
 }
@@ -147,7 +147,7 @@ fn corrupt_stored_json_is_a_serialization_error() {
 #[test]
 fn missing_tables_are_backend_errors() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("absent");
+    let tables = Tables::new();
     let error = get(&conn, ctx(&tables), "c", "a").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
