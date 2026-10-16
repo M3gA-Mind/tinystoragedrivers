@@ -56,10 +56,11 @@
 //!
 //! Out of scope here: legacy-file importers (steps with no source) are run by
 //! the host, which records completion with [`Migrations::mark_done`].
-//! The seal policy of a stream is added with stream sealing.
+//! A stream's [`SealPolicy`](crate::SealPolicy) is applied by [`Registry::maintain`].
 
 mod compose;
 mod migrations;
+mod policy;
 mod runner;
 mod runner_blobs;
 mod runner_streams;
@@ -67,6 +68,7 @@ mod types;
 
 pub use compose::Registry;
 pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
+pub use policy::PolicyReport;
 pub use runner::{MigrateOptions, MigrationReport, StepReport};
 pub use types::{
     BlobOutput, BlobStepFn, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody, StepFn,

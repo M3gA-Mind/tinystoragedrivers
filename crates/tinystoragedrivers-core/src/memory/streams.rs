@@ -12,7 +12,7 @@ use crate::blob::BlobMeta;
 use crate::error::{Result, StorageError};
 use crate::scope::Scope;
 use crate::stream::{
-    SealOutcome, SealedLog, StreamEntry, StreamStore, sealed_blob_key, validate_stream,
+    SealOutcome, SealedLog, StreamEntry, StreamInfo, StreamStore, sealed_blob_key, validate_stream,
 };
 
 /// In-memory streams bound to one scope.
@@ -66,6 +66,10 @@ impl MemoryStreams {
         }
     }
 
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.clock)()).unwrap_or(i64::MAX)
+    }
+
     fn key(&self, stream: &str) -> (String, String) {
         (self.scope.as_str().to_owned(), stream.to_owned())
     }
@@ -111,6 +115,7 @@ impl MemoryStreams {
         let blob_key = self.blob_key(stream)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
+        let now_ms = self.now_ms();
         let blob_len = state
             .blobs
             .get(&blob_key)
@@ -126,6 +131,7 @@ impl MemoryStreams {
             return Err(StorageError::conflict("sealed blob changed while sealing"));
         }
         stored.sealed_len = Some(written.len);
+        stored.sealed_ms = Some(now_ms);
         Ok(())
     }
 
@@ -199,9 +205,11 @@ impl MemoryStreams {
                 .get(&self.key(stream))
                 .map_or(0, super::state::StoredStream::len));
         }
+        let now_ms = self.now_ms();
         let entry = state.streams.entry(self.key(stream)).or_default();
         let first = entry.len();
         entry.entries.extend(values);
+        entry.last_append_ms = Some(now_ms);
         Ok(first)
     }
 }
@@ -304,6 +312,20 @@ impl StreamStore for MemoryStreams {
         self.seal_mark(stream, written)?;
         self.seal_drop_entries(stream)?;
         Ok(written)
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        validate_stream(stream)?;
+        let state = self.db.lock()?;
+        state.check_generation(self.scope.as_str(), self.generation)?;
+        Ok(state.streams.get(&self.key(stream)).map(|stored| {
+            StreamInfo::new(
+                stored.base,
+                stored.len(),
+                stored.sealed_ms,
+                stored.last_append_ms,
+            )
+        }))
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {

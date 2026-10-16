@@ -38,6 +38,50 @@ impl SealOutcome {
     }
 }
 
+/// What [`StreamStore::info`](crate::StreamStore::info) reports about one
+/// stream: its extent and the two instants the seal policy decides on.
+///
+/// Times are epoch milliseconds read from the driver's clock. A stream written
+/// before its driver recorded times reports `None` for them, and a policy
+/// treats `None` as "unknown, leave it alone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StreamInfo {
+    /// The first retained offset.
+    pub base: u64,
+    /// The stream's length, the offset the next append would receive.
+    pub len: u64,
+    /// When the stream was sealed; `None` while it accepts appends.
+    pub sealed_ms: Option<i64>,
+    /// When a record was last appended; `None` if unknown. Truncation does
+    /// not change it.
+    pub last_append_ms: Option<i64>,
+}
+
+impl StreamInfo {
+    /// Info for a stream retaining `base..len`, with the given times.
+    #[must_use]
+    pub const fn new(
+        base: u64,
+        len: u64,
+        sealed_ms: Option<i64>,
+        last_append_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            base,
+            len,
+            sealed_ms,
+            last_append_ms,
+        }
+    }
+
+    /// Whether the stream is closed to appends.
+    #[must_use]
+    pub const fn is_sealed(&self) -> bool {
+        self.sealed_ms.is_some()
+    }
+}
+
 /// When the owner of a stream seals it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,9 +99,8 @@ pub enum SealWhen {
 
 /// The sealing and retention policy a `Stream` schema item states.
 ///
-/// This is only the declaration. Nothing applies it yet: the maintenance pass
-/// that seals idle streams and deletes expired ones arrives with
-/// `Maintenance::run`.
+/// This is the declaration; [`Registry::maintain`](crate::schema::Registry::maintain)
+/// applies it by sealing idle streams and deleting expired ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SealPolicy {

@@ -158,6 +158,8 @@ fn length_prefers_the_larger_of_base_and_the_last_line() {
         name: "s".into(),
         base: 5,
         sealed_len: None,
+        sealed_ms: None,
+        last_append_ms: None,
     };
     assert_eq!(length(&meta, None).unwrap(), 5);
     assert_eq!(

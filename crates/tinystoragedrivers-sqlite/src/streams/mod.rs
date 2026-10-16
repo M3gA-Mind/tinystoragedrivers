@@ -15,7 +15,7 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamStore, async_trait,
+    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore, async_trait,
     validate_stream,
 };
 
@@ -33,6 +33,8 @@ pub struct SqliteStreams {
     generation: tinystoragedrivers_core::ScopeGeneration,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
+    /// Stamps appends and seals.
+    clock: tinystoragedrivers_core::Clock,
 }
 
 impl fmt::Debug for SqliteStreams {
@@ -54,25 +56,30 @@ struct Head {
     len: u64,
     /// Whether the entries are in the sealed blob rather than in rows.
     sealed: bool,
+    /// When the stream was sealed, if known.
+    sealed_ms: Option<i64>,
+    /// When a record was last appended, if known.
+    last_append_ms: Option<i64>,
 }
 
 /// The head of a stream, if it exists.
 fn head(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result<Option<Head>> {
     let sql = format!(
-        "SELECT base, len, sealed FROM {} WHERE scope = ?1 AND name = ?2",
+        "SELECT base, len, sealed, sealed_ms, last_append_ms FROM {}
+         WHERE scope = ?1 AND name = ?2",
         ident(&tables.stream_heads)
     );
-    let row: Option<(i64, i64, i64)> = conn
-        .query_row(&sql, params![scope, stream], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    conn.query_row(&sql, params![scope, stream], |row| {
+        Ok(Head {
+            base: to_offset(row.get(0)?),
+            len: to_offset(row.get(1)?),
+            sealed: row.get::<_, i64>(2)? != 0,
+            sealed_ms: row.get(3)?,
+            last_append_ms: row.get(4)?,
         })
-        .optional()
-        .map_err(during("read stream"))?;
-    Ok(row.map(|(base, len, sealed)| Head {
-        base: to_offset(base),
-        len: to_offset(len),
-        sealed: sealed != 0,
-    }))
+    })
+    .optional()
+    .map_err(during("read stream"))
 }
 
 fn to_offset(stored: i64) -> u64 {
@@ -89,6 +96,7 @@ impl SqliteStreams {
         tables: Arc<Tables>,
         scope: Scope,
         fencing: Option<Arc<Fencing>>,
+        clock: tinystoragedrivers_core::Clock,
     ) -> Self {
         Self {
             db,
@@ -96,6 +104,7 @@ impl SqliteStreams {
             scope,
             generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fencing,
+            clock,
         }
     }
 
@@ -139,6 +148,11 @@ impl SqliteStreams {
 }
 
 impl SqliteStreams {
+    /// The injected clock's reading, as the signed value SQLite stores.
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.clock)()).unwrap_or(i64::MAX)
+    }
+
     async fn append_inner(
         &self,
         stream: &str,
@@ -147,6 +161,7 @@ impl SqliteStreams {
     ) -> Result<u64> {
         validate_stream(stream)?;
         let stream = stream.to_owned();
+        let now_ms = self.now_ms();
         self.with(true, move |conn, tables, scope| {
             let (base, first) = match head(conn, tables, scope, &stream)? {
                 Some(head) if head.sealed => {
@@ -183,13 +198,14 @@ impl SqliteStreams {
                 next += 1;
             }
             let upsert = format!(
-                "INSERT INTO {} (scope, name, base, len) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (scope, name) DO UPDATE SET len = excluded.len",
+                "INSERT INTO {} (scope, name, base, len, last_append_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (scope, name) DO UPDATE SET len = excluded.len,
+                     last_append_ms = excluded.last_append_ms",
                 ident(&tables.stream_heads)
             );
             conn.execute(
                 &upsert,
-                params![scope, stream, to_stored(base)?, to_stored(next)?],
+                params![scope, stream, to_stored(base)?, to_stored(next)?, now_ms],
             )
             .map_err(during("append"))?;
             Ok(first)
@@ -265,7 +281,10 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(true, move |conn, tables, scope| {
-            let Some(Head { base, len, sealed }) = head(conn, tables, scope, &stream)? else {
+            let Some(Head {
+                base, len, sealed, ..
+            }) = head(conn, tables, scope, &stream)?
+            else {
                 return Ok(0);
             };
             if sealed {
@@ -319,6 +338,17 @@ impl StreamStore for SqliteStreams {
 
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
         self.seal_stream(stream).await
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        validate_stream(stream)?;
+        let stream = stream.to_owned();
+        self.with(false, move |conn, tables, scope| {
+            Ok(head(conn, tables, scope, &stream)?.map(|head| {
+                StreamInfo::new(head.base, head.len, head.sealed_ms, head.last_append_ms)
+            }))
+        })
+        .await
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {

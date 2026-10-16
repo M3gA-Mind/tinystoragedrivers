@@ -305,7 +305,7 @@ async fn live_an_append_racing_a_delete_never_leaves_a_gap() {
     assert!(streams.delete_stream(&stream).await.unwrap());
     // An appender that read generation 0 and the end 2 before the delete
     // lands its segment afterwards.
-    let late = crate::streams::new_segment(&stream, 0, 2, &[json!("late")]).unwrap();
+    let late = crate::streams::new_segment(&stream, 0, 2, &[json!("late")], 0).unwrap();
     let raw = backend.shared.raw(crate::naming::STREAMS);
     let mut stamped = late;
     stamped.insert("_scope", "local");

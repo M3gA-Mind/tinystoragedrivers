@@ -85,7 +85,7 @@ fn system_now_ms() -> i64 {
         })
 }
 
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(super) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     conn.query_row(
         "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
         [table, column],

@@ -49,8 +49,8 @@ pub use secrets::{
 pub use streams::{
     AppendBatchIfOffsetRequest, AppendBatchRequest, AppendRequest, AppendResponse,
     ListStreamsRequest, ReadWindowRequest, ReadWindowResponse, STREAMS_OBJECT, STREAMS_SELECTORS,
-    SealResponse, StreamItem, StreamRecord, StreamRequest, TruncateBeforeRequest,
-    is_streams_selector,
+    SealResponse, StreamInfoResponse, StreamItem, StreamRecord, StreamRequest,
+    TruncateBeforeRequest, is_streams_selector,
 };
 pub use types::{
     DeleteRequest, GetRequest, Meta, Precondition, PutRequest, StorageFailure, StorageKind,

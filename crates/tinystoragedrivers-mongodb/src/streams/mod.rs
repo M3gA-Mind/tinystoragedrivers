@@ -39,7 +39,8 @@ use mongodb::options::{FindOptions, IndexOptions};
 use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamStore, validate_stream,
+    Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore,
+    validate_stream,
 };
 
 mod seal;
@@ -72,6 +73,12 @@ pub(crate) struct Segment {
     /// For the seal marker, the first retained offset of the sealed stream.
     /// A marker is the stream's last segment and holds no entries.
     pub(crate) sealed_base: Option<u64>,
+    /// When the segment was appended (`ms`), or for the seal marker when the
+    /// stream was sealed. Absent on segments written before times existed.
+    pub(crate) at_ms: Option<i64>,
+    /// On a seal marker, when the last entry was appended (`la`): the entry
+    /// segments that held it are gone once sealing finishes.
+    pub(crate) last_append_ms: Option<i64>,
 }
 
 fn offset(doc: &Document, field: &str) -> Result<u64> {
@@ -107,6 +114,8 @@ impl Segment {
             } else {
                 None
             },
+            at_ms: doc.get_i64("ms").ok(),
+            last_append_ms: doc.get_i64("la").ok(),
         };
         let covered = segment
             .start
@@ -139,6 +148,7 @@ pub(crate) fn new_segment(
     generation: i64,
     start: u64,
     values: &[Value],
+    now_ms: i64,
 ) -> Result<Document> {
     let values: Vec<Bson> = values.iter().map(to_bson).collect::<Result<_>>()?;
     let count = values.len() as u64;
@@ -153,6 +163,7 @@ pub(crate) fn new_segment(
         "e": stored_offset(end)?,
         "t": 0_i64,
         "vs": values,
+        "ms": now_ms,
     })
 }
 
@@ -204,6 +215,11 @@ impl MongoStreams {
     ) -> Self {
         self.generation = generation;
         self
+    }
+
+    /// The injected clock's reading, as the signed value BSON stores.
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.shared.clock)()).unwrap_or(i64::MAX)
     }
 
     async fn hold_admission(&self, session: &mut ClientSession) -> Result<()> {
@@ -312,7 +328,10 @@ impl MongoStreams {
             return Ok(Some(end));
         }
         match handle
-            .insert_one(new_segment(stream, generation, end, values)?, session)
+            .insert_one(
+                new_segment(stream, generation, end, values, self.now_ms())?,
+                session,
+            )
             .await
         {
             Ok(()) => Ok(Some(end)),
@@ -525,6 +544,35 @@ impl StreamStore for MongoStreams {
                 .edge(&handle, stream, generation, -1, None)
                 .await?
                 .map_or(0, |last| last.end))
+        })
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            let generation = self.generation(stream, None).await?;
+            let Some(last) = self.edge(&handle, stream, generation, -1, None).await? else {
+                return Ok(None);
+            };
+            if let Some(base) = last.sealed_base {
+                return Ok(Some(StreamInfo::new(
+                    base,
+                    last.end,
+                    last.at_ms,
+                    last.last_append_ms,
+                )));
+            }
+            let first = self
+                .edge(&handle, stream, generation, 1, None)
+                .await?
+                .unwrap_or_else(|| last.clone());
+            Ok(Some(StreamInfo::new(
+                first.start + first.trimmed,
+                last.end,
+                None,
+                last.at_ms,
+            )))
         })
     }
 

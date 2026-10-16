@@ -84,6 +84,7 @@ fn mark(db: &Db, scope: &Scope, paths: &Paths, name: &str, written: SealOutcome)
         return Err(StorageError::conflict("sealed blob changed while sealing"));
     }
     meta.sealed_len = Some(written.len);
+    meta.sealed_ms = Some(i64::try_from(db.now()).unwrap_or(i64::MAX));
     write_json(&paths.meta, &meta)
 }
 

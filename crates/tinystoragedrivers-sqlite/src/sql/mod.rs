@@ -211,6 +211,8 @@ impl Tables {
                  base INTEGER NOT NULL,
                  len INTEGER NOT NULL,
                  sealed INTEGER NOT NULL DEFAULT 0,
+                 sealed_ms INTEGER,
+                 last_append_ms INTEGER,
                  PRIMARY KEY (scope, name)
              ) WITHOUT ROWID"
                 ),
@@ -338,8 +340,24 @@ impl Tables {
         .map_err(during("migrate purge receipts"))
     }
 
+    /// Add the head time columns to a layout-2 file created without them.
+    /// Idempotent; the layout stays 2.
+    fn add_head_times(&self, conn: &Connection) -> Result<()> {
+        for column in ["sealed_ms", "last_append_ms"] {
+            if !upgrade::has_column(conn, &self.stream_heads, column)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {} ADD COLUMN {column} INTEGER",
+                    ident(&self.stream_heads)
+                ))
+                .map_err(during("add stream head times"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Indexes that live beside the tables rather than in a collection spec.
     fn finish(&self, conn: &Connection) -> Result<()> {
+        self.add_head_times(conn)?;
         // Lets a lifetime write find lapsed blobs without reading every one.
         conn.execute_batch(&format!(
             "CREATE INDEX IF NOT EXISTS {} ON {} (expires_ms) WHERE expires_ms IS NOT NULL",

@@ -249,3 +249,32 @@ async fn seal_closes_a_stream_and_maintenance_selectors_do_not_exist() {
         }
     }
 }
+
+#[tokio::test]
+async fn info_reports_extent_and_times_of_a_stream_and_null_for_a_missing_one() {
+    let server = server();
+    assert!(
+        call(&server, "Streams", "Info", json!({"stream":"s"}))
+            .await
+            .is_null()
+    );
+    call(
+        &server,
+        "Streams",
+        "Append",
+        json!({"stream":"s","record_json":"1"}),
+    )
+    .await;
+    let open = call(&server, "Streams", "Info", json!({"stream":"s"})).await;
+    assert_eq!(
+        (open["base"].clone(), open["len"].clone()),
+        (json!(0), json!(1))
+    );
+    assert!(open["sealed_ms"].is_null());
+    assert!(open["last_append_ms"].is_i64());
+
+    call(&server, "Streams", "Seal", json!({"stream":"s"})).await;
+    let sealed = call(&server, "Streams", "Info", json!({"stream":"s"})).await;
+    assert!(sealed["sealed_ms"].is_i64());
+    assert_eq!(sealed["last_append_ms"], open["last_append_ms"]);
+}

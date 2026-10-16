@@ -106,7 +106,7 @@ Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 | Object | Selectors | Route |
 | --- | --- | --- |
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
-| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal` | private |
+| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 
@@ -207,6 +207,12 @@ Carried (additive; every new field is optional and defaulted):
   `SealResponse { base, len, blob_bytes }` (the native `SealOutcome`). Sealing
   a stream the module may append to is within its grant, so it is exposed;
   `Conflict` (append to a sealed stream) and `NotFound` cross as usual.
+- `Streams.Info` takes `StreamRequest { stream }` and replies
+  `StreamInfoResponse { base, len, sealed_ms, last_append_ms }` (the native
+  `StreamInfo`), or `null` for a stream that does not exist. A module may read
+  the times of its own streams; they are epoch milliseconds from the host's
+  clock, so a module learns nothing it could not infer from its appends. It
+  rides the `StreamSeal` capability: a host without it answers `Unsupported`.
 - `Documents.Capabilities` now lists `record_metadata` and `stream_seal` when
   the backend has them.
 

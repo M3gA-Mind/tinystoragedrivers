@@ -54,6 +54,10 @@ pub(super) struct StoredStream {
     /// are read from the sealed blob and `entries` is leftover that sealing
     /// removes (a sealed stream whose entries survive a crash).
     pub(super) sealed_len: Option<u64>,
+    /// When the stream was sealed, epoch milliseconds.
+    pub(super) sealed_ms: Option<i64>,
+    /// When a record was last appended, epoch milliseconds.
+    pub(super) last_append_ms: Option<i64>,
 }
 
 impl StoredStream {
