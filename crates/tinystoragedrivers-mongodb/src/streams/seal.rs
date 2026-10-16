@@ -21,8 +21,8 @@
 //! interrupted after step 2 is finished by sealing again.
 
 use tinystoragedrivers_core::{
-    Capability, Result, SealOutcome, SealedLog, StorageError, StreamEntry,
-    sealed_blob_key, validate_stream,
+    Capability, Result, SealOutcome, SealedLog, StorageError, StreamEntry, sealed_blob_key,
+    validate_stream,
 };
 
 use super::{MongoStreams, Segment, stored_offset};

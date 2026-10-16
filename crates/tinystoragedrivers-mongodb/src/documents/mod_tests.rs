@@ -55,8 +55,8 @@ fn encodes_and_decodes_the_stored_shape() {
             &serde_json::Map::new(),
             &Meta::unknown()
         )
-            .unwrap_err()
-            .kind(),
+        .unwrap_err()
+        .kind(),
         ErrorKind::Backend
     );
     assert_eq!(

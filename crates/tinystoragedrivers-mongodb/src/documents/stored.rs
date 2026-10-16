@@ -11,9 +11,7 @@ use tinystoragedrivers_core::{
 };
 
 use crate::convert::{from_document, to_document};
-use crate::naming::{
-    BODY, CREATED, DELETED, EXPIRES, KEY, SCHEMA, UPDATED, VERSION, document_id,
-};
+use crate::naming::{BODY, CREATED, DELETED, EXPIRES, KEY, SCHEMA, UPDATED, VERSION, document_id};
 
 /// One stored document as read back from MongoDB.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +96,8 @@ pub(crate) fn expired_filter(spec: &CollectionSpec, now_ms: u64) -> Filter {
 /// Whether `stored` is a document a read returns: not a tombstone and not
 /// expired.
 pub(crate) fn is_live(spec: &CollectionSpec, stored: &Stored, now_ms: u64) -> bool {
-    !stored.deleted && live_filter(spec, now_ms).matches_with(&stored.key, &stored.body, &stored.meta)
+    !stored.deleted
+        && live_filter(spec, now_ms).matches_with(&stored.key, &stored.body, &stored.meta)
 }
 
 /// The query clause excluding tombstones.

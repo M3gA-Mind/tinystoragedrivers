@@ -49,7 +49,8 @@ Implements [`../specs/schema-v2.md`](../specs/schema-v2.md). Each task starts wi
    - `auto_vacuum=INCREMENTAL`.
    - Remove `database(name)` and directory mode.
 9. **MongoDB, File, S3**
-   - Metadata fields `_schema`, `_c`, `_u`, `_x`, with the TTL index on `_x`.
+   - Metadata fields `_schema`, `_c`, `_u`, `_x`. No TTL index on `_x`: the TTL monitor would delete the row, and a recreated id must continue from its last version. Expiry is enforced in every query instead.
+   - MongoDB seals with a marker segment (see `streams/seal.rs`) and lists scopes with `distinct(_scope)`. The File driver keeps metadata in its per-document envelope, not a `.meta.json` sidecar.
    - Sealing.
    - `Unsupported` maintenance on drivers that have none.
    - The full conformance suite on every driver.
@@ -95,6 +96,6 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [x] 6 sealing
 - [x] 7 maintenance
 - [x] 8 sqlite v2 (layout, metadata, upgrade, compressed bodies; named databases removed in a later task)
-- [ ] 9 mongodb, file, s3
+- [x] 9 mongodb (metadata, seal, scope enumeration), file (metadata), s3 (blob-only, unchanged)
 - [x] 10 bus contract (Meta, put_with, Seal; maintenance and scope enumeration host-only)
 - [ ] 11 docs and v1.0.0

@@ -197,10 +197,7 @@ impl Docs<'_> {
         let current = stored
             .clone()
             .and_then(|record| record.live(&spec, self.now));
-        check(
-            precondition,
-            current.as_ref().map(|stored| stored.version),
-        )?;
+        check(precondition, current.as_ref().map(|stored| stored.version))?;
         if spec.indexes.iter().any(|index| index.unique) {
             unique_clash(&spec, &self.live(&spec)?, id, &doc)?;
         }

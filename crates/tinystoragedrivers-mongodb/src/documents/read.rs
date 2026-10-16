@@ -56,7 +56,9 @@ impl MongoDocuments {
             .map_err(errors::failed("read documents"))?;
         Ok(decode_all(&docs)?
             .into_iter()
-            .filter(|stored| !stored.deleted && effective.matches_with(&stored.key, &stored.body, &stored.meta))
+            .filter(|stored| {
+                !stored.deleted && effective.matches_with(&stored.key, &stored.body, &stored.meta)
+            })
             .collect())
     }
 

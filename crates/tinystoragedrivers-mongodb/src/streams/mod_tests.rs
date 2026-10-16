@@ -136,3 +136,26 @@ async fn live_conditional_append_rejects_a_generation_deleted_after_its_snapshot
         json!(3)
     );
 }
+
+#[test]
+fn a_seal_marker_is_an_empty_last_segment_carrying_the_base() {
+    let marker = Segment::decode(&doc! {
+        "_id": 1, "o": 7_i64, "e": 7_i64, "t": 0_i64, "vs": [],
+        "seal": true, "sb": 3_i64,
+    })
+    .unwrap();
+    assert_eq!(marker.sealed_base, Some(3));
+    assert_eq!(marker.entries_from(0).count(), 0);
+    let plain = Segment::decode(&doc! {
+        "_id": 2, "o": 0_i64, "e": 1_i64, "t": 0_i64, "vs": ["a"],
+    })
+    .unwrap();
+    assert_eq!(plain.sealed_base, None);
+    // A marker without its base is malformed rather than silently unsealed.
+    assert!(
+        Segment::decode(&doc! {
+            "_id": 3, "o": 7_i64, "e": 7_i64, "t": 0_i64, "vs": [], "seal": true,
+        })
+        .is_err()
+    );
+}
