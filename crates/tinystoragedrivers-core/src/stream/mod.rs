@@ -15,7 +15,7 @@ mod sealed;
 mod types;
 
 pub use sealed::{SEALED_BLOB_PREFIX, SealedLog, sealed_blob_key};
-pub use types::{SealOutcome, SealPolicy, SealWhen};
+pub use types::{SealOutcome, SealPolicy, SealWhen, StreamInfo};
 
 /// One record and its offset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +134,28 @@ pub trait StreamStore: Send + Sync + std::fmt::Debug {
         Err(StorageError::unsupported(
             crate::Capability::StreamSeal,
             "this driver cannot seal a stream",
+        ))
+    }
+
+    /// The extent and recorded times of `stream`, or `None` when it does not
+    /// exist. A sealed stream still reports (its head outlives the seal) with
+    /// `sealed_ms` set; `len` and `base` equal what [`len`](Self::len) and
+    /// the seal outcome report.
+    ///
+    /// Reading time is part of the [`Capability::StreamSeal`](crate::Capability::StreamSeal)
+    /// capability, not a capability of its own: a driver that can seal records
+    /// when it sealed and when a stream last grew, which is everything a
+    /// [`SealPolicy`] needs.
+    ///
+    /// # Errors
+    ///
+    /// An invalid stream name, `Unsupported(StreamSeal)` when the driver
+    /// records no times (the default), or a backend error.
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        let _ = stream;
+        Err(StorageError::unsupported(
+            crate::Capability::StreamSeal,
+            "this driver does not record stream times",
         ))
     }
 

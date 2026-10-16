@@ -325,7 +325,7 @@ async fn a_guard_in_another_database_does_not_fence_this_one() {
 }
 
 #[tokio::test]
-async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
+async fn unfenced_stream_delete_blob_and_drop_writes_never_read_the_clock() {
     let reads = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&reads);
     let storage = MemoryStorage::with_clock(Arc::new(move || {
@@ -333,12 +333,16 @@ async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
         0
     }));
     let scoped = storage.for_scope(&Scope::local()).unwrap();
+    // An append reads the clock for the stream's last-append time; a guard
+    // check on an unfenced handle does not.
     scoped.streams().append("s", json!({"n": 1})).await.unwrap();
+    let after_append = reads.load(Ordering::SeqCst);
+    assert_eq!(after_append, 1, "one read stamps the append");
     scoped.streams().delete_stream("s").await.unwrap();
     scoped.blobs().put("b", vec![1], None).await.unwrap();
     scoped.blobs().delete("b").await.unwrap();
     scoped.documents().drop_collection("c").await.unwrap();
-    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(reads.load(Ordering::SeqCst), after_append);
 }
 
 #[tokio::test]

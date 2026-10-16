@@ -31,6 +31,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     appends_are_refused(storage).await;
     truncated_streams_seal(storage).await;
     delete_removes_the_blob(storage).await;
+    info_records_times(storage).await;
 }
 
 /// Every entry of `stream`, read in pages of `PAGE`.
@@ -64,6 +65,19 @@ async fn missing_and_invalid(storage: &ScopedStorage) {
         streams.seal("").await,
         ErrorKind::InvalidInput,
         "seal an empty name",
+    );
+    assert_eq!(
+        ok(
+            streams.info(&unique("info_missing")).await,
+            "info of a missing stream"
+        ),
+        None,
+        "a stream nothing was appended to has no info"
+    );
+    fails(
+        streams.info("").await,
+        ErrorKind::InvalidInput,
+        "info of an empty name",
     );
 }
 
@@ -230,4 +244,58 @@ async fn delete_removes_the_blob(storage: &ScopedStorage) {
         "a deleted sealed stream starts over unsealed"
     );
     assert_eq!(ok(streams.read_window(&name, 0, 10).await, "read").len(), 1);
+}
+
+/// `info` reports extent, the time of the last append and the time of the seal.
+async fn info_records_times(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("seal_info");
+    ok(streams.append_batch(&name, values(3)).await, "fill");
+    let first = ok(streams.info(&name).await, "info").expect("info of a stream");
+    assert_eq!((first.base, first.len), (0, 3), "extent");
+    assert_eq!(first.sealed_ms, None, "an open stream is not sealed");
+    let first_append = first.last_append_ms.expect("an append is timestamped");
+    assert!(first_append > 1_500_000_000_000, "epoch milliseconds");
+
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    ok(streams.append(&name, json!("later")).await, "append");
+    let second = ok(streams.info(&name).await, "info").expect("info");
+    assert_eq!(second.len, 4, "length advances");
+    assert!(
+        second.last_append_ms.expect("timestamped") > first_append,
+        "last_append_ms advances on every append"
+    );
+
+    ok(
+        streams.truncate_before(&name, 2).await,
+        "truncate keeps times",
+    );
+    let truncated = ok(streams.info(&name).await, "info").expect("info");
+    assert_eq!((truncated.base, truncated.len), (2, 4), "truncated extent");
+    assert_eq!(truncated.last_append_ms, second.last_append_ms);
+
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    let outcome = ok(streams.seal(&name).await, "seal");
+    let sealed = ok(streams.info(&name).await, "info").expect("info");
+    let sealed_ms = sealed.sealed_ms.expect("seal records its time");
+    assert!(sealed_ms > second.last_append_ms.expect("timestamped"));
+    assert_eq!((sealed.base, sealed.len), (outcome.base, outcome.len));
+    assert_eq!(
+        sealed.last_append_ms, second.last_append_ms,
+        "seal is not an append"
+    );
+
+    ok(streams.seal(&name).await, "seal again");
+    let again = ok(streams.info(&name).await, "info").expect("info");
+    assert_eq!(
+        again.sealed_ms,
+        Some(sealed_ms),
+        "sealing twice keeps the first time"
+    );
+
+    ok(streams.delete_stream(&name).await, "delete");
+    assert_eq!(ok(streams.info(&name).await, "info"), None, "deleted");
+    ok(streams.append(&name, json!(1)).await, "recreate");
+    let fresh = ok(streams.info(&name).await, "info").expect("info");
+    assert_eq!(fresh.sealed_ms, None, "a recreated stream is open");
 }
