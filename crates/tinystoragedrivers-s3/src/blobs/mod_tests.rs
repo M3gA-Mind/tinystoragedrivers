@@ -177,7 +177,7 @@ async fn presigning_binds_scope_method_and_expiry_without_network() {
     let put = url::Url::parse(&put).unwrap();
     assert_eq!(
         get.path(),
-        "/bucket/prefix/media/scopes/616c6963652f626f62/hello%20world.txt"
+        "/bucket/prefix/scopes/616c6963652f626f62/hello%20world.txt"
     );
     let query: std::collections::HashMap<_, _> = get.query_pairs().collect();
     assert_eq!(query.get("X-Amz-Expires").unwrap(), "60");
@@ -224,7 +224,7 @@ async fn scoped_key_limit_counts_utf8_and_rejects_overflow_without_network() {
         S3Blobs::with_store(
             Arc::new(object_store::memory::InMemory::new()),
             None,
-            &"x".repeat(1000),
+            &"x".repeat(1020),
             &Scope::new("alice").unwrap(),
         )
         .is_err()

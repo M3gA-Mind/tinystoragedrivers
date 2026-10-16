@@ -62,7 +62,7 @@ impl MemoryStreams {
         state.check_generation(self.scope.as_str(), self.generation)?;
         match self.fence.as_deref() {
             None => Ok(()),
-            fence => self.db.guard(state, fence, (self.clock)()),
+            fence => MemoryDb::guard(state, fence, (self.clock)()),
         }
     }
 

@@ -5,14 +5,11 @@ backend and passes the shared conformance suite in both layouts.
 
 ## Layouts
 
-- **Directory mode** is used for any path that does not end in `.db` or
-  `.sqlite`.
-  - The root database lives in `<dir>/storage.db`.
-  - Each named database lives in its own file, `<dir>/<name>.db`, the same way
-    OpenHuman already splits its stores today.
-- **File mode** is used for a path ending in `.db` or `.sqlite`.
-  - Everything lives in that one file.
-  - Each named database's tables are prefixed `<name>__` (`<name>__docs`).
+One storage is one database file. The path decides which:
+
+- A path ending in `.db` or `.sqlite` is that file.
+- Any other path is a directory (created if missing), and the database is
+  `<dir>/storage.db`. This keeps `sqlite:<workspace dir>` URLs working.
 
 ## Storage
 
@@ -73,14 +70,10 @@ use immediate transactions. Other processes are serialized by WAL plus a
 5-second busy timeout. Contention that outlasts the timeout returns a retryable
 `Unavailable` error.
 
-A fenced handle (`for_scope_fenced`) checks a guard in its current database.
-`for_scope_fenced_in_database` also accepts `GuardDatabase::Default` or
-`GuardDatabase::Named` to select another database owned by the same backend.
+A fenced handle (`for_scope_fenced`) checks its guard in the same database.
 The guard check and target document, stream or blob mutation run in one
-immediate transaction. In file mode the transaction uses the selected table
-prefix. In directory mode the guard file is attached before `BEGIN IMMEDIATE`,
-which locks both target and guard files before validation. The fence therefore
-holds across reopened handles and independent connections.
+immediate transaction, which holds the write lock from its first statement. The
+fence therefore holds across reopened handles and independent connections.
 
 ## Maintenance
 
@@ -108,9 +101,7 @@ The driver reports `Capability::Maintenance` and `Capability::ScopeEnumeration`.
   document, stream and blob tables, de-duplicated and ordered by byte. The
   prefix is literal (`%` and `_` have no special meaning). The purge ledger
   does not count: an erased scope drops out of the listing.
-- In single-file layout the file is shared, so `maintain` and `checkpoint`
-  act on every named database in it, while `scopes` lists only the addressed
-  database.
+- `maintain` and `checkpoint` act on the whole database file.
 
 ## Native access
 

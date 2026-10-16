@@ -58,7 +58,7 @@ impl MemoryDb {
             .lock()
             .map_err(|_| StorageError::backend("memory storage lock poisoned by a panicked writer"))
     }
-    fn guard(&self, state: &DbState, fence: Option<&MemoryFence>, now: u64) -> Result<()> {
+    fn guard(state: &DbState, fence: Option<&MemoryFence>, now: u64) -> Result<()> {
         match fence {
             None => Ok(()),
             Some(binding) => state.guard(Some(&binding.fence), now),

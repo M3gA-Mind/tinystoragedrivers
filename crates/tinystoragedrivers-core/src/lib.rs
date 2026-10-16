@@ -15,8 +15,7 @@
 //! nothing about them.
 //!
 //! A [`StorageBackend`] hands out a [`ScopedStorage`] per [`Scope`], the
-//! tenant key every record carries, and splits into named databases with
-//! [`StorageBackend::database`]. [`StorageBackend::for_scope_fenced`] hands
+//! tenant key every record carries. [`StorageBackend::for_scope_fenced`] hands
 //! out handles whose writes the driver checks atomically against a [`Fence`]
 //! (a lease epoch), so a node that lost its lease cannot land a late write.
 //!

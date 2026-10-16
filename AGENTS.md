@@ -26,7 +26,7 @@ crates/
 │       ├── document/         # DocumentStore + types + typed extension
 │       ├── stream/           # StreamStore
 │       ├── blob/             # BlobStore
-│       ├── backend/          # StorageBackend, ScopedStorage, databases
+│       ├── backend/          # StorageBackend, ScopedStorage
 │       ├── memory/           # the reference driver
 │       ├── blocking/         # sync bridge (feature `blocking`)
 │       └── conformance/      # the driver suite (feature `testkit`)

@@ -26,8 +26,8 @@ choose storage URLs/scopes, or allow a module to create a host grant.
 ## Authority and dispatch
 
 The host authenticates the module caller and binds the call to one principal,
-scope, database, admitted backend, and immutable grant. The request has no
-scope, database, URL, backend, generation, or grant selector. Unknown selectors
+scope, admitted backend, and immutable grant. The request has no
+scope, URL, backend, generation, or grant selector. Unknown selectors
 and unknown request fields fail closed. The host checks caller rights, object
 rights, declared schema and resource limits on every call; a module's claimed
 identity is not authority. Scope is never serialized in a request or inferred
@@ -47,7 +47,7 @@ storage error category.
 `Storage` contains `Documents`, `Streams`, `Blobs`, and `Secrets`. Collection
 names are explicit in Documents operation messages and are checked against the
 captured host grant on every call. They select data within that grant; they do
-not select a scope, database, backend, or schema authority. Each object
+not select a scope, backend, or schema authority. Each object
 has a fixed versioned interface, finite selector list, and typed synchronous
 serde messages. TinyBus request/reply provides bounded control traffic. Bulk
 payloads over 16 MiB use an authenticated TinyBus `Stream`; there is no inline
@@ -139,7 +139,7 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
   Calls go through the `StorageTransport` trait (`call`, `put_blob_stream`,
   `get_blob_stream`, `signals`); a `TinyBus` proxy is one implementation.
 - The caller is bound to one host-chosen scope. `for_scope` accepts only that
-  scope, `database` and the fenced or generation variants are refused, and
+  scope, the fenced and generation variants are refused, and
   host-only capabilities (fencing, scope purge, existing-schema) are never
   reported. `Documents.Capabilities` and `Blobs.Capabilities` tell the client
   what the admitted backend provides; an `Unsupported` refusal is attributed to

@@ -62,11 +62,3 @@ counter, and the next ordinary write of the guard drops it.
   write conflicts and are retried. After `FENCE_ATTEMPTS` attempts the write
   fails with a retryable `Unavailable` error. Keep fenced write rates for one
   fence modest.
-- **Explicit guard database.** `for_scope_fenced` reads the guard from the
-  handle's current database. `for_scope_fenced_in_database` accepts
-  `GuardDatabase::Default` or `GuardDatabase::Named` to select another database
-  owned by the same backend. On transaction-capable deployments, the guard
-  check, hidden guard write and target mutation share one session and
-  transaction across the selected database prefixes. The guard's scope remains
-  independent of the target scope. Standalone deployments advertise neither
-  `Fencing` nor `CrossDatabaseFencing` and refuse explicit bindings.

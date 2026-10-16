@@ -227,8 +227,14 @@ async fn live_records_are_stamped_scoped_and_buried() {
         .put(&coll, "k", json!({}), Precondition::None)
         .await
         .unwrap();
-    let prefixed = backend.shared.raw(&coll);
-    assert_eq!(prefixed.count_documents(doc! {}).await.unwrap(), 1);
+    let local = backend.shared.raw(&coll);
+    assert_eq!(
+        local
+            .count_documents(doc! {"_scope": "local"})
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]

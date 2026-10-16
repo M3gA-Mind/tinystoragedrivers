@@ -81,7 +81,7 @@ impl MemoryDocuments {
     /// Refuse a write unless this handle's fence (if any) holds.
     fn guard(&self, state: &DbState, now_ms: u64) -> Result<()> {
         state.check_generation(self.scope.as_str(), self.generation)?;
-        self.db.guard(state, self.fence.as_deref(), now_ms)
+        MemoryDb::guard(state, self.fence.as_deref(), now_ms)
     }
 
     fn matching(
