@@ -31,8 +31,8 @@ use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, CursorPosition, DocumentStore, ErrorKind, Filter,
     Page, Precondition, Query, RESERVED_PREFIX, ReadCheck, Result, Scope, SearchHit, Sort,
-    StorageError, Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
-    validate_id, value,
+    StorageError, Version, Versioned, WriteOp, WriteOptions, WriteResult, validate_collection,
+    validate_doc, validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
@@ -142,12 +142,19 @@ impl MongoDocuments {
         };
         let mut doc = first.doc;
         value::merge_patch(&mut doc, patch);
-        let version = self
+        // A claim patches the body only: the schema and expiry carry over.
+        let options = WriteOptions {
+            schema: first.meta.schema,
+            expires_ms: first.meta.expires_ms,
+            created_ms: None,
+        };
+        let (version, meta) = self
             .put_one(
                 collection,
                 &first.id,
                 &doc,
                 Precondition::Version(first.version),
+                options,
                 session,
             )
             .await?;
@@ -155,7 +162,7 @@ impl MongoDocuments {
             id: first.id,
             version,
             doc,
-            meta: tinystoragedrivers_core::Meta::unknown(),
+            meta,
         }))
     }
 
@@ -188,8 +195,16 @@ impl MongoDocuments {
                     precondition,
                 } => WriteResult::Put {
                     version: self
-                        .put_one(collection, id, doc, *precondition, Some(&mut *session))
-                        .await?,
+                        .put_one(
+                            collection,
+                            id,
+                            doc,
+                            *precondition,
+                            WriteOptions::default(),
+                            Some(&mut *session),
+                        )
+                        .await?
+                        .0,
                 },
                 WriteOp::Delete {
                     collection,
@@ -230,7 +245,8 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::Ttl)
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
-            .with(Capability::CollectionValidation);
+            .with(Capability::CollectionValidation)
+            .with(Capability::RecordMetadata);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -311,15 +327,32 @@ impl DocumentStore for MongoDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.put_with(collection, id, doc, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
         crate::purge::admitted!(self, {
             if !self.shared.physical_transactions {
-                return self.put_one(collection, id, &doc, precondition, None).await;
+                return self
+                    .put_one(collection, id, &doc, precondition, options, None)
+                    .await
+                    .map(|(version, _)| version);
             }
             self.ready(collection).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
                 self.hold_validation(session).await?;
                 self.shared.spec_in_session(collection, &mut *session).await?;
-                self.put_one(collection, id, &doc, precondition, Some(session)).await
+                self.put_one(collection, id, &doc, precondition, options, Some(session))
+                    .await
+                    .map(|(version, _)| version)
             })
         })
     }
@@ -360,7 +393,7 @@ impl DocumentStore for MongoDocuments {
                     collection,
                     &self.scope,
                     query,
-                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                    &CursorPosition::for_record(&last.id, &last.doc, &last.meta, &query.sort),
                 )?)
             } else {
                 None

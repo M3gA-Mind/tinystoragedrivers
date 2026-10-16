@@ -25,10 +25,12 @@
 
 use mongodb::bson::{Bson, Document, doc};
 use serde_json::Value;
-use tinystoragedrivers_core::{Direction, Filter, ID_FIELD, Sort};
+use tinystoragedrivers_core::{
+    CREATED_FIELD, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort, UPDATED_FIELD,
+};
 
 use crate::convert::exact_bson;
-use crate::naming::{BODY, KEY};
+use crate::naming::{BODY, CREATED, EXPIRES, KEY, SCHEMA, UPDATED};
 
 /// A translated filter and whether it is exact.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +138,9 @@ fn not(inner: &Translated) -> Translated {
 enum Path<'a> {
     /// [`ID_FIELD`]: the `_key` field.
     Id,
+    /// A record-metadata path (`_schema`, `_created_ms`, `_updated_ms`,
+    /// `_expires_ms`): always a scalar at the named top-level field.
+    Meta(&'static str),
     /// Object keys only; guards make Mongo's walk match [`value::lookup`].
     ///
     /// [`value::lookup`]: tinystoragedrivers_core::value::lookup
@@ -151,6 +156,9 @@ fn classify(path: &str) -> Path<'_> {
     if path == ID_FIELD {
         return Path::Id;
     }
+    if let Some(field) = meta_field(path) {
+        return Path::Meta(field);
+    }
     let segments: Vec<&str> = path.split('.').collect();
     if segments.iter().any(|segment| segment.starts_with('$')) {
         return Path::Opaque;
@@ -163,6 +171,18 @@ fn classify(path: &str) -> Path<'_> {
         return Path::Positional(path);
     }
     Path::Plain(segments)
+}
+
+/// The stored field a record-metadata path lives at, or `None` for any other
+/// path.
+fn meta_field(path: &str) -> Option<&'static str> {
+    match path {
+        SCHEMA_FIELD => Some(SCHEMA),
+        CREATED_FIELD => Some(CREATED),
+        UPDATED_FIELD => Some(UPDATED),
+        EXPIRES_FIELD => Some(EXPIRES),
+        _ => None,
+    }
 }
 
 /// The stored field a body path lives at.
@@ -219,6 +239,11 @@ fn leaf(path: &str, kind: Leaf, condition: impl FnOnce(&str) -> Document) -> Tra
                 exact: kind != Leaf::Presence,
             }
         }
+        // Metadata is never an array, so no guard is needed.
+        Path::Meta(field) => Translated {
+            query: condition(field),
+            exact: kind != Leaf::Presence,
+        },
         Path::Positional(path) => Translated::superset(condition(&body_field(path))),
         Path::Opaque | Path::Id => Translated::superset(Document::new()),
     }
@@ -229,8 +254,11 @@ fn present(field: &str) -> Document {
 }
 
 fn exists_true(path: &str) -> Translated {
-    if classify(path) == Path::Id {
-        return Translated::everything();
+    match classify(path) {
+        Path::Id => return Translated::everything(),
+        // Every record carries the other three; only an expiry is optional.
+        Path::Meta(field) if field != EXPIRES => return Translated::everything(),
+        _ => {}
     }
     leaf(path, Leaf::AnyValue, present)
 }
@@ -313,6 +341,8 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
     for (index, key) in sorts.iter().enumerate() {
         let source = if key.field == ID_FIELD {
             format!("${KEY}")
+        } else if let Path::Meta(field) = classify(&key.field) {
+            format!("${field}")
         } else if !matches!(classify(&key.field), Path::Plain(_)) {
             // `$` segments are operators to Mongo, and a numeric segment is an
             // array position to `value::lookup` but a field name to an
