@@ -243,7 +243,7 @@ meta(key, value)                        registry snapshot, versions, layout
 **Physical migration.** On open, the SQLite driver upgrades a v0.x file (`_tsd_*` tables):
 - it renames tables in place
 - it folds tombstones into `deleted`
-- it adds the metadata columns, backfilling `created_ms`/`updated_ms` from the body when a recognised v1 field exists, else from the open time
+- it adds the metadata columns, backfilling `created_ms`/`updated_ms` from the body when a recognised v1 field exists, else from the open time (a numeric field not named `*_ms` below 1e11 is epoch seconds and is multiplied by 1000, since v0.x kept some, such as `profiles.created_at`, in seconds)
 - it leaves `auto_vacuum` alone: a `NONE` file is converted to `INCREMENTAL` by the first `maintain` that can afford the one-time `VACUUM` (out of the transaction, so the layout is recorded first and the conversion can be retried; see section 6)
 
 The upgrade runs as one transaction, records `meta.layout = 2` and is not reversible. A backup copy is the host's responsibility.

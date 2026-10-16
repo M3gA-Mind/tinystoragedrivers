@@ -411,3 +411,20 @@ fn a_limited_page_continues_past_rows_the_recheck_rejects() {
     let found: Vec<_> = page.iter().map(|item| item.doc["n"].clone()).collect();
     assert_eq!(found, [json!(777), json!(4000)]);
 }
+
+#[test]
+fn a_limit_beyond_sqlites_integer_range_returns_every_match() {
+    let (conn, tables) = setup();
+    thousands(&conn, &tables);
+    let page = matching_after(
+        &conn,
+        ctx(&tables),
+        "c",
+        &Filter::lt("n", 10),
+        &[Sort::asc("n")],
+        None,
+        Some(usize::MAX),
+    )
+    .unwrap();
+    assert_eq!(page.len(), 10);
+}
