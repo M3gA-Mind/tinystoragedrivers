@@ -54,3 +54,41 @@ async fn a_scope_in_the_purge_ledger_alone_is_not_listed() {
         .unwrap();
     assert_eq!(storage.scopes("").await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn a_stored_scope_that_is_not_a_valid_scope_is_a_backend_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    // A row written outside the driver, with whitespace a `Scope` refuses.
+    rusqlite::Connection::open(storage.path())
+        .unwrap()
+        .execute(
+            "INSERT INTO blobs (scope, key, size, sha256, bytes) VALUES ('bad scope', 'k', 0, x'00', x'')",
+            [],
+        )
+        .unwrap();
+    let error = storage.scopes("").await.unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert!(error.to_string().contains("not a valid scope"), "{error}");
+}
+
+#[tokio::test]
+async fn the_prefix_is_literal_not_a_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    for name in ["a%b", "a_b", "axb"] {
+        storage
+            .for_scope(&Scope::new(name).unwrap())
+            .unwrap()
+            .streams()
+            .append("s", json!(1))
+            .await
+            .unwrap();
+    }
+    let found = |scopes: Vec<Scope>| -> Vec<String> {
+        scopes.iter().map(|s| s.as_str().to_owned()).collect()
+    };
+    assert_eq!(found(storage.scopes("a%").await.unwrap()), ["a%b"]);
+    assert_eq!(found(storage.scopes("a_").await.unwrap()), ["a_b"]);
+    assert_eq!(found(storage.scopes("a").await.unwrap()).len(), 3);
+}

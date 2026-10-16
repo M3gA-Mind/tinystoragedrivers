@@ -64,7 +64,7 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn new(
+    pub(crate) fn new(
         client: Client,
         db: Database,
         clock: Clock,
