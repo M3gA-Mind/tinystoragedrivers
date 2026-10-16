@@ -128,6 +128,18 @@ async fn scopes(backend: &dyn StorageBackend) {
         vec![tombstone],
         "a `%` in the prefix is literal, and a deleted document still counts"
     );
+    assert_eq!(
+        ok(
+            backend.scopes_of_tenant(&scope(&root)).await,
+            "scopes: tenant"
+        ),
+        vec![
+            expected[0].clone(),
+            expected[2].clone(),
+            expected[3].clone()
+        ],
+        "a tenant listing stops at the separator: `{root}%` shares the text prefix but is not the tenant's"
+    );
     assert!(
         ok(
             backend.scopes(&format!("{root}~")).await,

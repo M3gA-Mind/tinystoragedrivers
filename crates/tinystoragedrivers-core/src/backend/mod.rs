@@ -206,8 +206,10 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// A scope counts when it has a document (a tombstone left by a delete
     /// included), a stream or a blob. `prefix` is literal text, not a pattern:
     /// an empty prefix lists every scope, and `"u:ann"` matches `"u:ann"` and
-    /// `"u:ann/agent:x"` but not `"u:bob"`. A host drives a tenant purge by
-    /// listing the tenant's scope and everything under it.
+    /// `"u:ann/agent:x"` but not `"u:bob"`. Because it is literal text, it
+    /// also matches `"u:anna"`: to enumerate a tenant, use
+    /// [`scopes_of_tenant`](Self::scopes_of_tenant), which stops at the scope
+    /// boundary.
     ///
     /// Requires [`Capability::ScopeEnumeration`].
     ///
@@ -218,6 +220,32 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
         let _ = prefix;
         Err(maintenance::unsupported_scopes())
+    }
+
+    /// The scopes holding any stored record that belong to `tenant`: the
+    /// tenant's own scope and every principal beneath it (`<tenant>/...`),
+    /// sorted by byte order.
+    ///
+    /// Unlike [`scopes`](Self::scopes), this respects the scope boundary:
+    /// `scopes_of_tenant("u:ann")` lists `"u:ann"` and `"u:ann/agent:x"` but
+    /// never `"u:anna"` or `"u:ann-2"`. A host purging a tenant should
+    /// enumerate with this method, not with a bare prefix.
+    ///
+    /// The default lists the literal prefix with [`scopes`](Self::scopes) and
+    /// drops what sits across the boundary; a driver can override it to avoid
+    /// reading the look-alike scopes.
+    ///
+    /// Requires [`Capability::ScopeEnumeration`].
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::ScopeEnumeration`] (the default), or a backend error.
+    async fn scopes_of_tenant(&self, tenant: &Scope) -> Result<Vec<Scope>> {
+        let family = format!("{}/", tenant.as_str());
+        let mut found = self.scopes(tenant.as_str()).await?;
+        found.retain(|scope| scope == tenant || scope.as_str().starts_with(&family));
+        Ok(found)
     }
 }
 

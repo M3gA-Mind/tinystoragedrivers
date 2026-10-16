@@ -208,6 +208,30 @@ async fn scopes_lists_the_scopes_of_a_single_file() {
 }
 
 #[tokio::test]
+async fn a_tenant_listing_does_not_cross_into_a_longer_tenant() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path().join("tenants.db")).unwrap();
+    let scopes: Vec<Scope> = ["u:ann", "u:ann/agent:x", "u:anna", "u:anna/agent:y"]
+        .map(|text| Scope::new(text).unwrap())
+        .into();
+    for scope in &scopes {
+        storage
+            .for_scope(scope)
+            .unwrap()
+            .documents()
+            .put("runs", "r", json!({}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let ann = Scope::new("u:ann").unwrap();
+    assert_eq!(storage.scopes("u:ann").await.unwrap(), scopes);
+    assert_eq!(
+        storage.scopes_of_tenant(&ann).await.unwrap(),
+        scopes[..2].to_vec()
+    );
+}
+
+#[tokio::test]
 async fn maintaining_an_existing_schema_handle_is_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
