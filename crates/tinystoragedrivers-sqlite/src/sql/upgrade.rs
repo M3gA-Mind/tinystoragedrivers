@@ -16,8 +16,9 @@
 //!    its own, higher version);
 //! 4. stream entries and heads, search rows and blobs are copied, blobs
 //!    gaining `size` and `sha256`;
-//! 5. the v0.x tables are dropped and the declared indexes are recreated over
-//!    the new table;
+//! 5. the v0.x tables are dropped and the declared fields are projected into
+//!    `doc_fields` (bodies over 4 KiB are written compressed in step 2, so
+//!    the file is born in its final shape);
 //! 6. `meta.layout = 2` is recorded.
 //!
 //! `auto_vacuum` is not touched: `VACUUM` cannot run inside a transaction, so
@@ -32,6 +33,7 @@ use tinystoragedrivers_core::{CollectionSpec, Result, value};
 use super::{LAYOUT, Tables, ident};
 use crate::blobs::digest;
 use crate::error::during;
+use crate::{body, fields};
 
 /// The table names of the v0.x layout.
 pub(super) struct V0 {
@@ -137,7 +139,6 @@ fn convert(conn: &Connection, tables: &Tables, now_ms: i64) -> Result<()> {
     .map_err(during("copy stream heads"))?;
     copy_blobs(conn, tables, &old)?;
 
-    let specs = load_specs(conn, &old)?;
     for name in [
         &old.docs,
         &old.tombstones,
@@ -149,10 +150,8 @@ fn convert(conn: &Connection, tables: &Tables, now_ms: i64) -> Result<()> {
         conn.execute_batch(&format!("DROP TABLE {}", ident(name)))
             .map_err(during("drop v0 table"))?;
     }
-    for spec in &specs {
-        tables.create_indexes(conn, spec)?;
-    }
     tables.finish(conn)?;
+    fields::rebuild_all(conn, tables)?;
     conn.execute(
         &format!(
             "INSERT OR REPLACE INTO {} (key, value) VALUES ('layout', ?1)",
@@ -229,7 +228,7 @@ fn copy_docs(conn: &Connection, tables: &Tables, old: &V0, now_ms: i64) -> Resul
                 created_ms,
                 updated_ms,
                 expires_ms,
-                text,
+                body::encode(&doc)?,
             ])
             .map_err(during("copy documents"))?;
     }

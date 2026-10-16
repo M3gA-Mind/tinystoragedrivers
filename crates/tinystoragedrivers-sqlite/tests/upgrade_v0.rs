@@ -352,10 +352,26 @@ async fn a_v0_11_file_upgrades_in_place_on_open() {
         )
         .unwrap();
     assert_eq!((size, sha.len()), (5, 32));
-    let index: i64 = conn
-        .query_row("SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'tsd_ix_notes_by_title' AND tbl_name = 'docs'", [], |r| r.get(0))
+    let body_indexes: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name LIKE 'tsd\\_ix\\_%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(index, 1, "declared indexes move to the new table");
+    assert_eq!(body_indexes, 0, "the v0 expression index is not recreated");
+    let titles: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM doc_fields WHERE coll = 'notes' AND path = 'title' AND kind = 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(titles >= 2, "declared fields are projected: {titles}");
+    let lookup: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = 'doc_fields_lookup'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(lookup, 1);
 }
 
 #[tokio::test]
@@ -442,5 +458,40 @@ async fn a_failed_upgrade_rolls_back_to_the_v0_file() {
         (v0, v2),
         (6, 0),
         "nothing of the upgrade survives a failure"
+    );
+}
+
+#[tokio::test]
+async fn the_upgrade_writes_large_bodies_compressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("all.db");
+    write_v0_file(&path, "");
+    let big = json!({"title": "big", "pad": "lorem ipsum ".repeat(2000)});
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO _tsd_docs (scope, coll, id, version, doc) VALUES (?1, 'notes', 'big', 1, ?2)",
+            params![LOCAL, big.to_string()],
+        )
+        .unwrap();
+    let storage = SqliteStorage::open(&path).unwrap();
+    let (kind, bytes): (String, i64) = raw(&path)
+        .query_row(
+            "SELECT typeof(body), length(body) FROM docs WHERE id = 'big'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "blob");
+    assert!(bytes < 1000, "{bytes}");
+    let docs = storage.for_scope(&Scope::local()).unwrap();
+    assert_eq!(
+        docs.documents()
+            .get("notes", "big")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        big
     );
 }

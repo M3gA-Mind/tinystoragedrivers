@@ -8,6 +8,7 @@
 //!
 //! ```text
 //! docs(scope, coll, id, version, schema, created_ms, updated_ms, expires_ms, deleted, body)
+//! doc_fields(scope, coll, id, path, kind, value)    declared fields, see crate::fields
 //! streams(scope, name, seq, body)            stream_heads(scope, name, base, len, sealed)
 //! blobs(scope, key, content_type, size, sha256, expires_ms, bytes)
 //! fts                                         FTS5, searchable collections only
@@ -19,16 +20,21 @@
 //! its version continues if the id is written again. Every read skips deleted
 //! rows. [`upgrade`] converts a v0.x file (`_tsd_docs` and friends) in place.
 //!
+//! `docs.body` holds JSON text, or a compressed `BLOB` for a body over 4 KiB
+//! ([`crate::body`]); the declared index and search fields live in
+//! `doc_fields` ([`crate::fields`]), which is what indexes and SQL filters
+//! read.
+//!
 //! Every name that reaches SQL text is either validated by the core (collection
 //! and database names are `[A-Za-z0-9_.-]`) or quoted here; values are always
-//! bound as parameters. Index and partial-index expressions are the one place
-//! a value is inlined, because SQLite only uses a partial index when the query
-//! repeats its `WHERE` term literally.
+//! bound as parameters. The one place a string is inlined is the correlated
+//! `doc_fields` sub-select of a keyset cursor, and it goes through [`literal`].
 
 use rusqlite::{Connection, OptionalExtension};
-use tinystoragedrivers_core::{CollectionSpec, Result, StorageError};
+use tinystoragedrivers_core::{Result, StorageError};
 
 use crate::error::during;
+use crate::fields;
 
 mod upgrade;
 
@@ -42,28 +48,6 @@ pub(crate) fn literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The SQLite JSON path of a dotted field path (`owner.name` becomes
-/// `$."owner"."name"`), or `None` when SQLite cannot address it the way
-/// [`value::lookup`](tinystoragedrivers_core::value::lookup) does:
-///
-/// - a segment of digits is an array index on arrays and a key on objects,
-///   which no single SQLite path expresses;
-/// - SQLite's quoted path labels have no escape for `"` or `\`.
-///
-/// Callers fall back to evaluating such paths in Rust.
-pub(crate) fn json_path(field: &str) -> Option<String> {
-    let mut path = String::from("$");
-    for segment in field.split('.') {
-        if segment.bytes().all(|b| b.is_ascii_digit()) || segment.contains(['"', '\\']) {
-            return None;
-        }
-        path.push_str(".\"");
-        path.push_str(segment);
-        path.push('"');
-    }
-    Some(path)
-}
-
 /// The `meta.layout` value this driver writes and understands.
 pub(crate) const LAYOUT: &str = "2";
 
@@ -71,6 +55,7 @@ pub(crate) const LAYOUT: &str = "2";
 #[derive(Debug, Clone)]
 pub(crate) struct Tables {
     pub(crate) docs: String,
+    pub(crate) fields: String,
     pub(crate) admissions: String,
     pub(crate) purge_receipts: String,
     pub(crate) specs: String,
@@ -91,6 +76,7 @@ impl Tables {
         let plain = |table: &str| format!("{prefix}{table}");
         Self {
             docs: plain("docs"),
+            fields: plain("doc_fields"),
             admissions: internal("scope_admissions"),
             purge_receipts: internal("purge_receipts"),
             specs: internal("collections"),
@@ -112,8 +98,9 @@ impl Tables {
 
     /// The internal, document and search tables.
     fn document_declarations(&self) -> Vec<(&str, String)> {
-        let (docs, admissions, purge_receipts, specs, fts) = (
+        let (docs, fields, admissions, purge_receipts, specs, fts) = (
             ident(&self.docs),
+            ident(&self.fields),
             ident(&self.admissions),
             ident(&self.purge_receipts),
             ident(&self.specs),
@@ -156,6 +143,20 @@ impl Tables {
                  deleted INTEGER NOT NULL DEFAULT 0,
                  body TEXT NOT NULL,
                  PRIMARY KEY (scope, coll, id)
+             ) WITHOUT ROWID"
+                ),
+            ),
+            (
+                &self.fields,
+                format!(
+                    "CREATE TABLE IF NOT EXISTS {fields} (
+                 scope TEXT NOT NULL,
+                 coll TEXT NOT NULL,
+                 id TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 kind INTEGER NOT NULL,
+                 value,
+                 PRIMARY KEY (scope, coll, id, path)
              ) WITHOUT ROWID"
                 ),
             ),
@@ -258,9 +259,57 @@ impl Tables {
             }
             upgrade::run(conn, self)?;
         } else {
+            // A layout-2 file written before the `doc_fields` side table has
+            // plain-text bodies and expression indexes over `body`.
+            let had_fields = table_exists(conn, &self.fields)?;
             self.create(conn)?;
+            if !had_fields {
+                self.adopt_projection(conn)?;
+            }
         }
         self.validate(conn)
+    }
+
+    /// Build the side table for data written without it, and drop the
+    /// body-expression indexes it replaces. One transaction, idempotent: a
+    /// file that already has the table never gets here.
+    fn adopt_projection(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(during("begin projection"))?;
+        let built = self
+            .drop_body_indexes(conn)
+            .and_then(|()| fields::rebuild_all(conn, self));
+        match built {
+            Ok(()) => conn
+                .execute_batch("COMMIT")
+                .map_err(during("commit projection")),
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Drop the per-index expression indexes over `docs.body` that layout 2
+    /// first created (`<prefix>tsd_ix_<collection>_<index>`).
+    fn drop_body_indexes(&self, conn: &Connection) -> Result<()> {
+        let marker = format!("{}tsd_ix_", self.prefix);
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = ?1
+                 AND substr(name, 1, length(?2)) = ?2",
+            )
+            .map_err(during("find body indexes"))?;
+        let names: Vec<String> = statement
+            .query_map([self.docs.as_str(), marker.as_str()], |row| row.get(0))
+            .map_err(during("find body indexes"))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(during("find body indexes"))?;
+        for name in names {
+            conn.execute_batch(&format!("DROP INDEX {}", ident(&name)))
+                .map_err(during("drop body index"))?;
+        }
+        Ok(())
     }
 
     /// Create the layout-2 tables, the expiry index and the layout marker.
@@ -297,7 +346,14 @@ impl Tables {
             ident(&format!("{}_expiry", self.blobs)),
             ident(&self.blobs)
         ))
-        .map_err(during("index blob expiry"))
+        .map_err(during("index blob expiry"))?;
+        // Serves equality, membership and keyset seeks on a projected field.
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} (scope, coll, path, value, id)",
+            ident(&format!("{}_lookup", self.fields)),
+            ident(&self.fields)
+        ))
+        .map_err(during("index projected fields"))
     }
 
     /// The recorded layout, `None` when the file has no `layout` row.
@@ -312,37 +368,6 @@ impl Tables {
         )
         .optional()
         .map_err(during("read layout"))
-    }
-
-    /// Create the declared indexes of `spec` over the document body.
-    ///
-    /// An index is a performance hint: one whose paths SQLite cannot express
-    /// is skipped, and queries on it are evaluated in Rust either way.
-    pub(crate) fn create_indexes(&self, conn: &Connection, spec: &CollectionSpec) -> Result<()> {
-        for index in &spec.indexes {
-            let Some(columns) = index
-                .fields
-                .iter()
-                .map(|field| {
-                    json_path(field).map(|path| format!("json_extract(body, {})", literal(&path)))
-                })
-                .collect::<Option<Vec<String>>>()
-            else {
-                continue;
-            };
-            let sql = format!(
-                "CREATE INDEX IF NOT EXISTS {name} ON {docs} (scope, {columns}) WHERE coll = {coll}",
-                name = ident(&format!(
-                    "{}tsd_ix_{}_{}",
-                    self.prefix, spec.name, index.name
-                )),
-                docs = ident(&self.docs),
-                columns = columns.join(", "),
-                coll = literal(&spec.name),
-            );
-            conn.execute_batch(&sql).map_err(during("create index"))?;
-        }
-        Ok(())
     }
 
     /// Inspect the exact driver layout without creating or migrating tables.

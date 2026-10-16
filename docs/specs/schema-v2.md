@@ -201,13 +201,15 @@ docs(scope, coll, id, version, schema, created_ms, updated_ms, expires_ms,
 streams(scope, name, seq, body)         PK (scope, name, seq)
 stream_heads(scope, name, base, len, sealed)
 blobs(scope, key, content_type, size, sha256, expires_ms, bytes)
+doc_fields(scope, coll, id, path, kind, value)   PK (scope, coll, id, path)
 fts                                     FTS5, searchable collections only
 meta(key, value)                        registry snapshot, versions, layout
 ```
 
 - `deleted` replaces `_tsd_tombstones`: a deleted id keeps its row with an empty body, so versions continue across deletion as the ports require.
-- `body` is UTF-8 JSON text. A body over 4 KiB is stored zstd-compressed, with a one-byte marker; drivers decode it transparently.
-- Index and filter evaluation over compressed bodies uses SQLite generated columns, declared per index from the registry.
+- `body` is UTF-8 JSON text. A body whose serialized JSON is over 4096 bytes is stored as a `BLOB`: one marker byte (`0x01`) and a zstd frame (level 3) of the JSON. Smaller bodies, and any that would not shrink, stay `TEXT`. Drivers decode transparently, telling the two apart by the SQLite type of the value.
+- SQL never reads `body`. The paths of a collection's declared indexes and search fields are projected in Rust, before compression, into the side table `doc_fields(scope, coll, id, path, kind, value)`: one row per path the document has, `kind` the JSON type rank used by sorting and `value` the SQL value of a scalar. One generic index `(scope, coll, path, value, id)` serves every collection. Equality and membership filters and keyset cursors on a projected path are answered from it, and unique indexes are checked through the same lookup. A filter or sort on any other path is evaluated in Rust over decoded rows, as before. The table is rewritten on every put, cleared on delete, rebuilt when a collection's projected paths change, and built when a layout-2 file written without it is opened (`meta.layout` stays `2`; the body-expression indexes of that file are dropped).
+- Generated columns were rejected: they are computed from other columns of the same row, and the only column holding the document is the compressed one, which no SQL function can decode. They would also need an `ALTER TABLE` per declared index on a table shared by all collections. The side table reuses `value::lookup`, so the projection and the filter agree on every path.
 - Named databases (`StorageBackend::database`) are removed: scope plus owner prefix give the separation they were meant for, and no caller uses them.
 
 **MongoDB**:
@@ -261,7 +263,7 @@ v2 ships as **v1.0.0** and is a breaking release on purpose:
 
 ## Open questions
 
-1. Whether a body over 4 KiB should be stored as SQLite JSONB (3.45+) instead of zstd text. JSONB keeps `json_extract` cheap; zstd saves more space. The current default is zstd plus generated columns for indexed fields.
+1. Decided: a body over 4 KiB is stored as zstd, not SQLite JSONB. JSONB keeps `json_extract` cheap but saves little space (about the size of the text), and the 8b measurement (1000 compressible 20 KiB documents: 21.5 MB raw, 0.2 MB stored) favours zstd. `json_extract` over a compressed body is impossible, so indexed fields are projected into `doc_fields` instead of generated columns (see the storage section above).
 2. Whether `harness.journal` retention (default 30 days) belongs in the owner's `SealPolicy` or in host configuration. The proposal is owner default, host override.
 
 ## Catalogue
