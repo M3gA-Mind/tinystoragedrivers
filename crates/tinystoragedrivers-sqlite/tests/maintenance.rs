@@ -170,6 +170,76 @@ async fn the_first_maintain_converts_a_file_made_without_auto_vacuum() {
 }
 
 #[tokio::test]
+async fn a_bounded_budget_does_not_pay_for_the_whole_file_conversion() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("old.db");
+    {
+        let conn = Connection::open(&file).unwrap();
+        conn.execute_batch(
+            "PRAGMA auto_vacuum = NONE; PRAGMA journal_mode = WAL; CREATE TABLE keep (v TEXT);",
+        )
+        .unwrap();
+    }
+    let storage = SqliteStorage::open(&file).unwrap();
+    fill_and_empty(&storage).await;
+    storage.checkpoint(Checkpoint::Truncate).await.unwrap();
+    let before = size(&file);
+    let page = u64::try_from(pragma(&file, "page_size")).unwrap();
+
+    // The rewrite would reclaim far more than this budget allows.
+    let report = storage
+        .maintain(MaintenanceBudget::reclaim_up_to(10 * page))
+        .await
+        .unwrap();
+
+    assert_eq!(report.reclaimed_bytes, 0, "the conversion is still pending");
+    assert_eq!(pragma(&file, "auto_vacuum"), 0);
+    assert_eq!(size(&file), before, "no rewrite happened");
+
+    // A budget that covers the whole file can afford the one-time rewrite.
+    let report = storage
+        .maintain(MaintenanceBudget::reclaim_up_to(before))
+        .await
+        .unwrap();
+    assert!(report.reclaimed_bytes > 0);
+    assert_eq!(pragma(&file, "auto_vacuum"), 2);
+}
+
+#[tokio::test]
+async fn pages_a_checkpoint_could_not_copy_are_not_reported_as_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    fill_and_empty(&storage).await;
+    storage.checkpoint(Checkpoint::Truncate).await.unwrap();
+    let before = size(storage.path());
+    // A reader pinned to the log as it stands keeps the passive checkpoint
+    // from copying what the vacuum is about to write.
+    let reader = Connection::open(storage.path()).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM docs;")
+        .unwrap();
+
+    let blocked = storage
+        .maintain(MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+
+    assert_eq!(size(storage.path()), before, "the file cannot have shrunk");
+    assert_eq!(blocked.reclaimed_bytes, 0);
+
+    // Once the reader leaves, the next call finishes the checkpoint and
+    // reports what actually went back to the filesystem.
+    reader.execute_batch("COMMIT").unwrap();
+    let freed = storage
+        .maintain(MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    let after = size(storage.path());
+    assert!(after < before / 10, "{before} -> {after}");
+    assert_eq!(freed.reclaimed_bytes, before - after);
+}
+
+#[tokio::test]
 async fn checkpoint_truncate_empties_the_wal() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
@@ -205,6 +275,30 @@ async fn scopes_lists_the_scopes_of_a_single_file() {
         .unwrap();
     assert_eq!(storage.scopes("u:").await.unwrap(), [ann]);
     assert_eq!(storage.scopes("u:bob").await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn a_tenant_listing_does_not_cross_into_a_longer_tenant() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path().join("tenants.db")).unwrap();
+    let scopes: Vec<Scope> = ["u:ann", "u:ann/agent:x", "u:anna", "u:anna/agent:y"]
+        .map(|text| Scope::new(text).unwrap())
+        .into();
+    for scope in &scopes {
+        storage
+            .for_scope(scope)
+            .unwrap()
+            .documents()
+            .put("runs", "r", json!({}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let ann = Scope::new("u:ann").unwrap();
+    assert_eq!(storage.scopes("u:ann").await.unwrap(), scopes);
+    assert_eq!(
+        storage.scopes_of_tenant(&ann).await.unwrap(),
+        scopes[..2].to_vec()
+    );
 }
 
 #[tokio::test]

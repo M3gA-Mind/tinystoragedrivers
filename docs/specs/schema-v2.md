@@ -207,7 +207,8 @@ Two shared helpers are not collections:
   - `Registry::maintain_all(&dyn StorageBackend, now_ms, budget)` runs it over `backend.scopes("")` with one budget shared across scopes. It needs `ScopeEnumeration`; without it, enumerate the scopes and call `maintain` for each.
   - **Order for a host:** policies first, then space reclamation, so the vacuum sees the freed rows: `registry.maintain_all(...)`, then `backend.maintain(budget)`.
 - **Maintenance.** `StorageBackend::maintain(budget)` (capability `Maintenance`) reclaims space; it does not apply policies, because the backend does not know the registry:
-  - SQLite runs `PRAGMA incremental_vacuum` with `auto_vacuum=INCREMENTAL`, set on creation and on the v2 physical migration.
+  - SQLite runs `PRAGMA incremental_vacuum` with `auto_vacuum=INCREMENTAL`, set on creation. A migrated v0.x file is still `auto_vacuum=NONE`; SQLite only changes that with a full `VACUUM`, which cannot run in the migration transaction, so the first `maintain` with an unlimited budget (or one at least the database size) runs it once. A smaller bound reclaims nothing and leaves the conversion pending.
+  - `reclaimed_bytes` is how much the database file shrank, measured around a passive checkpoint. A reader that keeps the checkpoint from finishing delays the report to the call that completes it.
   - MongoDB and File return `Unsupported`, which callers treat as nothing to do.
 - **`checkpoint(Truncate)`** flushes the SQLite WAL. Call it before moving a database file.
 
@@ -243,8 +244,8 @@ meta(key, value)                        registry snapshot, versions, layout
 **Physical migration.** On open, the SQLite driver upgrades a v0.x file (`_tsd_*` tables):
 - it renames tables in place
 - it folds tombstones into `deleted`
-- it adds the metadata columns, backfilling `created_ms`/`updated_ms` from the body when a recognised v1 field exists, else from the open time
-- it sets `auto_vacuum`
+- it adds the metadata columns, backfilling `created_ms`/`updated_ms` from the body when a recognised v1 field exists, else from the open time (a numeric field not named `*_ms` below 1e11 is epoch seconds and is multiplied by 1000, since v0.x kept some, such as `profiles.created_at`, in seconds)
+- it leaves `auto_vacuum` alone: a `NONE` file is converted to `INCREMENTAL` by the first `maintain` that can afford the one-time `VACUUM` (out of the transaction, so the layout is recorded first and the conversion can be retried; see section 6)
 
 The upgrade runs as one transaction, records `meta.layout = 2` and is not reversible. A backup copy is the host's responsibility.
 

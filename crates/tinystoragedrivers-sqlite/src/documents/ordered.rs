@@ -49,7 +49,7 @@ pub(super) fn matching_ordered(
 
     let mut found = Vec::new();
     let mut seek = after.cloned();
-    let mut batch = limit;
+    let mut batch = limit.min(MAX_SQL_LIMIT);
     loop {
         let mut sql = format!(
             "SELECT id{selected} FROM {docs} {joins} WHERE scope = ? AND coll = {coll} AND deleted = 0 \
@@ -120,9 +120,13 @@ pub(super) fn matching_ordered(
         if returned < batch {
             return Ok(Some(found));
         }
-        batch = (limit - found.len()).max(MIN_CONTINUATION);
+        batch = (limit - found.len()).clamp(MIN_CONTINUATION, MAX_SQL_LIMIT);
     }
 }
+
+/// The largest `LIMIT` SQLite takes: a signed 64-bit integer. On a 64-bit target that is
+/// `i64::MAX`. A larger caller limit (`usize::MAX` means "all") is clamped, since no table holds more rows.
+const MAX_SQL_LIMIT: usize = usize::MAX >> 1;
 
 /// Rows fetched when a page comes up short and the query continues.
 const MIN_CONTINUATION: usize = 16;

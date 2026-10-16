@@ -8,7 +8,9 @@
 //! 1. the layout-2 tables are created beside the v0.x ones;
 //! 2. documents are copied with `schema = 0`; `created_ms` and `updated_ms`
 //!    come from the body when it carries a recognised v1 field (see
-//!    [`recognised_ms`]) and from the open time otherwise, and `expires_ms`
+//!    [`recognised_ms`]; numbers under 1e11 in a field not named `*_ms` are
+//!    epoch seconds and are scaled to milliseconds) and from the open time
+//!    otherwise, and `expires_ms`
 //!    from the collection's declared v1 `ttl` field when the body holds one
 //!    (the body keeps the field, which stays honoured);
 //! 3. tombstones are folded in as `deleted = 1` rows with the body `{}` and
@@ -274,11 +276,33 @@ fn copy_blobs(conn: &Connection, tables: &Tables, old: &V0) -> Result<()> {
     Ok(())
 }
 
+/// Integers below this are read as epoch seconds (1e11 s is the year 5138;
+/// 1e11 ms is March 1973), the cut-off between the two units.
+const SECONDS_BELOW: i64 = 100_000_000_000;
+
 /// The first of `fields` that holds an instant, as epoch milliseconds: a
-/// number is taken as milliseconds, a string as RFC 3339 text.
+/// string is RFC 3339 text, and a number is milliseconds, except under a field
+/// not named `*_ms` where one below [`SECONDS_BELOW`] is epoch seconds (v0.x
+/// kept `profiles.created_at` in seconds and had no unit marker, so the
+/// magnitude is the only signal).
 fn recognised_ms(doc: &Value, fields: &[&str]) -> Option<i64> {
     fields.iter().find_map(|field| match doc.get(field)? {
-        Value::Number(number) => number.as_i64(),
+        Value::Number(number) => {
+            let unit_known = field.ends_with("_ms");
+            let seconds = |n: i64| !unit_known && n.abs() < SECONDS_BELOW;
+            match number.as_i64() {
+                Some(n) if seconds(n) => n.checked_mul(1000),
+                Some(n) => Some(n),
+                None => {
+                    let n = number.as_f64().filter(|n| n.is_finite())?;
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "bounded by the range check"
+                    )]
+                    ((n.abs() < 1e11).then(|| (n * 1000.0).round() as i64))
+                }
+            }
+        }
         Value::String(text) => parse_rfc3339_ms(text),
         _ => None,
     })

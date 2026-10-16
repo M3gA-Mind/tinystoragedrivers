@@ -241,7 +241,11 @@ impl StorageBackend for SqliteStorage {
 
     /// Returns freed pages to the filesystem. It acts on the whole database file.
     /// The first call on a file made without `auto_vacuum` runs a one-time
-    /// `VACUUM`, which rewrites the whole file (see the crate README).
+    /// `VACUUM`, which rewrites the whole file, so it waits for a budget that
+    /// is unlimited or at least the database size; a smaller bound reclaims
+    /// nothing and leaves the conversion pending. `reclaimed_bytes` is how
+    /// much the file shrank, so pages a blocked checkpoint has not copied yet
+    /// count in the call that completes it (see the crate README).
     async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
         self.db
             .run(move |conn| maintenance::maintain(conn, budget))
