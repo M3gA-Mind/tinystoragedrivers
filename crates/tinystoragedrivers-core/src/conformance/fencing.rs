@@ -267,6 +267,13 @@ async fn refused_streams_and_blobs(fenced: &ScopedStorage, names: &Names, check:
         ErrorKind::Fenced,
         &fenced_kind("delete_stream"),
     );
+    if super::has(fenced, Capability::StreamSeal) {
+        fails(
+            streams.seal(&names.stream).await,
+            ErrorKind::Fenced,
+            &fenced_kind("seal"),
+        );
+    }
 
     blob_refused(
         fenced.blobs().put(&names.blob, vec![9, 9], None).await,
@@ -390,6 +397,9 @@ async fn holding_streams(fenced: &ScopedStorage, plain: &ScopedStorage, names: &
         streams.append(&scratch_stream, json!(1)).await,
         "holding: scratch append",
     );
+    if super::has(fenced, Capability::StreamSeal) {
+        ok(streams.seal(&scratch_stream).await, "holding: seal");
+    }
     assert!(
         ok(
             streams.delete_stream(&scratch_stream).await,

@@ -138,6 +138,7 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::Fencing)
             .with(Capability::CrossDatabaseFencing)
             .with(Capability::ConditionalStreamAppend)
+            .with(Capability::StreamSeal)
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)

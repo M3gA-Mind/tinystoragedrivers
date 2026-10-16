@@ -352,3 +352,7 @@ mod generation_tests;
 #[cfg(test)]
 #[path = "blob_ttl_tests.rs"]
 mod blob_ttl_tests;
+
+#[cfg(test)]
+#[path = "seal_tests.rs"]
+mod seal_tests;

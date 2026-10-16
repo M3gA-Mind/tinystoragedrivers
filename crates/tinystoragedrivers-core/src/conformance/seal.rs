@@ -1,0 +1,233 @@
+//! Stream sealing checks: reads are unchanged, appends are refused, sealing
+//! is idempotent and a deleted stream can start over.
+//!
+//! Where the sealed blob lives is each driver's own business (a composite
+//! backend keeps it beside the records, not in the blob backend), so these
+//! checks never look for it; the driver tests do.
+
+use serde_json::{Value, json};
+
+use super::{empty, fails, has, ok, unique};
+use crate::backend::ScopedStorage;
+use crate::error::ErrorKind;
+use crate::stream::{StreamEntry, StreamStore};
+use crate::{Capability, SealOutcome};
+
+const ENTRIES: u64 = 1000;
+const PAGE: usize = 64;
+
+pub(super) async fn run(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    if !has(storage, Capability::StreamSeal) {
+        fails(
+            streams.seal(&unique("seal_unsupported")).await,
+            ErrorKind::Unsupported(Capability::StreamSeal),
+            "seal on a driver without StreamSeal",
+        );
+        return;
+    }
+    missing_and_invalid(storage).await;
+    reads_survive_sealing(storage).await;
+    appends_are_refused(storage).await;
+    truncated_streams_seal(storage).await;
+    delete_removes_the_blob(storage).await;
+}
+
+/// Every entry of `stream`, read in pages of `PAGE`.
+async fn paged(streams: &dyn StreamStore, stream: &str) -> Vec<StreamEntry> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    loop {
+        let page = ok(streams.read_window(stream, from, PAGE).await, "page");
+        let Some(last) = page.last() else {
+            return out;
+        };
+        from = last.offset + 1;
+        out.extend(page);
+    }
+}
+
+fn values(count: u64) -> Vec<Value> {
+    (0..count)
+        .map(|i| json!({"i": i, "pad": "x".repeat(20)}))
+        .collect()
+}
+
+async fn missing_and_invalid(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    fails(
+        streams.seal(&unique("seal_missing")).await,
+        ErrorKind::NotFound,
+        "seal a stream that does not exist",
+    );
+    fails(
+        streams.seal("").await,
+        ErrorKind::InvalidInput,
+        "seal an empty name",
+    );
+}
+
+async fn reads_survive_sealing(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("seal/stream:1");
+    ok(
+        streams.append_batch(&name, values(ENTRIES)).await,
+        "fill the stream",
+    );
+    let before = paged(streams.as_ref(), &name).await;
+    assert_eq!(
+        before.len() as u64,
+        ENTRIES,
+        "all entries read before sealing"
+    );
+    let whole_before = ok(
+        streams.read_window(&name, 0, usize::MAX).await,
+        "whole window",
+    );
+    let middle_before = ok(streams.read_window(&name, 333, 10).await, "middle");
+
+    let outcome = ok(streams.seal(&name).await, "seal");
+    assert_eq!((outcome.base, outcome.len), (0, ENTRIES), "seal outcome");
+    assert!(outcome.blob_bytes > 0, "the outcome sizes the blob");
+
+    assert_eq!(paged(streams.as_ref(), &name).await, before, "paged reads");
+    assert_eq!(
+        ok(streams.read_window(&name, 0, usize::MAX).await, "whole"),
+        whole_before,
+        "whole window after sealing"
+    );
+    assert_eq!(
+        ok(streams.read_window(&name, 333, 10).await, "middle"),
+        middle_before,
+        "mid-stream window after sealing"
+    );
+    empty(
+        &ok(streams.read_window(&name, ENTRIES, 10).await, "at the end"),
+        "reading at the length",
+    );
+    empty(
+        &ok(streams.read_window(&name, 5000, 10).await, "past the end"),
+        "reading past the length",
+    );
+    assert_eq!(ok(streams.len(&name).await, "len"), ENTRIES, "length");
+    assert!(
+        ok(streams.streams(&name).await, "list").contains(&name),
+        "a sealed stream is still listed"
+    );
+
+    let again = ok(streams.seal(&name).await, "seal again");
+    assert_eq!(again, outcome, "sealing twice returns the same outcome");
+    assert_eq!(
+        paged(streams.as_ref(), &name).await,
+        before,
+        "after re-seal"
+    );
+}
+
+async fn appends_are_refused(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("seal_append");
+    ok(streams.append_batch(&name, values(3)).await, "fill");
+    ok(streams.seal(&name).await, "seal");
+    fails(
+        streams.append(&name, json!(1)).await,
+        ErrorKind::Conflict,
+        "append to a sealed stream",
+    );
+    fails(
+        streams.append_batch(&name, values(2)).await,
+        ErrorKind::Conflict,
+        "append a batch to a sealed stream",
+    );
+    fails(
+        streams.append_batch(&name, vec![]).await,
+        ErrorKind::Conflict,
+        "append an empty batch to a sealed stream",
+    );
+    if has(storage, Capability::ConditionalStreamAppend) {
+        for expected in [3, 0] {
+            fails(
+                streams
+                    .append_batch_if_offset(&name, expected, values(1))
+                    .await,
+                ErrorKind::Conflict,
+                "conditional append to a sealed stream",
+            );
+        }
+    }
+    fails(
+        streams.truncate_before(&name, 1).await,
+        ErrorKind::Conflict,
+        "truncate a sealed stream",
+    );
+    assert_eq!(
+        ok(streams.len(&name).await, "len"),
+        3,
+        "refused writes change nothing"
+    );
+    assert_eq!(
+        ok(streams.read_window(&name, 0, 10).await, "read").len(),
+        3,
+        "refused writes keep the entries"
+    );
+}
+
+async fn truncated_streams_seal(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let partial = unique("seal_partial");
+    ok(streams.append_batch(&partial, values(5)).await, "fill");
+    ok(streams.truncate_before(&partial, 3).await, "truncate");
+    let before = ok(streams.read_window(&partial, 0, 10).await, "read");
+    let outcome = ok(streams.seal(&partial).await, "seal a truncated stream");
+    assert_eq!(
+        outcome,
+        SealOutcome::new(3, 5, outcome.blob_bytes),
+        "outcome"
+    );
+    assert_eq!(outcome.retained(), 2);
+    assert_eq!(
+        ok(streams.read_window(&partial, 0, 10).await, "read sealed"),
+        before,
+        "offsets below the base stay skipped"
+    );
+
+    let drained = unique("seal_drained");
+    ok(streams.append_batch(&drained, values(3)).await, "fill");
+    ok(streams.truncate_before(&drained, 99).await, "truncate all");
+    let outcome = ok(streams.seal(&drained).await, "seal a drained stream");
+    assert_eq!((outcome.base, outcome.len, outcome.retained()), (3, 3, 0));
+    assert_eq!(
+        ok(streams.len(&drained).await, "len"),
+        3,
+        "len keeps counting"
+    );
+    empty(
+        &ok(streams.read_window(&drained, 0, 10).await, "read"),
+        "a drained sealed stream",
+    );
+    fails(
+        streams.append(&drained, json!(1)).await,
+        ErrorKind::Conflict,
+        "append to a drained sealed stream",
+    );
+}
+
+async fn delete_removes_the_blob(storage: &ScopedStorage) {
+    let streams = storage.streams();
+    let name = unique("seal_delete");
+    ok(streams.append_batch(&name, values(4)).await, "fill");
+    ok(streams.seal(&name).await, "seal");
+    assert!(ok(streams.delete_stream(&name).await, "delete"), "existed");
+    assert_eq!(ok(streams.len(&name).await, "len"), 0, "gone");
+    empty(
+        &ok(streams.read_window(&name, 0, 10).await, "read"),
+        "a deleted sealed stream",
+    );
+    assert!(!ok(streams.delete_stream(&name).await, "delete again"));
+    assert_eq!(
+        ok(streams.append(&name, json!("fresh")).await, "recreate"),
+        0,
+        "a deleted sealed stream starts over unsealed"
+    );
+    assert_eq!(ok(streams.read_window(&name, 0, 10).await, "read").len(), 1);
+}

@@ -35,11 +35,16 @@ pub(super) struct StoredDoc {
 pub(super) struct StoredStream {
     pub(super) base: u64,
     pub(super) entries: VecDeque<Value>,
+    /// The length the stream had when it was sealed. Once set, the entries
+    /// are read from the sealed blob and `entries` is leftover that sealing
+    /// removes (a sealed stream whose entries survive a crash).
+    pub(super) sealed_len: Option<u64>,
 }
 
 impl StoredStream {
     pub(super) fn len(&self) -> u64 {
-        self.base + self.entries.len() as u64
+        self.sealed_len
+            .unwrap_or_else(|| self.base + self.entries.len() as u64)
     }
 }
 
