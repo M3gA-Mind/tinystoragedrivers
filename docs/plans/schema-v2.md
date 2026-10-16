@@ -31,7 +31,7 @@ Implements [`../specs/schema-v2.md`](../specs/schema-v2.md). Each task starts wi
    - `Schema`, `Item`, `ScopeClass`, `Step`, `Registry::compose`, and the runner over `tsd.migrations`.
    - Tests:
      - each composition refusal
-     - step resume after an injected failure at batch *n*
+     - step resume after an injected failure at batch *n* (documents, streams and blob prefixes; stream and blob steps also run over SQLite)
      - deterministic re-run
      - `Unavailable` on writes during migration
 5. **Primitives** (`core/src/primitives/`, new)
@@ -91,7 +91,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 - [x] 1 scope grammar
 - [x] 2 key
 - [x] 3 metadata (core + memory driver; other drivers in task 9, bus in task 10)
-- [x] 4 registry (core only; stream and blob steps follow)
+- [x] 4 registry (core; document, stream and blob steps done)
 - [x] 5 primitives
 - [x] 6 sealing
 - [x] 7 maintenance

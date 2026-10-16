@@ -11,7 +11,8 @@ use crate::filter::{Filter, ID_FIELD, SCHEMA_FIELD, Sort};
 
 use super::compose::Registry;
 use super::migrations::{Migrations, Progress, migrations_spec, step_key};
-use super::types::{Owner, SourceRecord, Step, TargetRecord};
+use super::types::{Owner, SourceRecord, Step, StepBody, StepFn, TargetRecord};
+use super::{runner_blobs, runner_streams};
 
 /// How [`Registry::migrate`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,20 @@ impl Registry {
     /// last finished batch; calling `migrate` again resumes there and yields
     /// the same final state as an uninterrupted run, because steps are pure.
     ///
+    /// **Stream steps** ([`Step::stream`]) list the streams under the step's
+    /// source prefix and move them one at a time: read the source whole (paged
+    /// by `batch_size`), map it, append the result to its new name in batches,
+    /// seal the target if the source was sealed, then delete the source. The
+    /// per-source progress (target name and entries appended) is saved before
+    /// the first append and after every batch. On resume the target's length
+    /// says where to continue, so no entry is appended twice; a target that
+    /// was not started by this step is refused with `Conflict`. Migrated
+    /// streams start at offset 0 (see [`Step::stream`]).
+    ///
+    /// **Blob steps** ([`Step::blobs`]) move one blob at a time: put the
+    /// target (an existing target is kept), then delete the source. The step's
+    /// count is saved after every blob and a resume lists what is left.
+    ///
     /// Run one `migrate` per scope at a time (hold a lease): two concurrent
     /// runners are safe for the data (writes are idempotent) but waste work.
     /// The target collections must have been declared with
@@ -130,14 +145,42 @@ impl Registry {
                 report.already_done += 1;
                 continue;
             }
-            let runner = StepRun {
-                registry: self,
-                owner,
-                step,
-                docs,
-                batch_size: options.batch_size,
+            let written = match &step.run {
+                StepBody::Documents(run) => {
+                    StepRun {
+                        registry: self,
+                        owner,
+                        step,
+                        run,
+                        docs,
+                        batch_size: options.batch_size,
+                    }
+                    .run(&migrations, &key, progress)
+                    .await?
+                }
+                StepBody::Streams(run) => {
+                    let context = Context {
+                        storage,
+                        owner,
+                        step,
+                        migrations: &migrations,
+                        key: &key,
+                        batch_size: options.batch_size,
+                    };
+                    runner_streams::run(&context, run, progress).await?
+                }
+                StepBody::Blobs(run) => {
+                    let context = Context {
+                        storage,
+                        owner,
+                        step,
+                        migrations: &migrations,
+                        key: &key,
+                        batch_size: options.batch_size,
+                    };
+                    runner_blobs::run(&context, run, progress).await?
+                }
             };
-            let written = runner.run(&migrations, &key, progress).await?;
             report.ran.push(StepReport {
                 owner: owner.to_string(),
                 item: step.item.to_owned(),
@@ -155,10 +198,21 @@ impl Registry {
     }
 }
 
+/// What a stream or blob step needs from the runner.
+pub(super) struct Context<'a> {
+    pub(super) storage: &'a ScopedStorage,
+    pub(super) owner: &'a Owner,
+    pub(super) step: &'a Step,
+    pub(super) migrations: &'a Migrations,
+    pub(super) key: &'a crate::Key,
+    pub(super) batch_size: usize,
+}
+
 struct StepRun<'a> {
     registry: &'a Registry,
     owner: &'a Owner,
     step: &'a Step,
+    run: &'a StepFn,
     docs: &'a std::sync::Arc<dyn DocumentStore>,
     batch_size: usize,
 }
@@ -237,7 +291,7 @@ impl StepRun<'_> {
                 meta: item.meta,
             })
             .collect();
-        let outputs = (self.step.run)(records)?;
+        let outputs = (self.run)(records)?;
         // Validate every output before writing any, so a bad step leaves the
         // batch untouched.
         let schemas = outputs

@@ -3364,6 +3364,7 @@ dependencies = [
 name = "tinystoragedrivers-sqlite"
 version = "0.11.0"
 dependencies = [
+ "async-trait",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",

@@ -9,9 +9,10 @@ use crate::blob::MAX_BLOB_KEY_LEN;
 use crate::document::{MAX_COLLECTION_LEN, validate_collection};
 use crate::error::{Result, StorageError};
 use crate::scope::Scope;
+use crate::stream::{SEALED_BLOB_PREFIX, validate_stream};
 
 use super::migrations::migrations_spec;
-use super::types::{Item, Owner, Schema, Step};
+use super::types::{Item, Owner, Schema, Step, StepBody};
 
 /// The composed declarations of every owner in a process.
 ///
@@ -59,10 +60,13 @@ impl Registry {
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), naming the
     /// owner and item at fault, for: a malformed owner, collection, stream or
     /// prefix; a name outside its owner's prefix; a name or owner declared
-    /// twice; a collection version of 0; a step for an item that is not a
-    /// collection of its owner; a step that does not go up; a step id used
+    /// twice; a collection version of 0; a step for an item that is not declared by
+    /// its owner or is of another kind than the step (collection, stream or
+    /// blob prefix); a stream or blob step with no source prefix, or one that
+    /// overlaps its item (or, for blobs, the sealed-stream blobs); a step that does not go up; a step id used
     /// twice; and a step chain that does not start at version 1, has a gap,
-    /// or does not end at the declared version.
+    /// or does not end at the declared version (stream and blob items have no
+    /// declared version, so their chains only have to start at 1 and not skip).
     pub fn compose(schemas: impl IntoIterator<Item = Schema>) -> Result<Self> {
         let schemas: Vec<Schema> = schemas.into_iter().collect();
         let mut owners = HashSet::new();
@@ -302,32 +306,20 @@ fn check_steps(schema: &Schema) -> Result<()> {
     let owner = &schema.owner;
     let mut chains: HashMap<&str, Vec<&Step>> = HashMap::new();
     for step in &schema.steps {
-        let declared = schema
-            .items
-            .iter()
-            .any(|item| matches!(item, Item::Collection { name, .. } if name == step.item));
-        if !declared {
+        let Some(item) = schema.items.iter().find(|item| item.name() == step.item) else {
             return Err(StorageError::invalid_input(format!(
-                "step `{}` targets `{}`, which is not a collection declared by owner `{owner}`; steps rewrite collections only",
+                "step `{}` targets `{}`, which is not declared by owner `{owner}`",
                 step.id, step.item
             )));
-        }
+        };
+        check_step_kind(step, item)?;
         if step.to <= step.from {
             return Err(StorageError::invalid_input(format!(
                 "step `{}` of `{}` must go up, but runs from version {} to {}",
                 step.id, step.item, step.from, step.to
             )));
         }
-        if let Some(source) = step.source {
-            validate_collection(source).map_err(|e| {
-                StorageError::invalid_input(format!(
-                    "step `{}` of `{}` has source `{source}`: {}",
-                    step.id,
-                    step.item,
-                    e.message()
-                ))
-            })?;
-        }
+        check_source(step, item)?;
         let chain = chains.entry(step.item).or_default();
         if chain.iter().any(|earlier| earlier.id == step.id) {
             return Err(StorageError::invalid_input(format!(
@@ -338,14 +330,108 @@ fn check_steps(schema: &Schema) -> Result<()> {
         chain.push(step);
     }
     for item in &schema.items {
-        let Item::Collection { name, version, .. } = item else {
-            continue;
-        };
-        check_chain(
-            name,
-            *version,
-            chains.get(name.as_str()).map_or(&[], Vec::as_slice),
-        )?;
+        let chain = chains.get(item.name()).map_or(&[][..], Vec::as_slice);
+        match item {
+            Item::Collection { name, version, .. } => check_chain(name, *version, chain)?,
+            Item::Stream { name, .. } => check_unversioned_chain(name, chain)?,
+            Item::Blobs { prefix, .. } => check_unversioned_chain(prefix, chain)?,
+            Item::Secrets { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+/// A step runs against exactly the kind of item its body is written for.
+fn check_step_kind(step: &Step, item: &Item) -> Result<()> {
+    let (matches, wanted) = match (&step.run, item) {
+        (StepBody::Documents(_), Item::Collection { .. }) => (true, "collection"),
+        (StepBody::Streams(_), Item::Stream { .. }) => (true, "stream"),
+        (StepBody::Blobs(_), Item::Blobs { .. }) => (true, "blob prefix"),
+        (StepBody::Documents(_), _) => (false, "collection"),
+        (StepBody::Streams(_), _) => (false, "stream"),
+        (StepBody::Blobs(_), _) => (false, "blob prefix"),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(StorageError::invalid_input(format!(
+            "step `{}` targets `{}`, which is not a {wanted} declared by its owner; collection steps rewrite collections, stream steps move streams and blob steps move blob prefixes",
+            step.id, step.item
+        )))
+    }
+}
+
+/// The legacy source of a step: a collection name, or for stream and blob
+/// steps a required prefix that stays clear of the item and, for blobs, of
+/// the sealed-stream blobs.
+fn check_source(step: &Step, item: &Item) -> Result<()> {
+    let fail = |why: String| {
+        StorageError::invalid_input(format!(
+            "step `{}` of `{}` has source `{}`: {why}",
+            step.id,
+            step.item,
+            step.source.unwrap_or_default()
+        ))
+    };
+    match (&step.run, step.source) {
+        (StepBody::Documents(_), Some(source)) => {
+            validate_collection(source).map_err(|e| fail(e.message().to_owned()))
+        }
+        (StepBody::Documents(_), None) => Ok(()),
+        (_, None) => Err(StorageError::invalid_input(format!(
+            "step `{}` of `{}` needs a legacy source prefix: set it with `source_prefix`",
+            step.id, step.item
+        ))),
+        (body, Some(source)) => {
+            let blobs = matches!(body, StepBody::Blobs(_));
+            let valid = if blobs {
+                !source.is_empty() && source.len() <= MAX_BLOB_KEY_LEN && !source.contains('\0')
+            } else {
+                validate_stream(source).is_ok()
+            };
+            if !valid {
+                return Err(fail("not a valid prefix".to_owned()));
+            }
+            let target = item.name();
+            if source.starts_with(target) || target.starts_with(source) {
+                return Err(fail(format!(
+                    "it overlaps the item `{target}`, so the step would read its own output"
+                )));
+            }
+            if blobs
+                && (source.starts_with(SEALED_BLOB_PREFIX)
+                    || SEALED_BLOB_PREFIX.starts_with(source))
+            {
+                return Err(fail(format!(
+                    "it overlaps `{SEALED_BLOB_PREFIX}`, which holds sealed streams"
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Stream and blob items declare no version: the chain only has to start at 1
+/// and not skip.
+fn check_unversioned_chain(name: &str, chain: &[&Step]) -> Result<()> {
+    let Some(first) = chain.first() else {
+        return Ok(());
+    };
+    if first.from != 1 {
+        return Err(StorageError::invalid_input(format!(
+            "steps for `{name}` must start at version 1, but `{}` starts at {}",
+            first.id, first.from
+        )));
+    }
+    for pair in chain.windows(2) {
+        if let [earlier, later] = pair
+            && later.from != earlier.to
+        {
+            return Err(StorageError::invalid_input(format!(
+                "step gap for `{name}`: `{}` starts at {} after `{}` ended at {}",
+                later.id, later.from, earlier.id, earlier.to
+            )));
+        }
     }
     Ok(())
 }
