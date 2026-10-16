@@ -3,7 +3,8 @@ use serde_json::Value;
 use tinystoragedrivers_bus as wire;
 use tinystoragedrivers_bus::MAX_BATCH_OPS;
 use tinystoragedrivers_core::{
-    Capability, Result, SealOutcome, StorageError, StreamEntry, StreamStore, async_trait,
+    Capability, Result, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore,
+    async_trait,
 };
 
 use super::Wire;
@@ -133,6 +134,17 @@ impl StreamStore for BusStreams {
             .call("Seal", &request, Some(Capability::StreamSeal))
             .await?;
         Ok(SealOutcome::new(sealed.base, sealed.len, sealed.blob_bytes))
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        let request = wire::StreamRequest {
+            stream: stream.to_owned(),
+        };
+        let info: Option<wire::StreamInfoResponse> = self
+            .call("Info", &request, Some(Capability::StreamSeal))
+            .await?;
+        Ok(info
+            .map(|info| StreamInfo::new(info.base, info.len, info.sealed_ms, info.last_append_ms)))
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
