@@ -103,7 +103,10 @@ impl Registry {
     /// streams start at offset 0 (see [`Step::stream`]).
     ///
     /// **Blob steps** ([`Step::blobs`]) move one blob at a time: put the
-    /// target (an existing target is kept), then delete the source. The step's
+    /// target, then delete the source. An existing target is accepted only when
+    /// its bytes and content type equal the step's output (an interrupted
+    /// earlier write); otherwise the step fails with `Conflict` and keeps the
+    /// source. The step's
     /// count is saved after every blob and a resume lists what is left.
     ///
     /// Run one `migrate` per scope at a time (hold a lease). Two concurrent
