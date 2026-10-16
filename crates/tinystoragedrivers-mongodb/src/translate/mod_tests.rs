@@ -239,3 +239,98 @@ fn sort_plans_rank_then_value_then_key() {
 fn body_fields_live_under_d() {
     assert_eq!(body_field("a.b"), "d.a.b");
 }
+
+fn or_missing(field: &str, condition: Document) -> Document {
+    doc! {"$or": [{field: condition}, {field: {"$exists": false}}]}
+}
+
+#[test]
+fn metadata_predicates_that_zero_satisfies_also_accept_a_missing_field() {
+    // A record written before the metadata fields existed decodes as 0.
+    let lt = filter(&Filter::lt("_schema", 2));
+    assert!(lt.exact);
+    assert_eq!(lt.query, or_missing("_schema", doc! {"$lt": 2_i64}));
+
+    let eq = filter(&Filter::eq("_schema", 0));
+    assert!(eq.exact);
+    assert_eq!(eq.query, or_missing("_schema", doc! {"$eq": 0_i64}));
+
+    let within = filter(&Filter::lte("_created_ms", 50).and(Filter::gte("_created_ms", 0)));
+    assert!(within.exact);
+    assert_eq!(
+        within.query,
+        doc! {"$and": [
+            or_missing("_c", doc! {"$lte": 50_i64}),
+            or_missing("_c", doc! {"$gte": 0_i64}),
+        ]}
+    );
+
+    let any = filter(&Filter::In {
+        field: "_updated_ms".into(),
+        values: vec![json!(0), json!(7)],
+    });
+    assert!(any.exact);
+    assert_eq!(
+        any.query,
+        doc! {"$or": [
+            or_missing("_u", doc! {"$eq": 0_i64}),
+            {"_u": {"$eq": 7_i64}},
+        ]}
+    );
+}
+
+#[test]
+fn metadata_predicates_that_zero_fails_keep_to_the_stored_field() {
+    for (filter_, expected) in [
+        (Filter::gt("_schema", 0), doc! {"_schema": {"$gt": 0_i64}}),
+        (Filter::eq("_schema", 2), doc! {"_schema": {"$eq": 2_i64}}),
+        (Filter::lt("_schema", 0), doc! {"_schema": {"$lt": 0_i64}}),
+        (Filter::gte("_created_ms", 1), doc! {"_c": {"$gte": 1_i64}}),
+    ] {
+        let translated = filter(&filter_);
+        assert!(translated.exact, "{filter_:?}");
+        assert_eq!(translated.query, expected, "{filter_:?}");
+    }
+}
+
+#[test]
+fn a_negated_metadata_predicate_sees_a_legacy_record_as_zero() {
+    let not_zero = filter(&Filter::eq("_schema", 0).negate());
+    assert!(not_zero.exact);
+    assert_eq!(
+        not_zero.query,
+        doc! {"$nor": [or_missing("_schema", doc! {"$eq": 0_i64})]}
+    );
+}
+
+#[test]
+fn an_expiry_stays_absent_when_missing() {
+    let lte = filter(&Filter::lte("_expires_ms", 5));
+    assert!(lte.exact);
+    assert_eq!(lte.query, doc! {"_x": {"$lte": 5_i64}});
+}
+
+#[test]
+fn metadata_sorts_read_a_missing_field_as_zero() {
+    let plan = sort_plan(&[Sort::asc("_created_ms"), Sort::desc("_expires_ms")]).unwrap();
+    let source = |name: &str| {
+        plan.add_fields
+            .get_document(name)
+            .unwrap()
+            .get_array("$ifNull")
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(
+        source("_tsd_k0"),
+        [Bson::Document(doc! {"$ifNull": ["$_c", 0_i64]}), Bson::Null]
+    );
+    assert_eq!(
+        source("_tsd_k1"),
+        [Bson::String("$_x".into()), Bson::Null],
+        "an absent expiry is still no expiry"
+    );
+    // The rank reads the same defaulted value.
+    let rank = plan.add_fields.get_document("_tsd_r0").unwrap().to_string();
+    assert!(rank.contains("$ifNull"), "{rank}");
+}

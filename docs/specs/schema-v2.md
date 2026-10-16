@@ -244,6 +244,7 @@ meta(key, value)                        registry snapshot, versions, layout
 - The same scopes, names and metadata.
 - Document fields are `_scope`, `_key`, `_v`, `_schema`, `_c`, `_u`, `_x` (expires) and `_del`, with the body under `d`.
 - TTL indexes use `_x`.
+- A record written before the metadata fields existed lacks `_schema`, `_c` and `_u`, and reads them as `0`. Filters and sorts on `_schema`, `_created_ms` and `_updated_ms` treat a missing field as `0` (a predicate that `0` satisfies also accepts a missing field; a sort reads `$ifNull(field, 0)`), so `_schema < 2` finds legacy records and an in-place migration cannot finish with them unmigrated. A missing `_x` stays "no expiry".
 
 **File driver**: `scopes/<scope>/{docs/<coll>/<id>.json, streams/<name>.jsonl, blobs/<key>}`, with metadata in a `.meta.json` sidecar. It exists for tests and inspection, not production.
 
