@@ -8,8 +8,11 @@
 //!   collide with a named database's. Driver bookkeeping uses the reserved
 //!   [`RESERVED_PREFIX`](tinystoragedrivers_core::RESERVED_PREFIX), which port
 //!   names cannot start with.
-//! - **Stored documents.** `{_id: {s, k}, _scope, _key, _v, d}`: the body lives
-//!   under [`BODY`] so its field names never collide with the driver's. A
+//! - **Stored documents.** `{_id: {s, k}, _scope, _key, _v, _schema, _c, _u,
+//!   _x?, d}`: the body lives under [`BODY`] so its field names never collide
+//!   with the driver's. `_schema`, `_c`, `_u` and `_x` are the record metadata
+//!   (schema version, created, updated, expires; all `Int64`, `_x` absent when
+//!   the document never expires). A
 //!   removed document stays as a tombstone (`_del: true`, empty body).
 //! - **Cursors and index names** carry an FNV-1a hash, which, unlike
 //!   `DefaultHasher`, is stable across processes and Rust releases. Query
@@ -28,6 +31,15 @@ pub(crate) const KEY: &str = "_key";
 pub(crate) const VERSION: &str = "_v";
 /// The field holding the document body.
 pub(crate) const BODY: &str = "d";
+/// The field holding the body version the writer declared (`Meta::schema`).
+pub(crate) const SCHEMA: &str = "_schema";
+/// The field holding the creation time in epoch milliseconds.
+pub(crate) const CREATED: &str = "_c";
+/// The field holding the latest write time in epoch milliseconds.
+pub(crate) const UPDATED: &str = "_u";
+/// The field holding the expiry in epoch milliseconds; absent when the
+/// document never expires.
+pub(crate) const EXPIRES: &str = "_x";
 /// Present (and `true`) on a removed document's tombstone: the row keeps its
 /// `_v` so a recreated id continues its version sequence, and its body is
 /// emptied so no index or text search sees it.

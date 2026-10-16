@@ -39,10 +39,13 @@ use mongodb::options::{FindOptions, IndexOptions};
 use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capability, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
+mod seal;
+
 use crate::backend::Shared;
+use crate::blobs::MongoBlobs;
 use crate::convert::{from_bson, to_bson};
 use crate::errors;
 use crate::fence::in_write;
@@ -66,6 +69,9 @@ pub(crate) struct Segment {
     pub(crate) trimmed: u64,
     /// The retained records, for offsets `start + trimmed..end`.
     pub(crate) values: Vec<Bson>,
+    /// For the seal marker, the first retained offset of the sealed stream.
+    /// A marker is the stream's last segment and holds no entries.
+    pub(crate) sealed_base: Option<u64>,
 }
 
 fn offset(doc: &Document, field: &str) -> Result<u64> {
@@ -96,6 +102,11 @@ impl Segment {
                 .get_array("vs")
                 .map_err(|_| StorageError::serialization("malformed stream segment"))?
                 .clone(),
+            sealed_base: if doc.get_bool("seal").unwrap_or(false) {
+                Some(offset(doc, "sb")?)
+            } else {
+                None
+            },
         };
         let covered = segment
             .start
@@ -210,6 +221,14 @@ impl MongoStreams {
         Ok(self.shared.scoped(STREAMS, &self.scope))
     }
 
+    /// Blobs of this scope, unfenced: GridFS cannot join a fenced transaction,
+    /// and a sealed stream's blob is written and removed around the fenced
+    /// document writes, never inside one.
+    fn blobs(&self) -> MongoBlobs {
+        MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false)
+            .with_generation(self.generation)
+    }
+
     fn heads(&self) -> ScopedCollection {
         self.shared.scoped(STREAM_HEADS, &self.scope)
     }
@@ -279,10 +298,13 @@ impl MongoStreams {
                 })?;
         }
         let generation = self.generation(stream, session.as_deref_mut()).await?;
-        let end = self
+        let last = self
             .edge(handle, stream, generation, -1, session.as_deref_mut())
-            .await?
-            .map_or(0, |last| last.end);
+            .await?;
+        if last.as_ref().is_some_and(|last| last.sealed_base.is_some()) {
+            return Err(StorageError::conflict("stream is sealed"));
+        }
+        let end = last.map_or(0, |last| last.end);
         if expected.is_some_and(|offset| offset != end) {
             return Err(StorageError::conflict("stream next offset changed"));
         }
@@ -317,6 +339,9 @@ impl MongoStreams {
         else {
             return Ok(0);
         };
+        if last.sealed_base.is_some() {
+            return Err(StorageError::conflict("stream is sealed"));
+        }
         let affected = handle
             .find_in(
                 doc! {"s": stream, "g": generation, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
@@ -472,7 +497,12 @@ impl StreamStore for MongoStreams {
                 .await
                 .map_err(errors::failed("read a stream"))?
             {
-                for (offset, value) in Segment::decode(&doc)?.entries_from(from) {
+                let segment = Segment::decode(&doc)?;
+                if segment.sealed_base.is_some() {
+                    // The marker is the last segment: the blob holds it all.
+                    return self.sealed_window(stream, from, limit).await;
+                }
+                for (offset, value) in segment.entries_from(from) {
                     out.push(StreamEntry {
                         offset,
                         value: from_bson(value)?,
@@ -517,15 +547,23 @@ impl StreamStore for MongoStreams {
         crate::purge::admitted!(self, {
             validate_stream(stream)?;
             let handle = self.segments().await?;
-            if !self.shared.physical_transactions {
-                return self.delete_in(&handle, stream, None).await;
-            }
-            self.shared.prepare_validation(Some(&self.scope)).await?;
-            in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
-                self.delete_in(&handle, stream, Some(session)).await
-            })
+            let removed = if self.shared.physical_transactions {
+                self.shared.prepare_validation(Some(&self.scope)).await?;
+                in_write!(&self.shared, self.fence.as_deref(), session => {
+                    self.hold_admission(&mut *session).await?;
+                    self.delete_in(&handle, stream, Some(session)).await
+                })?
+            } else {
+                self.delete_in(&handle, stream, None).await?
+            };
+            // Even when the stream is gone, clear a blob a crashed seal left.
+            self.delete_sealed_blob(stream).await?;
+            Ok(removed)
         })
+    }
+
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        crate::purge::admitted!(self, self.seal_stream(stream).await)
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {

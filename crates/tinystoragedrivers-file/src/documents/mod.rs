@@ -18,7 +18,7 @@ use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
     Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
-    validate_collection, validate_doc, validate_id, value,
+    WriteOptions, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -181,6 +181,18 @@ impl DocumentStore for FileDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.put_with(collection, id, doc, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&doc)?;
@@ -189,7 +201,7 @@ impl DocumentStore for FileDocuments {
                 .await?;
         }
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.write(move |docs| docs.put(&collection, &id, doc, precondition))
+        self.write(move |docs| docs.put(&collection, &id, doc, precondition, options))
             .await
     }
 
@@ -219,7 +231,7 @@ impl DocumentStore for FileDocuments {
             let found = docs.matching(&collection, &query.filter, &query.sort)?;
             let start = position.as_ref().map_or(0, |cursor| {
                 found.partition_point(|item| {
-                    CursorPosition::for_document(&item.id, &item.doc, &query.sort)
+                    CursorPosition::for_record(&item.id, &item.doc, &item.meta, &query.sort)
                         .compare(cursor, &query.sort)
                         != std::cmp::Ordering::Greater
                 })
@@ -235,7 +247,7 @@ impl DocumentStore for FileDocuments {
                 Some(Cursor::keyset(
                     "file",
                     fingerprint,
-                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                    &CursorPosition::for_record(&last.id, &last.doc, &last.meta, &query.sort),
                 )?)
             } else {
                 None
@@ -302,17 +314,27 @@ impl DocumentStore for FileDocuments {
             };
             let mut doc = first.doc;
             value::merge_patch(&mut doc, &patch);
+            // A claim patches the body only: the schema and expiry carry over.
+            let options = WriteOptions {
+                schema: first.meta.schema,
+                expires_ms: first.meta.expires_ms,
+                created_ms: None,
+            };
             let version = docs.put(
                 &collection,
                 &first.id,
                 doc.clone(),
                 Precondition::Version(first.version),
+                options,
             )?;
+            let meta = docs
+                .get(&collection, &first.id)?
+                .map_or(first.meta, |found| found.meta);
             Ok(Some(Versioned {
                 id: first.id,
                 version,
                 doc,
-                meta: tinystoragedrivers_core::Meta::unknown(),
+                meta,
             }))
         })
         .await

@@ -473,7 +473,9 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
-            .with(Capability::BlobTtl);
+            .with(Capability::BlobTtl)
+            .with(Capability::ScopeEnumeration)
+            .with(Capability::StreamSeal);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -489,6 +491,10 @@ impl StorageBackend for MongoStorage {
         } else {
             base
         }
+    }
+
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        crate::scopes::list(&self.shared, prefix).await
     }
 
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {

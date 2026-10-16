@@ -63,6 +63,7 @@ mod fence;
 mod naming;
 mod purge;
 mod scoped;
+mod scopes;
 mod streams;
 mod translate;
 

@@ -18,12 +18,14 @@ use mongodb::ClientSession;
 use mongodb::bson::{Document, doc};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Precondition, Result, StorageError, Version, validate_collection, validate_doc, validate_id,
+    Meta, Precondition, Result, StorageError, Version, WriteOptions, validate_collection,
+    validate_doc, validate_id,
 };
 
 use super::MongoDocuments;
 use super::stored::{
-    Stored, at_version, bury, check, encode, expired_filter, is_live, next_version, not_deleted,
+    Stored, at_version, bury, check, encode, expired_filter, is_live, next_meta, next_version,
+    not_deleted,
 };
 use crate::errors;
 use crate::scoped::ScopedCollection;
@@ -69,8 +71,9 @@ impl MongoDocuments {
         id: &str,
         doc: &Value,
         precondition: Precondition,
+        options: WriteOptions,
         mut session: Option<&mut ClientSession>,
-    ) -> Result<Version> {
+    ) -> Result<(Version, Meta)> {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(doc)?;
@@ -79,7 +82,7 @@ impl MongoDocuments {
         self.prepare(collection).await?;
         let now = self.shared.now();
         let handle = self.collection(collection);
-        if spec.ttl_field.is_some() && spec.indexes.iter().any(|index| index.unique) {
+        if spec.indexes.iter().any(|index| index.unique) {
             // An expired document still occupies the unique index; the memory
             // driver ignores it, so bury it first.
             self.sweep(collection, session.as_deref_mut()).await?;
@@ -88,13 +91,13 @@ impl MongoDocuments {
         let attempts = if in_transaction { 1 } else { WRITE_ATTEMPTS };
         for _ in 0..attempts {
             let current = self.read_raw(&handle, id, session.as_deref_mut()).await?;
-            let live = current
+            let live_record = current
                 .as_ref()
-                .filter(|stored| is_live(&spec, stored, now))
-                .map(|stored| stored.version);
-            check(precondition, live)?;
+                .filter(|stored| is_live(&spec, stored, now));
+            check(precondition, live_record.map(|stored| stored.version))?;
+            let meta = next_meta(live_record.map(|stored| &stored.meta), options, now);
             let next = next_version(current.as_ref().map(|stored| stored.version))?;
-            let encoded = encode(&self.scope, id, next, &body)?;
+            let encoded = encode(&self.scope, id, next, &body, &meta)?;
             let outcome = match &current {
                 None => handle
                     .insert_one(encoded, session.as_deref_mut())
@@ -111,7 +114,7 @@ impl MongoDocuments {
                 }
             };
             match outcome {
-                Ok(true) => return Ok(next),
+                Ok(true) => return Ok((next, meta)),
                 Ok(false) => {}
                 Err(error) => match errors::duplicate_index(&error) {
                     // Another writer created the document first.
@@ -194,9 +197,7 @@ impl MongoDocuments {
         session: Option<&mut ClientSession>,
     ) -> Result<u64> {
         let spec = self.shared.spec(collection).await?;
-        let Some(expired) = expired_filter(&spec, self.shared.now()) else {
-            return Ok(0);
-        };
+        let expired = expired_filter(&spec, self.shared.now());
         let pairs = self.matching_pairs(collection, &expired).await?;
         self.remove(collection, &pairs, session).await
     }
