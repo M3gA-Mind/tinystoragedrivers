@@ -375,6 +375,9 @@ fn capability_names_round_trip_without_host_only_entries() {
     let all = tinystoragedrivers_core::Capabilities::all();
     let names = capability_names(all);
     assert!(!names.contains(&"fencing".to_owned()));
+    // The bus contract carries neither call yet, so a client must not claim them.
+    assert!(!names.contains(&"maintenance".to_owned()));
+    assert!(!names.contains(&"scope_enumeration".to_owned()));
     let parsed = capabilities_of(&names);
     assert!(parsed.contains(Capability::FullText));
     assert!(!parsed.contains(Capability::Fencing));

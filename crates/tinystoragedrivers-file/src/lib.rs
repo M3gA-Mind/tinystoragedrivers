@@ -40,6 +40,10 @@
 //!   several files cannot be made crash-atomic with renames, so
 //!   [`atomic_batch`](tinystoragedrivers_core::DocumentStore::atomic_batch)
 //!   returns `Unsupported`.
+//! - [`scopes`](tinystoragedrivers_core::StorageBackend::scopes) walks the
+//!   `scopes/` tree and lists every scope that has a file. `maintain` and
+//!   `checkpoint` are `Unsupported`: plain files have nothing to reclaim or
+//!   flush, and a caller treats the refusal as nothing to do.
 //! - Queries read the whole collection; there are no on-disk indexes.
 //! - Operations are serialized per database within one process. Several
 //!   processes writing one directory are not coordinated.
@@ -55,6 +59,7 @@ mod blobs;
 mod documents;
 mod encode;
 mod fsio;
+mod scopes;
 mod storage;
 mod streams;
 

@@ -45,9 +45,11 @@ use crate::blobs::FileBlobs;
 use crate::documents::FileDocuments;
 use crate::encode::{dir_components, file_stem};
 use crate::fsio::io_error;
+use crate::scopes;
 use crate::streams::FileStreams;
 
-/// What this driver provides: expiry, full-text search and fencing. Not
+/// What this driver provides: expiry, full-text search, fencing and scope
+/// listing. Not maintenance (plain files have nothing to reclaim or flush) and not
 /// transactions, because a batch spanning several files cannot be made
 /// crash-atomic with renames alone. Fencing holds only among the handles of
 /// one process, like every other guarantee here: the fence is checked under
@@ -61,7 +63,8 @@ pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::CollectionEnumeration)
     .with(Capability::ExistingSchema)
     .with(Capability::CollectionValidation)
-    .with(Capability::BlobTtl);
+    .with(Capability::BlobTtl)
+    .with(Capability::ScopeEnumeration);
 
 fn system_clock() -> u64 {
     SystemTime::now()
@@ -303,6 +306,13 @@ impl StorageBackend for FileStorage {
 
     fn capabilities(&self) -> Capabilities {
         CAPABILITIES
+    }
+
+    /// Lists the scopes that have a stored file by walking `scopes/`. A walk
+    /// under the database lock, so it sees whole writes only.
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let prefix = prefix.to_owned();
+        self.db.run(move |db| scopes::list(db, &prefix)).await
     }
 
     async fn prepare_schema(&self) -> Result<()> {

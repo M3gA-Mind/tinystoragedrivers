@@ -77,6 +77,31 @@ pub(super) struct DbState {
 }
 
 impl DbState {
+    /// Scopes with any stored record (a document, a tombstone, a stream or a
+    /// blob) that start with `prefix`, in byte order.
+    pub(super) fn scopes(&self, prefix: &str) -> Vec<String> {
+        let documents = self
+            .docs
+            .iter()
+            .filter(|(_, docs)| !docs.is_empty())
+            .map(|(key, _)| key);
+        let tombstones = self
+            .tombstones
+            .iter()
+            .filter(|(_, versions)| !versions.is_empty())
+            .map(|(key, _)| key);
+        documents
+            .chain(tombstones)
+            .chain(self.streams.keys())
+            .chain(self.blobs.keys())
+            .map(|(scope, _)| scope)
+            .filter(|scope| scope.starts_with(prefix))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub(super) fn check_generation(
         &self,
         scope: &str,

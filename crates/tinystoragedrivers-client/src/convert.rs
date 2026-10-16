@@ -8,15 +8,19 @@ use tinystoragedrivers_core::{
     WriteOp as NativeWriteOp,
 };
 
-/// Capabilities bus callers never see: a host keeps them to itself, or (for
-/// `RecordMetadata`) the storage-bus wire cannot carry what they promise yet.
-pub(crate) const HOST_ONLY: [Capability; 6] = [
+/// Capabilities bus callers never see: a host keeps them to itself, or the
+/// storage-bus wire cannot carry what they promise yet (`RecordMetadata`
+/// until the contract carries `Meta`; `Maintenance` and `ScopeEnumeration`
+/// until it carries `maintain`, `checkpoint` and `scopes`).
+pub(crate) const HOST_ONLY: [Capability; 8] = [
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
     Capability::RecordMetadata,
+    Capability::Maintenance,
+    Capability::ScopeEnumeration,
 ];
 
 /// Convert between types that share one serde shape (filters, sorts, specs,

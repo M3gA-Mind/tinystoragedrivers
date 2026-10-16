@@ -45,6 +45,36 @@ prefix. In directory mode the guard file is attached before `BEGIN IMMEDIATE`,
 which locks both target and guard files before validation. The fence therefore
 holds across reopened handles and independent connections.
 
+## Maintenance
+
+The driver reports `Capability::Maintenance` and `Capability::ScopeEnumeration`.
+
+- **`auto_vacuum`.** A database file created by this driver sets
+  `auto_vacuum=INCREMENTAL` before it writes anything, because SQLite fixes the
+  setting at the first table. `maintain(budget)` then runs
+  `PRAGMA incremental_vacuum(N)`, where `N` is the budget in pages (the whole
+  free list when unbounded), finishes with a passive checkpoint so the file
+  actually shrinks, and reports the pages that left the file times the page
+  size. A budget under one page, or `Some(0)`, reclaims nothing.
+- **Older files.** A file made by an earlier release has `auto_vacuum=NONE`.
+  Opening it changes nothing. The first `maintain` call sets the pragma and
+  runs a one-time `VACUUM`, which is the only way SQLite applies the change.
+  That rewrites the whole file: it needs free disk space about the size of the
+  database, holds the write lock while it runs, and ignores the budget (a zero
+  budget still does nothing). Run the first call when the host is idle.
+- **`checkpoint(mode)`.** `Passive` copies what it can without waiting.
+  `Truncate` runs `PRAGMA wal_checkpoint(TRUNCATE)` and leaves the `-wal` file
+  empty, so the database file alone holds the data; call it before moving or
+  copying the file. If a reader or writer keeps it from finishing it fails with
+  `ErrorKind::Unavailable`, which is safe to retry.
+- **`scopes(prefix)`.** One `SELECT` over the scope column of the document,
+  tombstone, stream and blob tables, de-duplicated and ordered by byte. The
+  prefix is literal (`%` and `_` have no special meaning). The purge ledger
+  does not count: an erased scope drops out of the listing.
+- In single-file layout the file is shared, so `maintain` and `checkpoint`
+  act on every named database in it, while `scopes` lists only the addressed
+  database.
+
 ## Native access
 
 `SqliteNative` gives raw access to the same file. It exposes

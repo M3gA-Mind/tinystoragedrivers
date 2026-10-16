@@ -1,6 +1,8 @@
 //! The in-memory driver: the reference implementation of every port.
 //!
 //! It provides every [`Capability`](crate::Capability), including
+//! [`Maintenance`](crate::Capability::Maintenance) (it has nothing to reclaim,
+//! so `maintain` and `checkpoint` succeed and report zero),
 //! [`Fencing`](crate::Capability::Fencing) on every write (the fence is
 //! checked under the same lock as the write), keeps nothing across process
 //! restarts, and is what tests and stateless embedders run on. Because
@@ -19,7 +21,10 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::backend::{ScopedStorage, StorageBackend, validate_database};
+use crate::backend::{
+    Checkpoint, MaintenanceBudget, MaintenanceReport, ScopedStorage, StorageBackend,
+    validate_database,
+};
 use crate::capabilities::Capabilities;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
@@ -224,6 +229,25 @@ impl StorageBackend for MemoryStorage {
             ));
         }
         Ok(())
+    }
+
+    /// Nothing to reclaim: memory is freed as records go.
+    async fn maintain(&self, _: MaintenanceBudget) -> Result<MaintenanceReport> {
+        Ok(MaintenanceReport::default())
+    }
+
+    /// Nothing to flush: there is no log.
+    async fn checkpoint(&self, _: Checkpoint) -> Result<()> {
+        Ok(())
+    }
+
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        self.db
+            .lock()?
+            .scopes(prefix)
+            .into_iter()
+            .map(Scope::new)
+            .collect()
     }
 
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {

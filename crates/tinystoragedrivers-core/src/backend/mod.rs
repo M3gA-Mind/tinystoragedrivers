@@ -8,8 +8,10 @@
 //! (`approvals`, `sessions`, `flows`) without inventing collection prefixes.
 
 mod composite;
+mod maintenance;
 mod purge;
 pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
+pub use maintenance::{Checkpoint, MaintenanceBudget, MaintenanceReport};
 pub use purge::{
     DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
     ScopeGeneration, ScopePurge,
@@ -196,6 +198,63 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// The scope's [`for_scope`](Self::for_scope) error, or a backend error.
     async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
         self.for_scope(scope)?.blobs().sweep_expired().await
+    }
+
+    /// Give back the space the backend no longer needs, within `budget`.
+    ///
+    /// This is the hook a host schedules when it holds only an
+    /// `Arc<dyn StorageBackend>`. It acts on the whole backend, not on one
+    /// scope. Today it only reclaims space; seal and retention policies run
+    /// from the same call in a later release, so read the
+    /// [`MaintenanceReport`] by field rather than assuming it stays one number.
+    ///
+    /// Requires [`Capability::Maintenance`]. A host that only wants the space
+    /// back may treat the refusal as "nothing to do".
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::Maintenance`] (the default), or a backend error.
+    async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
+        let _ = budget;
+        Err(maintenance::unsupported_maintenance())
+    }
+
+    /// Flush the backend's write-ahead log into its main storage.
+    ///
+    /// Requires [`Capability::Maintenance`]. See [`Checkpoint`] for the modes.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::Maintenance`] (the default),
+    /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) when a
+    /// [`Checkpoint::Truncate`] could not finish because a reader or writer
+    /// held the log (retry), or a backend error.
+    async fn checkpoint(&self, mode: Checkpoint) -> Result<()> {
+        let _ = mode;
+        Err(maintenance::unsupported_maintenance())
+    }
+
+    /// The scopes holding any stored record, whose text starts with `prefix`,
+    /// sorted by byte order.
+    ///
+    /// A scope counts when it has a document (a tombstone left by a delete
+    /// included), a stream or a blob. `prefix` is literal text, not a pattern:
+    /// an empty prefix lists every scope, and `"u:ann"` matches `"u:ann"` and
+    /// `"u:ann/agent:x"` but not `"u:bob"`. A host drives a tenant purge by
+    /// listing the tenant's scope and everything under it.
+    ///
+    /// Requires [`Capability::ScopeEnumeration`]. On a database-splitting
+    /// backend it lists the scopes of the database this handle addresses.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::ScopeEnumeration`] (the default), or a backend error.
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let _ = prefix;
+        Err(maintenance::unsupported_scopes())
     }
 }
 

@@ -1,8 +1,9 @@
 //! Compose document/stream storage with an independently scoped blob driver.
 
 use crate::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Fence, Result,
-    Scope, ScopedStorage, StorageBackend, StorageError, async_trait,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Checkpoint, Fence,
+    MaintenanceBudget, MaintenanceReport, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError, async_trait,
 };
 use std::{ops::Range, sync::Arc, time::Duration};
 
@@ -95,6 +96,7 @@ impl CompositeStorage {
     }
 }
 
+#[async_trait]
 impl StorageBackend for CompositeStorage {
     fn driver(&self) -> &'static str {
         "composite"
@@ -109,6 +111,9 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::ExistingSchema)
             .without(Capability::ScopePurge)
             .without(Capability::AtomicScopePurge)
+            // Blobs live in an independent store, so the records backend
+            // cannot tell which scopes hold only blobs.
+            .without(Capability::ScopeEnumeration)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs)
             .without(Capability::BlobTtl);
@@ -147,6 +152,14 @@ impl StorageBackend for CompositeStorage {
             self.records.database(name)?,
             self.blobs.database(name)?,
         )))
+    }
+    /// Maintains the records backend; the blob backend is a separate store a
+    /// host maintains on its own.
+    async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
+        self.records.maintain(budget).await
+    }
+    async fn checkpoint(&self, mode: Checkpoint) -> Result<()> {
+        self.records.checkpoint(mode).await
     }
 }
 

@@ -60,10 +60,18 @@ pub enum Capability {
     /// answers the reserved `_schema`, `_created_ms`, `_updated_ms` and
     /// `_expires_ms` filter and sort paths.
     RecordMetadata,
+    /// [`StorageBackend::maintain`](crate::StorageBackend::maintain) and
+    /// [`StorageBackend::checkpoint`](crate::StorageBackend::checkpoint) run
+    /// rather than refuse. A driver with nothing to reclaim may still report
+    /// it: the calls succeed and report zero.
+    Maintenance,
+    /// [`StorageBackend::scopes`](crate::StorageBackend::scopes) lists the
+    /// scopes that hold records.
+    ScopeEnumeration,
 }
 
 impl Capability {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 19] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -81,6 +89,8 @@ impl Capability {
         Self::Watch,
         Self::BlobTtl,
         Self::RecordMetadata,
+        Self::Maintenance,
+        Self::ScopeEnumeration,
     ];
 
     const fn bit(self) -> u32 {
@@ -102,6 +112,8 @@ impl Capability {
             Self::Watch => 1 << 12,
             Self::BlobTtl => 1 << 15,
             Self::RecordMetadata => 1 << 16,
+            Self::Maintenance => 1 << 17,
+            Self::ScopeEnumeration => 1 << 18,
         }
     }
 }
@@ -126,6 +138,8 @@ impl fmt::Display for Capability {
             Self::Watch => "watch",
             Self::BlobTtl => "blob_ttl",
             Self::RecordMetadata => "record_metadata",
+            Self::Maintenance => "maintenance",
+            Self::ScopeEnumeration => "scope_enumeration",
         })
     }
 }
@@ -176,7 +190,9 @@ impl Capabilities {
                 | Capability::AtomicScopePurge.bit()
                 | Capability::Watch.bit()
                 | Capability::BlobTtl.bit()
-                | Capability::RecordMetadata.bit(),
+                | Capability::RecordMetadata.bit()
+                | Capability::Maintenance.bit()
+                | Capability::ScopeEnumeration.bit(),
         )
     }
 

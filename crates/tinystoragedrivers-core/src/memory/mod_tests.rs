@@ -800,3 +800,51 @@ async fn retrying_a_completed_reset_after_another_reset_preserves_replacement_da
         vec![7]
     );
 }
+
+#[tokio::test]
+async fn scopes_drop_out_once_purged_and_keep_tombstone_only_scopes() {
+    let storage = MemoryStorage::new();
+    let kept = Scope::new("u:kept").unwrap();
+    let erased = Scope::new("u:erased").unwrap();
+    let deleted = Scope::new("u:deleted").unwrap();
+    for scope in [&kept, &erased] {
+        let handles = storage.for_scope(scope).unwrap();
+        handles
+            .documents()
+            .put("c", "d", json!({"n": 1}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let docs = storage.for_scope(&deleted).unwrap();
+    let docs = docs.documents();
+    docs.put("c", "d", json!({"n": 1}), Precondition::None)
+        .await
+        .unwrap();
+    docs.delete("c", "d", Precondition::None).await.unwrap();
+    storage
+        .for_scope(&erased)
+        .unwrap()
+        .purge(&crate::PurgeRequest {
+            operation_id: "erase-1".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+
+    let listed = storage.scopes("u:").await.unwrap();
+    assert_eq!(listed, [deleted, kept]);
+}
+
+#[tokio::test]
+async fn maintenance_on_memory_reclaims_nothing() {
+    let storage = MemoryStorage::new();
+    let report = storage
+        .maintain(crate::MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert_eq!(report.reclaimed_bytes, 0);
+    storage
+        .checkpoint(crate::Checkpoint::Truncate)
+        .await
+        .unwrap();
+}

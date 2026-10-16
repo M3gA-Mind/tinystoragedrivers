@@ -14,15 +14,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tinystoragedrivers_core::{
-    Capabilities, Fence, GuardDatabase, Result, Scope, ScopedStorage, StorageBackend,
-    validate_database,
+    Capabilities, Checkpoint, Fence, GuardDatabase, MaintenanceBudget, MaintenanceReport, Result,
+    Scope, ScopedStorage, StorageBackend, validate_database,
 };
 
 use crate::blobs::SqliteBlobs;
 use crate::connection::Db;
 use crate::documents::{SqliteDocuments, capabilities};
 use crate::fence::Fencing;
+use crate::maintenance;
 use crate::native::SqliteNative;
+use crate::scopes;
 use crate::sql::Tables;
 use crate::streams::SqliteStreams;
 
@@ -333,6 +335,30 @@ impl StorageBackend for SqliteStorage {
             guard.tables,
         ));
         Ok(self.handles_generation(scope, Some(&fencing), generation))
+    }
+
+    /// Returns freed pages to the filesystem. It acts on the whole database
+    /// file, so in single-file layout it covers every named database in it.
+    /// The first call on a file made without `auto_vacuum` runs a one-time
+    /// `VACUUM`, which rewrites the whole file (see the crate README).
+    async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
+        self.db
+            .run(move |conn| maintenance::maintain(conn, budget))
+            .await
+    }
+
+    async fn checkpoint(&self, mode: Checkpoint) -> Result<()> {
+        self.db
+            .run(move |conn| maintenance::checkpoint(conn, mode))
+            .await
+    }
+
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let tables = Arc::clone(&self.tables);
+        let prefix = prefix.to_owned();
+        self.db
+            .run(move |conn| scopes::list(conn, &tables, &prefix))
+            .await
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {

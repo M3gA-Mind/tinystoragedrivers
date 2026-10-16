@@ -124,6 +124,15 @@ documents chosen to trip MongoDB's semantics, and focused behavior tests.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
 
+## Maintenance and scope listing
+
+`Capability::Maintenance` and `Capability::ScopeEnumeration` are not provided:
+`maintain`, `checkpoint` and `scopes` return `Unsupported`. MongoDB reclaims
+space itself, so a caller treats `maintain` as nothing to do. Listing scopes is
+not a single query here: documents live in one collection per name, so it would
+take a distinct `_scope` over every document collection plus the stream and
+blob collections, which is left for the tenant-purge task that needs it.
+
 ## Document invalidation
 
 Replica sets and sharded deployments provide native `Capability::Watch`.
