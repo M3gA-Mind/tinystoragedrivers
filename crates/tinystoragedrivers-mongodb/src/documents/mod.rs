@@ -246,7 +246,9 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
-            .with(Capability::RecordMetadata);
+            .with(Capability::RecordMetadata)
+            .with(Capability::StreamSeal)
+            .with(Capability::ScopeEnumeration);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
