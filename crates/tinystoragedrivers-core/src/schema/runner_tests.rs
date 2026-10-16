@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::schema::{Schema, ScopeClass, TargetRecord};
 use crate::{
-    DocumentStoreExt, ErrorKind, Filter, MemoryStorage, Precondition, Query, Scope, ScopedStorage,
-    StorageBackend, WriteOptions,
+    CollectionSpec, DocumentStoreExt, ErrorKind, Filter, IndexSpec, MemoryStorage, Precondition,
+    Query, Scope, ScopedStorage, StorageBackend, WriteOptions,
 };
 
 const TOTAL: usize = 250;
@@ -256,7 +256,31 @@ fn fresh(first: &Arc<AtomicUsize>, second: &Arc<AtomicUsize>) -> Registry {
 }
 
 #[tokio::test]
-async fn an_output_that_already_exists_counts_as_written_and_is_kept() {
+async fn resumes_when_a_crash_left_a_batch_written_but_not_recorded() {
+    // The window between a batch's writes and its progress save: the outputs
+    // exist, the cursor does not know.
+    let storage = scoped();
+    seed_legacy(&storage).await;
+    storage
+        .documents()
+        .put(
+            "shop.orders",
+            "n-o000",
+            json!({"n": 0, "step": 2}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let registry = registry(legacy_step(Arc::new(AtomicUsize::new(0)), None), None);
+    let report = registry.migrate(&storage, &opts()).await.unwrap();
+    assert_eq!(report.ran[0].written, 250);
+    assert_eq!(snapshot(&storage, "shop.orders").await.len(), TOTAL);
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), 0);
+    registry.check_ready("shop.orders").unwrap();
+}
+
+#[tokio::test]
+async fn an_existing_output_with_a_different_body_stops_the_migration() {
     let storage = scoped();
     seed_legacy(&storage).await;
     storage
@@ -270,16 +294,182 @@ async fn an_output_that_already_exists_counts_as_written_and_is_kept() {
         .await
         .unwrap();
     let registry = registry(legacy_step(Arc::new(AtomicUsize::new(0)), None), None);
-    let report = registry.migrate(&storage, &opts()).await.unwrap();
-    assert_eq!(report.ran[0].written, 250);
+    let error = registry.migrate(&storage, &opts()).await.unwrap_err();
+    assert!(
+        matches!(error.kind(), ErrorKind::Conflict | ErrorKind::AlreadyExists),
+        "{error}"
+    );
     let kept = storage
         .documents()
         .get("shop.orders", "n-o000")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(kept.doc, json!({"pre": true}));
-    assert_eq!(snapshot(&storage, "shop.orders").await.len(), TOTAL);
+    assert_eq!(
+        kept.doc,
+        json!({"pre": true}),
+        "the stranger is not touched"
+    );
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), TOTAL);
+    assert!(registry.check_ready("shop.orders").is_err());
+}
+
+#[tokio::test]
+async fn a_unique_index_collision_with_another_document_stops_the_migration() {
+    let storage = scoped();
+    storage
+        .documents()
+        .ensure_collection(
+            &CollectionSpec::new("shop.orders").index(IndexSpec::new("by_sku", ["sku"]).unique()),
+        )
+        .await
+        .unwrap();
+    storage
+        .documents()
+        .put(
+            "shop.orders",
+            "existing",
+            json!({"sku": "x"}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    storage
+        .documents()
+        .put_with(
+            "orders_v1",
+            "o1",
+            json!({"sku": "x"}),
+            Precondition::Absent,
+            WriteOptions::new().schema(1),
+        )
+        .await
+        .unwrap();
+    let registry = registry(legacy_step(Arc::new(AtomicUsize::new(0)), None), None);
+    let error = registry.migrate(&storage, &opts()).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(
+        snapshot(&storage, "orders_v1").await.len(),
+        1,
+        "the source survives"
+    );
+    assert!(registry.check_ready("shop.orders").is_err());
+    let marker = storage
+        .documents()
+        .get("tsd.migrations", "shop/shop.orders/import")
+        .await
+        .unwrap();
+    assert!(marker.is_none_or(|found| found.doc["done"] == json!(false)));
+}
+
+fn rename_step() -> Step {
+    Step::new("rename", "shop.orders", 1, 2, |batch| {
+        Ok(batch
+            .into_iter()
+            .map(|record| {
+                TargetRecord::new("shop.orders", format!("new-{}", record.id), record.body)
+            })
+            .collect())
+    })
+}
+
+async fn seed_in_place(storage: &ScopedStorage) {
+    for id in ["a", "b"] {
+        storage
+            .documents()
+            .put_with(
+                "shop.orders",
+                id,
+                json!({"id": id}),
+                Precondition::Absent,
+                WriteOptions::new().schema(1),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_in_place_step_that_changes_an_id_removes_the_replaced_record() {
+    let storage = scoped();
+    seed_in_place(&storage).await;
+    registry(rename_step(), None)
+        .migrate(&storage, &opts())
+        .await
+        .unwrap();
+    let ids: Vec<String> = snapshot(&storage, "shop.orders")
+        .await
+        .into_iter()
+        .map(|record| record.0)
+        .collect();
+    assert_eq!(ids, ["new-a", "new-b"]);
+}
+
+#[tokio::test]
+async fn an_in_place_rename_resumes_after_its_output_was_written_but_the_source_stayed() {
+    let storage = scoped();
+    seed_in_place(&storage).await;
+    storage
+        .documents()
+        .put_with(
+            "shop.orders",
+            "new-a",
+            json!({"id": "a"}),
+            Precondition::Absent,
+            WriteOptions::new().schema(2),
+        )
+        .await
+        .unwrap();
+    registry(rename_step(), None)
+        .migrate(&storage, &opts())
+        .await
+        .unwrap();
+    let ids: Vec<String> = snapshot(&storage, "shop.orders")
+        .await
+        .into_iter()
+        .map(|record| record.0)
+        .collect();
+    assert_eq!(ids, ["new-a", "new-b"]);
+}
+
+#[tokio::test]
+async fn readiness_is_tracked_per_scope() {
+    let backend = MemoryStorage::with_clock(Arc::new(|| 5_000));
+    let (a, b) = (Scope::tenant("a").unwrap(), Scope::tenant("b").unwrap());
+    let (in_a, in_b) = (
+        backend.for_scope(&a).unwrap(),
+        backend.for_scope(&b).unwrap(),
+    );
+    seed_legacy(&in_a).await;
+    seed_legacy(&in_b).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let registry = registry(legacy_step(Arc::clone(&calls), Some(8)), None);
+
+    // Scope `a` finishes (5 batches); scope `b` fails on its third.
+    registry.migrate(&in_a, &opts()).await.unwrap();
+    registry.migrate(&in_b, &opts()).await.unwrap_err();
+    assert!(
+        registry.check_ready_in(&b, "shop.orders").is_err(),
+        "b is still migrating"
+    );
+    registry.check_ready_in(&a, "shop.orders").unwrap();
+    assert!(
+        registry.check_ready("shop.orders").is_err(),
+        "one scope still migrating keeps the unscoped gate shut"
+    );
+    assert!(
+        registry
+            .check_ready_in(&Scope::tenant("c").unwrap(), "shop.orders")
+            .is_err(),
+        "a scope this registry has not migrated is not ready"
+    );
+
+    // Re-running `a` does not undo `b`'s state, and `b` finishing opens it.
+    registry.migrate(&in_a, &opts()).await.unwrap();
+    assert!(registry.check_ready_in(&b, "shop.orders").is_err());
+    registry.migrate(&in_b, &opts()).await.unwrap();
+    registry.check_ready_in(&b, "shop.orders").unwrap();
+    registry.check_ready("shop.orders").unwrap();
 }
 
 #[tokio::test]
