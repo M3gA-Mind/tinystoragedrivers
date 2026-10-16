@@ -39,8 +39,28 @@ backend and passes the shared conformance suite in both layouts.
   - Unique constraints are checked in the write transaction with the same
     equality the memory driver uses.
   - Declared search fields are mirrored into an FTS5 table.
-- **Filters** push their exact string and boolean equalities down to SQL.
-  Everything else is re-checked in Rust.
+- **Filters, sorts and paging** are pushed down where SQL gives the port's
+  answer, and every row is still re-checked in Rust (`Filter::matches_with`),
+  so SQL only ever narrows.
+  - *Filters.* Equality and membership on strings and booleans, and ranges
+    (`gt`, `gte`, `lt`, `lte`) on numbers, strings and booleans, over a
+    projected field, the id or a metadata column. A projected range tests
+    `kind` and `value`, so a bound of another JSON type matches nothing, and
+    numbers compare numerically. Strings compare bytewise, which is the
+    port's order and SQLite's default collation. Number equality is left to
+    Rust, as are `null`, array and object bounds, `Ne`, `Or`, `Not`, `Exists`
+    and any path that is not projected.
+  - *Sorts.* A limited query whose sort keys are all projected fields, the id
+    or metadata columns is ordered by SQL (`ORDER BY kind, value` per key,
+    through one `LEFT JOIN` on `doc_fields` per field; a missing field is
+    null, ties are by id) with `LIMIT`, and the keyset cursor seek is part of
+    the `WHERE`, so only the page is read and decoded. A page the Rust check
+    leaves short continues from its last row. A query stays in Rust when a key
+    is not projected, when a sort field holds a `u64` above `i64::MAX` (stored
+    as a rounded float, so SQL could tie values the port orders), or when the
+    page contains an array or object sort value (their order is structural
+    and the side table keeps no value for them). Unlimited queries, counts
+    and deletes sort in Rust.
 - **Streams** use dense offsets that are allocated in the inserting
   transaction.
 - **Blobs** are stored as rows, and range reads use `substr`.

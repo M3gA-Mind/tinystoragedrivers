@@ -396,3 +396,171 @@ async fn a_layout_two_file_without_the_side_table_is_upgraded_in_place() {
         .unwrap();
     assert_eq!(stale, 0, "the body-expression index is dropped");
 }
+
+fn mixed_spec() -> CollectionSpec {
+    CollectionSpec::new("mixed")
+        .index(IndexSpec::new("by_a", ["a"]))
+        .index(IndexSpec::new("by_b", ["b"]))
+        .index(IndexSpec::new("by_c", ["c"]))
+}
+
+/// A field `a` of every JSON scalar type, in awkward values, plus a missing
+/// one; `b` a small number with ties; `c` sometimes an array or an object.
+fn mixed(n: usize) -> Value {
+    let a = [
+        json!(0),
+        json!(1),
+        json!(1.5),
+        json!(2.0),
+        json!(-3),
+        json!(9_007_199_254_740_993_i64),
+        json!("a"),
+        json!("B"),
+        json!("é"),
+        json!(""),
+        Value::Null,
+        json!(true),
+        json!(false),
+        json!(-0.0),
+        json!(1e300),
+        Value::Null,
+    ];
+    let mut doc =
+        json!({"b": n % 4, "c": if n.is_multiple_of(3) { json!(n % 5) } else { json!("s") }});
+    // Every sixteenth document lacks `a`.
+    if !n.is_multiple_of(17) {
+        doc["a"] = a[n % a.len()].clone();
+    }
+    if n.is_multiple_of(13) {
+        doc["c"] = json!([n, "x"]);
+    }
+    if n.is_multiple_of(19) {
+        doc["c"] = json!({"k": n});
+    }
+    if n.is_multiple_of(2) {
+        doc["pad"] = json!(big_text(n));
+    }
+    doc
+}
+
+async fn mixed_pair() -> Pair {
+    let pair = pair().await;
+    for store in [&pair.memory, &pair.sqlite] {
+        store.ensure_collection(&mixed_spec()).await.unwrap();
+        for n in 0..120 {
+            store
+                .put("mixed", &format!("m{n:03}"), mixed(n), Precondition::None)
+                .await
+                .unwrap();
+        }
+    }
+    pair
+}
+
+async fn mixed_pages(store: &dyn DocumentStore, query: Query) -> Vec<(String, u64, Value)> {
+    let mut out = Vec::new();
+    let mut query = query;
+    loop {
+        let page = store.query("mixed", &query).await.unwrap();
+        out.extend(
+            page.items
+                .into_iter()
+                .map(|item| (item.id, item.version.0, item.doc)),
+        );
+        match page.next {
+            Some(cursor) => query = query.after(cursor),
+            None => return out,
+        }
+    }
+}
+
+#[tokio::test]
+async fn range_filters_and_sorts_over_mixed_types_match_the_memory_driver() {
+    let pair = mixed_pair().await;
+    let filters = vec![
+        Filter::All,
+        Filter::gt("a", 0),
+        Filter::gte("a", 1.5),
+        Filter::lt("a", 2),
+        Filter::gte("a", -3).and(Filter::lte("a", 1)),
+        Filter::gt("a", 9_007_199_254_740_992_i64),
+        Filter::lt("a", 1e301),
+        Filter::gte("a", "B"),
+        Filter::lt("a", "a"),
+        Filter::gt("a", "").and(Filter::lte("a", "é")),
+        Filter::gte("a", true),
+        Filter::lt("a", true),
+        // Bounds of two types never match.
+        Filter::gt("a", 0).and(Filter::lt("a", "z")),
+        Filter::gt("b", 1),
+        Filter::lte("b", 2).and(Filter::eq("c", "s")),
+        Filter::gt("c", 1),
+        Filter::gt("c", "r"),
+        Filter::gt("id", "m050"),
+        Filter::gte("id", "m010").and(Filter::lt("id", "m020")),
+        Filter::gt("nope", 1),
+        Filter::gt("a", Value::Null),
+    ];
+    let sorts: [Vec<Sort>; 8] = [
+        vec![],
+        vec![Sort::asc("a")],
+        vec![Sort::desc("a")],
+        vec![Sort::desc("a"), Sort::asc("b")],
+        vec![Sort::asc("b"), Sort::desc("a")],
+        vec![Sort::desc("b"), Sort::desc("id")],
+        // Arrays and objects as sort values: left to the Rust ordering.
+        vec![Sort::asc("c")],
+        vec![Sort::desc("c"), Sort::asc("a")],
+    ];
+    let mut nonempty = 0;
+    for filter in filters {
+        for sort in &sorts {
+            for limit in [None, Some(1), Some(7)] {
+                let mut query = Query::filter(filter.clone());
+                for order in sort {
+                    query = query.sort(order.clone());
+                }
+                if let Some(limit) = limit {
+                    query = query.limit(limit);
+                }
+                let memory = mixed_pages(pair.memory.as_ref(), query.clone()).await;
+                let sqlite = mixed_pages(pair.sqlite.as_ref(), query.clone()).await;
+                assert_eq!(sqlite, memory, "{query:?}");
+                nonempty += usize::from(!sqlite.is_empty());
+            }
+        }
+    }
+    assert!(nonempty > 200, "{nonempty}");
+}
+
+#[tokio::test]
+async fn very_large_unsigned_numbers_sort_like_the_memory_driver() {
+    let pair = mixed_pair().await;
+    for store in [&pair.memory, &pair.sqlite] {
+        for (id, value) in [
+            ("u1", u64::MAX),
+            ("u2", u64::MAX - 1),
+            ("u3", u64::MAX - 2),
+            ("u4", 1 << 63),
+        ] {
+            store
+                .put("mixed", id, json!({"a": value, "b": 1}), Precondition::None)
+                .await
+                .unwrap();
+        }
+    }
+    for sort in [Sort::asc("a"), Sort::desc("a")] {
+        for limit in [3, 50] {
+            let query = Query::all().sort(sort.clone()).limit(limit);
+            assert_eq!(
+                mixed_pages(pair.sqlite.as_ref(), query.clone()).await,
+                mixed_pages(pair.memory.as_ref(), query).await
+            );
+        }
+    }
+    let query = Query::filter(Filter::gt("a", u64::MAX - 2));
+    assert_eq!(
+        mixed_pages(pair.sqlite.as_ref(), query.clone()).await,
+        mixed_pages(pair.memory.as_ref(), query).await
+    );
+}

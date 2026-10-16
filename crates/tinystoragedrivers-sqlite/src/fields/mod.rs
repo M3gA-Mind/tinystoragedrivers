@@ -28,9 +28,9 @@
 //! row, which sorts like null. The projected paths of a collection are the
 //! fields of its indexes and of its search declaration.
 //!
-//! Equality and membership filters, and keyset cursors, on a projected path
-//! are answered from this table through
-//! `(scope, coll, path, value, id)`; a filter or sort on any other path is
+//! Equality, membership and range filters, sorts and keyset cursors on a
+//! projected path are answered from this table through
+//! `(scope, coll, path, value, id)` (see `documents::order`); a filter or sort on any other path is
 //! evaluated in Rust over the decoded rows. The SQL is a superset condition,
 //! so [`Filter::matches_with`](tinystoragedrivers_core::Filter::matches_with)
 //! still decides every row. Unique indexes are checked through the same
