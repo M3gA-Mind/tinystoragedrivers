@@ -2,8 +2,9 @@
 //! `expires_ms`, and the reserved filter and sort paths that address them.
 //!
 //! The checks never assert exact timestamps, because a driver reads its own
-//! clock. They assert order instead: a pause of a few milliseconds separates
-//! the writes whose order is compared.
+//! clock. They assert order instead, and make it certain by waiting until the
+//! driver's own clock has moved past the earlier write ([`clock_past`]), so no
+//! clock resolution or pause length is assumed.
 
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use crate::document::{CollectionSpec, DocumentStoreExt, Meta, Precondition, Quer
 use crate::error::ErrorKind;
 use crate::filter::{CREATED_FIELD, EXPIRES_FIELD, Filter, SCHEMA_FIELD, Sort, UPDATED_FIELD};
 
-/// Long enough that two writes never share a millisecond on any driver clock.
-const PAUSE: Duration = Duration::from_millis(20);
+/// How long [`clock_past`] polls before it declares the driver clock stuck.
+const CLOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// An expiry that has long passed: epoch millisecond `1`.
 const LONG_AGO_MS: i64 = 1;
@@ -52,6 +53,31 @@ async fn meta_of(storage: &ScopedStorage, coll: &str, id: &str) -> Meta {
     ok(storage.documents().get(coll, id).await, "get")
         .unwrap_or_else(|| panic!("`{coll}/{id}` should exist"))
         .meta
+}
+
+/// Wait until the driver's own clock reads later than `stamp_ms`, so the next
+/// write is stamped strictly after it. The clock is observed through probe
+/// writes to a scratch collection, which keeps the wait exact for any clock
+/// resolution and independent of the host clock.
+async fn clock_past(storage: &ScopedStorage, stamp_ms: i64) {
+    let docs = storage.documents();
+    let coll = unique("meta_tick");
+    let deadline = tokio::time::Instant::now() + CLOCK_WAIT;
+    loop {
+        ok(
+            docs.put(&coll, "tick", json!({"n": 1}), Precondition::None)
+                .await,
+            "clock probe",
+        );
+        if meta_of(storage, &coll, "tick").await.updated_ms > stamp_ms {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the driver clock never passed {stamp_ms}: it must advance"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
 async fn ids(storage: &ScopedStorage, coll: &str, query: &Query) -> Vec<String> {
@@ -136,7 +162,7 @@ async fn created_survives_updates(storage: &ScopedStorage) {
         first.updated_ms >= first.created_ms,
         "updated_ms is not before created_ms"
     );
-    tokio::time::sleep(PAUSE).await;
+    clock_past(storage, first.updated_ms).await;
     ok(
         docs.put(&coll, "a", json!({"n": 2}), Precondition::None)
             .await,
@@ -207,7 +233,7 @@ async fn recreation_starts_a_new_creation_time(storage: &ScopedStorage) {
     let coll = unique("meta_recreate");
     let first = put_with(storage, &coll, "a", WriteOptions::new()).await;
     ok(docs.delete(&coll, "a", Precondition::None).await, "delete");
-    tokio::time::sleep(PAUSE).await;
+    clock_past(storage, first.updated_ms).await;
     let second = put_with(storage, &coll, "a", WriteOptions::new()).await;
     assert!(
         second.created_ms > first.created_ms,
@@ -223,12 +249,9 @@ async fn metadata_filters_and_sorts(storage: &ScopedStorage) {
     let coll = unique("meta_paths");
     let mut created = Vec::new();
     for id in ["a", "b", "c"] {
-        created.push(
-            put_with(storage, &coll, id, WriteOptions::new())
-                .await
-                .created_ms,
-        );
-        tokio::time::sleep(PAUSE).await;
+        let meta = put_with(storage, &coll, id, WriteOptions::new()).await;
+        created.push(meta.created_ms);
+        clock_past(storage, meta.updated_ms).await;
     }
     assert!(
         created.windows(2).all(|pair| pair[0] < pair[1]),

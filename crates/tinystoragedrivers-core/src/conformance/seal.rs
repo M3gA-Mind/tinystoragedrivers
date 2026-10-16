@@ -246,6 +246,26 @@ async fn delete_removes_the_blob(storage: &ScopedStorage) {
     assert_eq!(ok(streams.read_window(&name, 0, 10).await, "read").len(), 1);
 }
 
+/// Wait until the driver's own clock reads later than `stamp_ms`, observed
+/// through the `last_append_ms` of probe appends to a scratch stream, so the
+/// next timestamp is strictly later on a clock of any resolution.
+async fn clock_past(streams: &dyn StreamStore, stamp_ms: i64) {
+    let probe = unique("seal_tick");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        ok(streams.append(&probe, json!("tick")).await, "clock probe");
+        let seen = ok(streams.info(&probe).await, "info").and_then(|info| info.last_append_ms);
+        if seen.is_some_and(|ms| ms > stamp_ms) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the driver clock never passed {stamp_ms}: it must advance"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 /// `info` reports extent, the time of the last append and the time of the seal.
 async fn info_records_times(storage: &ScopedStorage) {
     let streams = storage.streams();
@@ -257,7 +277,7 @@ async fn info_records_times(storage: &ScopedStorage) {
     let first_append = first.last_append_ms.expect("an append is timestamped");
     assert!(first_append > 1_500_000_000_000, "epoch milliseconds");
 
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    clock_past(&**streams, first_append).await;
     ok(streams.append(&name, json!("later")).await, "append");
     let second = ok(streams.info(&name).await, "info").expect("info");
     assert_eq!(second.len, 4, "length advances");
@@ -274,7 +294,7 @@ async fn info_records_times(storage: &ScopedStorage) {
     assert_eq!((truncated.base, truncated.len), (2, 4), "truncated extent");
     assert_eq!(truncated.last_append_ms, second.last_append_ms);
 
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    clock_past(&**streams, second.last_append_ms.expect("timestamped")).await;
     let outcome = ok(streams.seal(&name).await, "seal");
     let sealed = ok(streams.info(&name).await, "info").expect("info");
     let sealed_ms = sealed.sealed_ms.expect("seal records its time");

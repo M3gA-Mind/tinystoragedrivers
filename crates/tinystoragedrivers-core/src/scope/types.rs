@@ -59,9 +59,13 @@ impl ParsedScope {
     ///
     /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) when the
     /// view was built by hand with a principal on [`Tenant::Cluster`], or with
-    /// a segment the [`Scope`] length limit cannot hold.
+    /// a segment outside the grammar (empty, over the length limit, or with
+    /// characters a stored segment cannot hold). Only what [`Scope::parse`]
+    /// accepts converts.
     pub fn to_scope(&self) -> Result<Scope> {
-        Scope::new(self.to_string())
+        let text = self.to_string();
+        Scope::parse(&text)?;
+        Scope::new(text)
     }
 }
 

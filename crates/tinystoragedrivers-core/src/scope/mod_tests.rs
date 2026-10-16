@@ -328,3 +328,33 @@ fn parse_accepts_hashed_segments() {
         Some(Principal::Agent("~jkmvk7sagpbvhhpc5nsuoiaxzl".into()))
     );
 }
+
+#[test]
+fn to_scope_rejects_hand_built_views_outside_the_grammar() {
+    let bad = [
+        ParsedScope {
+            tenant: Tenant::Cluster,
+            principal: Some(Principal::Agent("x".into())),
+        },
+        ParsedScope {
+            tenant: Tenant::User("has space".into()),
+            principal: None,
+        },
+        ParsedScope {
+            tenant: Tenant::User(String::new()),
+            principal: None,
+        },
+        ParsedScope {
+            tenant: Tenant::Local,
+            principal: Some(Principal::Module("a/b".into())),
+        },
+        ParsedScope {
+            tenant: Tenant::User("a".into()),
+            principal: Some(Principal::Agent("x".repeat(MAX_SEGMENT_LEN + 1))),
+        },
+    ];
+    for parsed in bad {
+        let error = parsed.to_scope().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{parsed}");
+    }
+}

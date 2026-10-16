@@ -1,7 +1,9 @@
 //! The suite's own helpers, and that it catches a broken driver.
 
 use super::*;
-use crate::{MemoryStorage, StorageError};
+use std::sync::Arc;
+
+use crate::{MemoryStorage, StorageBackend, StorageError};
 
 #[test]
 fn unique_names_never_repeat() {
@@ -302,4 +304,23 @@ async fn conformance_rejects_a_driver_that_claims_metadata_but_keeps_none() {
         outcome.is_err(),
         "a driver reporting RecordMetadata must persist schema and times"
     );
+}
+
+/// A clock that only moves every 100 ms, far coarser than any fixed pause the
+/// suite could assume.
+fn coarse_storage() -> MemoryStorage {
+    MemoryStorage::with_clock(Arc::new(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        u64::try_from(now / 100 * 100).unwrap_or(0)
+    }))
+}
+
+#[tokio::test]
+async fn time_ordered_checks_do_not_assume_a_clock_resolution() {
+    let backend = coarse_storage();
+    let scoped = backend.for_scope(&crate::Scope::local()).unwrap();
+    schema::run(&scoped).await;
+    seal::run(&scoped).await;
 }
