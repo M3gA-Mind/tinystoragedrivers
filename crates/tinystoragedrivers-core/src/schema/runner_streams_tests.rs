@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::schema::{MigrateOptions, Owner, Registry, Schema, ScopeClass, Step};
 use crate::{
     ErrorKind, MemoryStorage, Result, Scope, ScopedStorage, SealOutcome, StorageBackend,
-    StorageError, StreamEntry, StreamStore, sealed_blob_key,
+    StorageError, StreamEntry, StreamStore,
 };
 
 const LEGACY: &str = "16:session_journal/";
@@ -62,6 +62,9 @@ impl StreamStore for Flaky {
     }
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
         self.inner.streams(prefix).await
+    }
+    async fn info(&self, stream: &str) -> Result<Option<crate::StreamInfo>> {
+        self.inner.info(stream).await
     }
 }
 
@@ -142,11 +145,11 @@ async fn read_all(storage: &ScopedStorage, stream: &str) -> Vec<Value> {
 
 async fn is_sealed(storage: &ScopedStorage, stream: &str) -> bool {
     storage
-        .blobs()
-        .head(&sealed_blob_key(stream).unwrap())
+        .streams()
+        .info(stream)
         .await
         .unwrap()
-        .is_some()
+        .is_some_and(|info| info.sealed_ms.is_some())
 }
 
 #[tokio::test]

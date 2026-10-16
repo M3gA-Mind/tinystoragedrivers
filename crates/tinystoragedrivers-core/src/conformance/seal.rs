@@ -31,6 +31,8 @@ pub(super) async fn run(storage: &ScopedStorage) {
     appends_are_refused(storage).await;
     truncated_streams_seal(storage).await;
     delete_removes_the_blob(storage).await;
+    sealing_loses_no_concurrent_append(storage).await;
+    sealed_blobs_are_hidden_from_blob_listings(storage).await;
     info_records_times(storage).await;
 }
 
@@ -136,6 +138,77 @@ async fn reads_survive_sealing(storage: &ScopedStorage) {
         before,
         "after re-seal"
     );
+}
+
+/// An append racing a seal either lands in the sealed stream or is refused;
+/// it is never acknowledged and then lost with the entry rows.
+async fn sealing_loses_no_concurrent_append(storage: &ScopedStorage) {
+    const ATTEMPTS: u64 = 40;
+    let streams = storage.streams();
+    for round in 0..4 {
+        let name = unique(&format!("seal_race{round}"));
+        ok(streams.append_batch(&name, values(5)).await, "fill");
+        let appender = |id: u64| {
+            let (streams, name) = (streams.clone(), name.clone());
+            async move {
+                let mut acknowledged = Vec::new();
+                for attempt in 0..ATTEMPTS {
+                    let value = json!({"appender": id, "attempt": attempt});
+                    match streams.append(&name, value.clone()).await {
+                        Ok(_) => acknowledged.push(value),
+                        Err(error) if error.kind() == ErrorKind::Conflict => break,
+                        Err(error) => panic!("append during a seal: {error}"),
+                    }
+                }
+                acknowledged
+            }
+        };
+        let sealer = async {
+            tokio::task::yield_now().await;
+            ok(streams.seal(&name).await, "seal during appends")
+        };
+        let (a, b, c, outcome) = tokio::join!(appender(0), appender(1), appender(2), sealer);
+        let stored: Vec<Value> = paged(streams.as_ref(), &name)
+            .await
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect();
+        let acknowledged: Vec<Value> = [a, b, c].concat();
+        assert_eq!(
+            stored.len() as u64,
+            outcome.len - outcome.base,
+            "the sealed stream holds what the seal reported"
+        );
+        for value in &acknowledged {
+            assert!(
+                stored.contains(value),
+                "an acknowledged append {value} was lost by the seal"
+            );
+        }
+        assert_eq!(
+            stored.len(),
+            5 + acknowledged.len(),
+            "no entry beyond the acknowledged appends"
+        );
+    }
+}
+
+/// The blob a seal writes is not a caller's blob: it is not listed.
+async fn sealed_blobs_are_hidden_from_blob_listings(storage: &ScopedStorage) {
+    let name = unique("seal_hidden");
+    let streams = storage.streams();
+    ok(streams.append_batch(&name, values(3)).await, "fill");
+    ok(streams.seal(&name).await, "seal");
+    let blobs = storage.blobs();
+    for prefix in ["", "_tsd", "_tsd/"] {
+        let listed = ok(blobs.list(prefix).await, "list");
+        assert!(
+            listed
+                .iter()
+                .all(|meta| !meta.key.starts_with("_tsd/sealed/")),
+            "a listing of {prefix:?} shows a sealed stream's blob"
+        );
+    }
 }
 
 async fn appends_are_refused(storage: &ScopedStorage) {

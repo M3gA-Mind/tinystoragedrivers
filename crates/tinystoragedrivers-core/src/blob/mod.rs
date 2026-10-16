@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StorageError};
+use crate::stream::{SEALED_BLOB_PREFIX, is_reserved_blob_key};
 
 mod tree;
 
@@ -99,7 +100,7 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         len: u64,
         content_type: Option<&str>,
     ) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let mut bytes = Vec::new();
         (&mut reader)
             .take(len.saturating_add(1))
@@ -159,7 +160,7 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         content_type: Option<&str>,
         ttl: Duration,
     ) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         if !self.capabilities().contains(Capability::BlobTtl) {
             return Err(StorageError::unsupported(
                 Capability::BlobTtl,
@@ -360,6 +361,43 @@ pub fn validate_blob_key(key: &str) -> Result<()> {
         return Err(StorageError::invalid_input(
             "blob key has an empty, `.` or `..` segment",
         ));
+    }
+    Ok(())
+}
+
+/// [`validate_blob_key`] for a key a caller names: additionally refuses the
+/// prefix reserved for sealed streams ([`SEALED_BLOB_PREFIX`]).
+///
+/// Every public blob operation of a driver validates with this, so a caller
+/// cannot overwrite, read or delete the blob a sealed stream's entries live
+/// in. A driver's own sealing code names that blob with
+/// [`sealed_blob_key`](crate::sealed_blob_key) and does not pass through here.
+///
+/// # Errors
+///
+/// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput).
+pub fn validate_user_blob_key(key: &str) -> Result<()> {
+    validate_blob_key(key)?;
+    if is_reserved_blob_key(key) {
+        return Err(StorageError::invalid_input(format!(
+            "blob keys under `{SEALED_BLOB_PREFIX}` are reserved for sealed streams"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse a [`BlobStore::list`] prefix that lies under the prefix reserved
+/// for sealed streams ([`SEALED_BLOB_PREFIX`]). Broader prefixes are allowed;
+/// their listings simply omit the reserved keys.
+///
+/// # Errors
+///
+/// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput).
+pub fn validate_user_blob_prefix(prefix: &str) -> Result<()> {
+    if is_reserved_blob_key(prefix) {
+        return Err(StorageError::invalid_input(format!(
+            "blob keys under `{SEALED_BLOB_PREFIX}` are reserved for sealed streams"
+        )));
     }
     Ok(())
 }

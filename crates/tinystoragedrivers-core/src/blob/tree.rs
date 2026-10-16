@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{BlobMeta, MAX_BLOB_KEY_LEN, validate_blob_key};
+use super::{BlobMeta, MAX_BLOB_KEY_LEN, validate_user_blob_key};
 use crate::error::{Result, StorageError};
 
 /// One child of a directory in the tree view.
@@ -75,7 +75,7 @@ pub(super) fn list_prefix(dir: &str) -> Result<String> {
     if dir.is_empty() {
         return Ok(String::new());
     }
-    validate_blob_key(dir)?;
+    validate_user_blob_key(dir)?;
     Ok(format!("{dir}/"))
 }
 
@@ -124,7 +124,7 @@ pub(super) fn plan(dir: &str, files: &[TreeFile], max_key_len: usize) -> Result<
     let mut keys = Vec::with_capacity(files.len());
     for file in files {
         let key = format!("{base}{}", file.path);
-        validate_blob_key(&key)?;
+        validate_user_blob_key(&key)?;
         if key.len() > max_key_len.min(MAX_BLOB_KEY_LEN) {
             return Err(StorageError::invalid_input(format!(
                 "tree path {:?} exceeds the blob key limit",

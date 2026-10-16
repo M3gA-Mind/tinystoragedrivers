@@ -15,10 +15,11 @@
 //! mapped entries, or non-empty with no recorded progress was not written by
 //! this step and is refused with `Conflict`.
 
+use crate::Capability;
 use crate::document::Precondition;
-use crate::error::{Result, StorageError};
+use crate::error::{ErrorKind, Result, StorageError};
 use crate::key::Key;
-use crate::stream::{StreamStore, sealed_blob_key};
+use crate::stream::StreamStore;
 
 use super::migrations::Progress;
 use super::runner::Context;
@@ -55,12 +56,13 @@ async fn migrate_stream(context: &Context<'_>, run: &StreamStepFn, source: &str)
     let step = context.step;
     let streams = context.storage.streams();
     let entries = read_all(streams.as_ref(), source, context.batch_size).await?;
-    let sealed = context
-        .storage
-        .blobs()
-        .head(&sealed_blob_key(source)?)
-        .await?
-        .is_some();
+    // The sealed blob is reserved to the driver, so sealed-ness is asked of the
+    // stream port. A driver that cannot seal has no sealed streams.
+    let sealed = match streams.info(source).await {
+        Ok(info) => info.is_some_and(|info| info.sealed_ms.is_some()),
+        Err(error) if error.kind() == ErrorKind::Unsupported(Capability::StreamSeal) => false,
+        Err(error) => return Err(error),
+    };
     let source_key = Key::of([context.owner.as_str(), step.item, step.id, source])?;
     let Some((target, values)) = run(source.to_owned(), entries)? else {
         streams.delete_stream(source).await?;

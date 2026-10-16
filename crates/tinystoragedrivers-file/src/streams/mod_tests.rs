@@ -287,7 +287,8 @@ mod sealing {
     //! steps are separate operations, so stopping after one leaves the state
     //! a crash there would.
 
-    use tinystoragedrivers_core::{BlobStore, SealOutcome, SealedLog, sealed_blob_key};
+    use crate::blobs::FileBlobs;
+    use tinystoragedrivers_core::{SealOutcome, SealedLog, sealed_blob_key};
 
     use super::*;
 
@@ -295,19 +296,16 @@ mod sealing {
         _dir: tempfile::TempDir,
         storage: FileStorage,
         streams: FileStreams,
-        blobs: Arc<dyn BlobStore>,
     }
 
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileStorage::open(dir.path()).unwrap();
         let streams = FileStreams::new(Arc::clone(&storage.db), Scope::local(), None);
-        let blobs = Arc::clone(storage.for_scope(&Scope::local()).unwrap().blobs());
         Fixture {
             _dir: dir,
             storage,
             streams,
-            blobs,
         }
     }
 
@@ -322,12 +320,19 @@ mod sealing {
             files(&self.storage, name).0.exists()
         }
 
+        // The sealed blob is reserved, so the tests reach it the way the
+        // sealing code does, not through the blob port.
         async fn has_blob(&self, name: &str) -> bool {
-            self.blobs
-                .head(&sealed_blob_key(name).unwrap())
-                .await
-                .unwrap()
-                .is_some()
+            self.blob_bytes(&sealed_blob_key(name).unwrap()).is_some()
+        }
+
+        fn blob_bytes(&self, key: &str) -> Option<Vec<u8>> {
+            FileBlobs::get_locked(&self.storage.db, &Scope::local(), key).unwrap()
+        }
+
+        fn delete_blob(&self, name: &str) {
+            let key = sealed_blob_key(name).unwrap();
+            FileBlobs::delete_locked(&self.storage.db, &Scope::local(), &key).unwrap();
         }
     }
 
@@ -420,10 +425,7 @@ mod sealing {
         assert_eq!(cut.kind(), ErrorKind::Conflict);
 
         let again = f.streams.seal_write_blob("j").await.unwrap();
-        f.blobs
-            .delete(&sealed_blob_key("j").unwrap())
-            .await
-            .unwrap();
+        f.delete_blob("j");
         let lost = f.streams.seal_mark("j", again).await.unwrap_err();
         assert_eq!(lost.kind(), ErrorKind::Conflict, "no blob, no seal");
         assert_eq!(f.streams.append("j", json!(0)).await.unwrap(), 6);
@@ -434,13 +436,10 @@ mod sealing {
         let f = fixture();
         let before = f.fill("a/b", 3).await;
         let outcome = f.streams.seal("a/b").await.unwrap();
-        let blob = f.blobs.get("_tsd/sealed/a%2Fb").await.unwrap().unwrap();
-        assert_eq!(blob.meta.len, outcome.blob_bytes);
-        assert_eq!(
-            SealedLog::decode(&blob.bytes).unwrap().window(0, 10),
-            before
-        );
-        assert_eq!(outcome, SealOutcome::new(0, 3, blob.meta.len));
+        let bytes = f.blob_bytes("_tsd/sealed/a%2Fb").unwrap();
+        assert_eq!(bytes.len() as u64, outcome.blob_bytes);
+        assert_eq!(SealedLog::decode(&bytes).unwrap().window(0, 10), before);
+        assert_eq!(outcome, SealOutcome::new(0, 3, bytes.len() as u64));
     }
 
     #[tokio::test]
@@ -448,10 +447,7 @@ mod sealing {
         let f = fixture();
         f.fill("j", 3).await;
         f.streams.seal("j").await.unwrap();
-        f.blobs
-            .delete(&sealed_blob_key("j").unwrap())
-            .await
-            .unwrap();
+        f.delete_blob("j");
         for error in [
             f.streams.read_window("j", 0, 10).await.unwrap_err(),
             f.streams.seal("j").await.unwrap_err(),

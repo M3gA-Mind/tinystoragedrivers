@@ -84,11 +84,16 @@ impl MemoryStreams {
     }
 
     /// Step 1: write the blob. Changes nothing a reader can see.
+    #[cfg(test)]
     pub(super) fn seal_write_blob(&self, stream: &str) -> Result<SealOutcome> {
         validate_stream(stream)?;
-        let blob_key = self.blob_key(stream)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
+        self.write_blob_in(&mut state, stream)
+    }
+
+    fn write_blob_in(&self, state: &mut DbState, stream: &str) -> Result<SealOutcome> {
+        let blob_key = self.blob_key(stream)?;
         let stored = state
             .streams
             .get(&self.key(stream))
@@ -96,7 +101,7 @@ impl MemoryStreams {
         if stored.sealed_len.is_some() {
             return Err(StorageError::conflict("stream is already sealed"));
         }
-        let log = SealedLog::new(stored.base, stored.entries.iter().cloned().collect());
+        let log = SealedLog::new(stored.base, stored.entries.iter().cloned().collect())?;
         let bytes = log.encode()?;
         let outcome = SealOutcome::new(log.base(), log.len(), bytes.len() as u64);
         let meta = BlobMeta {
@@ -110,11 +115,16 @@ impl MemoryStreams {
 
     /// Step 2: mark the stream sealed, provided it is still the stream the
     /// blob was written from and the blob is still there.
+    #[cfg(test)]
     pub(super) fn seal_mark(&self, stream: &str, written: SealOutcome) -> Result<()> {
         validate_stream(stream)?;
-        let blob_key = self.blob_key(stream)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
+        self.mark_in(&mut state, stream, written)
+    }
+
+    fn mark_in(&self, state: &mut DbState, stream: &str, written: SealOutcome) -> Result<()> {
+        let blob_key = self.blob_key(stream)?;
         let now_ms = self.now_ms();
         let blob_len = state
             .blobs
@@ -135,17 +145,12 @@ impl MemoryStreams {
         Ok(())
     }
 
-    /// Step 3: drop the entries the blob now holds. Idempotent.
-    pub(super) fn seal_drop_entries(&self, stream: &str) -> Result<()> {
-        validate_stream(stream)?;
-        let mut state = self.db.lock()?;
-        self.guard(&state)?;
+    fn drop_entries_in(&self, state: &mut DbState, stream: &str) {
         if let Some(stored) = state.streams.get_mut(&self.key(stream))
             && stored.sealed_len.is_some()
         {
             stored.entries.clear();
         }
-        Ok(())
     }
 
     /// The outcome of an already sealed stream, from its head and blob.
@@ -299,18 +304,17 @@ impl StreamStore for MemoryStreams {
 
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
         validate_stream(stream)?;
-        {
-            let state = self.db.lock()?;
-            self.guard(&state)?;
-            if let Some(outcome) = self.sealed_outcome(&state, stream)? {
-                drop(state);
-                self.seal_drop_entries(stream)?;
-                return Ok(outcome);
-            }
+        // The three steps run under one hold of the lock, so no append can land
+        // between the snapshot and the mark: it is either in the blob or refused.
+        let mut state = self.db.lock()?;
+        self.guard(&state)?;
+        if let Some(outcome) = self.sealed_outcome(&state, stream)? {
+            self.drop_entries_in(&mut state, stream);
+            return Ok(outcome);
         }
-        let written = self.seal_write_blob(stream)?;
-        self.seal_mark(stream, written)?;
-        self.seal_drop_entries(stream)?;
+        let written = self.write_blob_in(&mut state, stream)?;
+        self.mark_in(&mut state, stream, written)?;
+        self.drop_entries_in(&mut state, stream);
         Ok(written)
     }
 

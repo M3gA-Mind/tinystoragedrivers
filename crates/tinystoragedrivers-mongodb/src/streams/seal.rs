@@ -163,7 +163,7 @@ impl MongoStreams {
             ));
         }
         Ok((
-            SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect()),
+            SealedLog::new(base, entries.into_iter().map(|(_, value)| value).collect())?,
             last_append_ms,
         ))
     }

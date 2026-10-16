@@ -148,17 +148,16 @@ async fn the_sealed_blob_holds_the_entries_in_the_shared_format() {
     let (storage, streams) = handle();
     let before = fill(&streams, "a/b", 3).await;
     streams.seal("a/b").await.unwrap();
-    let scoped = storage.for_scope(&Scope::local()).unwrap();
-    let blob = scoped
-        .blobs()
-        .get("_tsd/sealed/a%2Fb")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        SealedLog::decode(&blob.bytes).unwrap().window(0, 10),
-        before
-    );
+    // The blob is reserved, so it is read from the store, not the blob port.
+    let bytes = {
+        let state = storage.db.lock().unwrap();
+        let key = (
+            Scope::local().as_str().to_owned(),
+            "_tsd/sealed/a%2Fb".to_owned(),
+        );
+        state.blobs.get(&key).unwrap().1.clone()
+    };
+    assert_eq!(SealedLog::decode(&bytes).unwrap().window(0, 10), before);
 }
 
 #[tokio::test]

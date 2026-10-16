@@ -32,7 +32,7 @@ use mongodb::gridfs::{FilesCollectionDocument, GridFsBucket};
 use mongodb::options::{FindOptions, GridFsBucketOptions, IndexOptions};
 use tinystoragedrivers_core::{
     Blob, BlobMeta, BlobStore, Capabilities, Capability, Result, Scope, StorageError, clamp_range,
-    validate_blob_key,
+    is_reserved_blob_key, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::backend::Shared;
@@ -159,6 +159,9 @@ pub(crate) struct MongoBlobs {
     generation: tinystoragedrivers_core::ScopeGeneration,
     /// Writes are refused: GridFS cannot join a fenced transaction.
     fenced: bool,
+    /// The handle a stream's seal uses: it may name keys under the prefix
+    /// reserved for sealed streams, which a caller's handle may not.
+    sealed_access: bool,
 }
 
 impl MongoBlobs {
@@ -168,6 +171,23 @@ impl MongoBlobs {
             scope,
             generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fenced,
+            sealed_access: false,
+        }
+    }
+
+    /// This handle, allowed to name the sealed-stream blob keys.
+    pub(crate) fn with_sealed_access(mut self) -> Self {
+        self.sealed_access = true;
+        self
+    }
+
+    /// Validate `key` for this handle: a caller's handle refuses the
+    /// sealed-stream prefix.
+    fn check_key(&self, key: &str) -> Result<()> {
+        if self.sealed_access {
+            validate_blob_key(key)
+        } else {
+            validate_user_blob_key(key)
         }
     }
     pub(crate) fn with_generation(
@@ -369,7 +389,7 @@ impl MongoBlobs {
                 .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
         crate::purge::admitted!(self, {
-            validate_blob_key(key)?;
+            self.check_key(key)?;
             self.writable("a blob put")?;
             if self.shared.existing {
                 return Err(StorageError::unsupported(
@@ -437,7 +457,7 @@ impl BlobStore for MongoBlobs {
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         crate::purge::admitted!(self, {
-            validate_blob_key(key)?;
+            self.check_key(key)?;
             let bucket = self.bucket().await?;
             for _ in 0..READ_ATTEMPTS {
                 let Some(file) = self.newest(&bucket, key).await? else {
@@ -456,7 +476,7 @@ impl BlobStore for MongoBlobs {
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         crate::purge::admitted!(self, {
-            validate_blob_key(key)?;
+            self.check_key(key)?;
             let bucket = self.bucket().await?;
             for _ in 0..READ_ATTEMPTS {
                 let Some(file) = self.newest(&bucket, key).await? else {
@@ -479,7 +499,7 @@ impl BlobStore for MongoBlobs {
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
         crate::purge::admitted!(self, {
-            validate_blob_key(key)?;
+            self.check_key(key)?;
             let bucket = self.bucket().await?;
             Ok(self.newest(&bucket, key).await?.as_ref().map(blob_meta))
         })
@@ -487,7 +507,7 @@ impl BlobStore for MongoBlobs {
 
     async fn delete(&self, key: &str) -> Result<bool> {
         crate::purge::admitted!(self, {
-            validate_blob_key(key)?;
+            self.check_key(key)?;
             self.writable("a blob delete")?;
             let bucket = self.bucket().await?;
             let files = self.files(&bucket, doc! {"filename": key}).await?;
@@ -501,6 +521,9 @@ impl BlobStore for MongoBlobs {
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         crate::purge::admitted!(self, {
+            if !self.sealed_access {
+                validate_user_blob_prefix(prefix)?;
+            }
             let bucket = self.bucket().await?;
             let files = self
                 .files(&bucket, doc! {"filename": prefix_regex(prefix)})
@@ -513,6 +536,7 @@ impl BlobStore for MongoBlobs {
                 .iter()
                 .map(blob_meta)
                 .filter(|meta| meta.key.starts_with(prefix))
+                .filter(|meta| self.sealed_access || !is_reserved_blob_key(&meta.key))
                 .collect())
         })
     }

@@ -243,6 +243,7 @@ impl MongoStreams {
     fn blobs(&self) -> MongoBlobs {
         MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false)
             .with_generation(self.generation)
+            .with_sealed_access()
     }
 
     fn heads(&self) -> ScopedCollection {

@@ -14,7 +14,7 @@ use crate::error::{Result, StorageError};
 mod sealed;
 mod types;
 
-pub use sealed::{SEALED_BLOB_PREFIX, SealedLog, sealed_blob_key};
+pub use sealed::{SEALED_BLOB_PREFIX, SealedLog, is_reserved_blob_key, sealed_blob_key};
 pub use types::{SealOutcome, SealPolicy, SealWhen, StreamInfo};
 
 /// One record and its offset.

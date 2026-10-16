@@ -79,7 +79,7 @@ pub use backend::{
 };
 pub use blob::{
     Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
-    clamp_range, validate_blob_key,
+    clamp_range, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 #[cfg(any(test, feature = "blocking"))]
 pub use blocking::Blocking;
@@ -109,7 +109,7 @@ pub use scope::{
 };
 pub use stream::{
     SEALED_BLOB_PREFIX, SealOutcome, SealPolicy, SealWhen, SealedLog, StreamEntry, StreamInfo,
-    StreamStore, sealed_blob_key, validate_stream,
+    StreamStore, is_reserved_blob_key, sealed_blob_key, validate_stream,
 };
 
 /// The `async_trait` attribute the port traits are declared with, re-exported
