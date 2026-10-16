@@ -92,6 +92,8 @@ impl DocumentService {
                             id: document.id,
                             version: tinystoragedrivers_bus::Version(document.version.0),
                             doc: document.doc,
+                            // The legacy callback never carried metadata.
+                            meta: None,
                         })
                     })
                     .map_err(|error| storage_failure(&error));

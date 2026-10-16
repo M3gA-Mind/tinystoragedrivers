@@ -2,25 +2,32 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tinystoragedrivers_bus::{StorageFailure, StorageKind, Version, Versioned, WriteOp};
+use tinystoragedrivers_bus::{Meta, StorageFailure, StorageKind, Version, Versioned, WriteOp};
 use tinystoragedrivers_core::{
     Capabilities, Capability, ErrorKind, StorageError, Versioned as NativeVersioned,
     WriteOp as NativeWriteOp,
 };
 
-/// Capabilities bus callers never see: a host keeps them to itself, or the
-/// storage-bus wire cannot carry what they promise yet (`RecordMetadata`
-/// until the contract carries `Meta`; `Maintenance` and `ScopeEnumeration`
-/// until it carries `maintain`, `checkpoint` and `scopes`; `StreamSeal` until
-/// it carries the seal call).
-pub(crate) const HOST_ONLY: [Capability; 9] = [
-    Capability::StreamSeal,
+/// Capabilities bus callers never see.
+///
+/// Fencing, scope purge and the existing-schema open are the host's own
+/// lifecycle controls. Two more are host-only by the storage-bus trust model,
+/// even though the wire could carry them: `Maintenance` (`maintain`,
+/// `checkpoint`) lets the caller trigger vacuum, WAL checkpoints and
+/// seal/retention sweeps across the whole database, and `ScopeEnumeration`
+/// (`scopes`) lists the other tenants. A module is bound to one scope and
+/// must neither learn that others exist nor spend the host's I/O budget, so
+/// the contract has no selector for either and the host runs them natively.
+///
+/// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
+/// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
+/// the module's own grant, so they are exposed.
+pub(crate) const HOST_ONLY: [Capability; 7] = [
     Capability::Fencing,
     Capability::CrossDatabaseFencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
-    Capability::RecordMetadata,
     Capability::Maintenance,
     Capability::ScopeEnumeration,
 ];
@@ -82,6 +89,12 @@ pub(crate) fn versioned_to_wire(found: NativeVersioned<Value>) -> Versioned {
         id: found.id,
         version: Version(found.version.0),
         doc: found.doc,
+        meta: Some(Meta {
+            schema: found.meta.schema,
+            created_ms: found.meta.created_ms,
+            updated_ms: found.meta.updated_ms,
+            expires_ms: found.meta.expires_ms,
+        }),
     }
 }
 
@@ -90,8 +103,17 @@ pub(crate) fn versioned_from_wire(found: Versioned) -> NativeVersioned<Value> {
         id: found.id,
         version: tinystoragedrivers_core::Version(found.version.0),
         doc: found.doc,
-        // The storage-bus wire does not carry record metadata yet.
-        meta: tinystoragedrivers_core::Meta::unknown(),
+        // A host that predates contract version 4 sends no metadata.
+        meta: found
+            .meta
+            .map_or_else(tinystoragedrivers_core::Meta::unknown, |meta| {
+                tinystoragedrivers_core::Meta {
+                    schema: meta.schema,
+                    created_ms: meta.created_ms,
+                    updated_ms: meta.updated_ms,
+                    expires_ms: meta.expires_ms,
+                }
+            }),
     }
 }
 
