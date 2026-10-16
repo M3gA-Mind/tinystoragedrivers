@@ -184,9 +184,12 @@ impl Leases {
     }
 
     /// Extend a lease `holder` still holds by `ttl_ms` from now, keeping its
-    /// epoch. Returns `None` when the lease is gone, lapsed or held by someone
-    /// else: the caller has lost it and must stop acting on it (renewing never
-    /// resurrects a lapsed lease; call [`acquire`](Self::acquire)).
+    /// epoch. `epoch` is the epoch of the [`Lease`] the caller acquired: a
+    /// holder string is reusable, so an actor from an earlier tenure of the
+    /// same holder must not be able to renew the current one. Returns `None`
+    /// when the lease is gone, lapsed, held by someone else or at another
+    /// epoch: the caller has lost it and must stop acting on it (renewing
+    /// never resurrects a lapsed lease; call [`acquire`](Self::acquire)).
     ///
     /// # Errors
     ///
@@ -196,6 +199,7 @@ impl Leases {
         owner: &str,
         key: &str,
         holder: &str,
+        epoch: u64,
         ttl_ms: i64,
     ) -> Result<Option<Lease>> {
         let id = id(owner, key)?;
@@ -204,7 +208,9 @@ impl Leases {
             .update(&id, |current| {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 Ok(current
-                    .filter(|lease| lease.holder == holder && lease.expires_ms > now)
+                    .filter(|lease| {
+                        lease.holder == holder && lease.epoch == epoch && lease.expires_ms > now
+                    })
                     .map(|lease| Body {
                         expires_ms,
                         ..lease
@@ -214,21 +220,25 @@ impl Leases {
         Ok(stored.map(|(body, _)| Lease::from_body(id, body)))
     }
 
-    /// Give the lease up: only the holder of a live lease can, and it is
-    /// marked expired at once (the record and its epoch stay, so the next
-    /// holder continues the epoch). Returns whether a lease was released.
+    /// Give the lease up: only the holder of a live lease at `epoch` (the
+    /// epoch of the [`Lease`] the caller acquired) can, and it is marked
+    /// expired at once (the record and its epoch stay, so the next holder
+    /// continues the epoch). Returns whether a lease was released; a stale
+    /// tenure of the same holder gets `false` and leaves the live one alone.
     ///
     /// # Errors
     ///
     /// A storage error.
-    pub async fn release(&self, owner: &str, key: &str, holder: &str) -> Result<bool> {
+    pub async fn release(&self, owner: &str, key: &str, holder: &str, epoch: u64) -> Result<bool> {
         let id = id(owner, key)?;
         let now = self.now()?;
         let stored = self
             .repo
             .update(&id, |current| {
                 Ok(current
-                    .filter(|lease| lease.holder == holder && lease.expires_ms > now)
+                    .filter(|lease| {
+                        lease.holder == holder && lease.epoch == epoch && lease.expires_ms > now
+                    })
                     .map(|lease| Body {
                         expires_ms: now,
                         ..lease

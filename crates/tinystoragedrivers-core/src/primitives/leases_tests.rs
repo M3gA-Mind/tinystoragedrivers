@@ -84,7 +84,7 @@ async fn takeover_after_expiry_bumps_the_epoch_and_renew_keeps_it() {
     rig.now.store(1_150, Ordering::SeqCst);
     let renewed = rig
         .leases
-        .renew("host", "p1", "b", 100)
+        .renew("host", "p1", "b", 2, 100)
         .await
         .unwrap()
         .unwrap();
@@ -105,7 +105,7 @@ async fn renew_refuses_a_stranger_a_lapsed_lease_and_a_missing_one() {
     let rig = rig();
     assert!(
         rig.leases
-            .renew("host", "p1", "a", 100)
+            .renew("host", "p1", "a", 1, 100)
             .await
             .unwrap()
             .is_none()
@@ -117,7 +117,7 @@ async fn renew_refuses_a_stranger_a_lapsed_lease_and_a_missing_one() {
         .unwrap();
     assert!(
         rig.leases
-            .renew("host", "p1", "b", 100)
+            .renew("host", "p1", "b", 1, 100)
             .await
             .unwrap()
             .is_none()
@@ -125,7 +125,7 @@ async fn renew_refuses_a_stranger_a_lapsed_lease_and_a_missing_one() {
     rig.now.store(1_100, Ordering::SeqCst);
     assert!(
         rig.leases
-            .renew("host", "p1", "a", 100)
+            .renew("host", "p1", "a", 1, 100)
             .await
             .unwrap()
             .is_none()
@@ -140,10 +140,10 @@ async fn only_the_holder_releases_and_the_epoch_continues() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!rig.leases.release("host", "p1", "b").await.unwrap());
+    assert!(!rig.leases.release("host", "p1", "b", 1).await.unwrap());
     assert!(rig.leases.current("host", "p1").await.unwrap().is_some());
-    assert!(rig.leases.release("host", "p1", "a").await.unwrap());
-    assert!(!rig.leases.release("host", "p1", "a").await.unwrap());
+    assert!(rig.leases.release("host", "p1", "a", 1).await.unwrap());
+    assert!(!rig.leases.release("host", "p1", "a", 1).await.unwrap());
     assert!(rig.leases.current("host", "p1").await.unwrap().is_none());
     let next = rig
         .leases
@@ -271,7 +271,7 @@ async fn reacquiring_a_lapsed_or_released_lease_advances_the_epoch_for_the_same_
         .unwrap();
     assert_eq!((first.epoch, second.epoch), (1, 2));
     // Release, then the same holder takes it again.
-    assert!(rig.leases.release("host", "p1", "a").await.unwrap());
+    assert!(rig.leases.release("host", "p1", "a", 2).await.unwrap());
     let third = rig
         .leases
         .acquire("host", "p1", "a", 100)
@@ -288,9 +288,53 @@ async fn reacquiring_a_lapsed_or_released_lease_advances_the_epoch_for_the_same_
         .unwrap();
     let renewed = rig
         .leases
-        .renew("host", "p1", "a", 100)
+        .renew("host", "p1", "a", 3, 100)
         .await
         .unwrap()
         .unwrap();
     assert_eq!((live.epoch, renewed.epoch), (3, 3));
+}
+
+#[tokio::test]
+async fn a_stale_tenure_cannot_renew_or_release_the_new_one() {
+    let rig = rig();
+    let old = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    // The lease lapses and the same holder string reacquires it.
+    rig.now.store(2_000, Ordering::SeqCst);
+    let new = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((old.epoch, new.epoch), (1, 2));
+    // The stalled actor of the first tenure is refused.
+    assert!(
+        rig.leases
+            .renew("host", "p1", "a", old.epoch, 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !rig.leases
+            .release("host", "p1", "a", old.epoch)
+            .await
+            .unwrap()
+    );
+    // The new tenure is untouched: same expiry, still live, still renewable.
+    assert_eq!(rig.leases.current("host", "p1").await.unwrap(), Some(new));
+    let renewed = rig
+        .leases
+        .renew("host", "p1", "a", 2, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renewed.epoch, 2);
+    assert!(rig.leases.release("host", "p1", "a", 2).await.unwrap());
 }

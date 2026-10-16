@@ -93,7 +93,10 @@ async fn leases(storage: &ScopedStorage) {
     let key = "handover";
     let first = ok(leases.acquire(&owner, key, "a", 60_000).await, "acquire a")
         .expect("free lease must be acquirable");
-    assert!(ok(leases.release(&owner, key, "a").await, "release"));
+    assert!(ok(
+        leases.release(&owner, key, "a", first.epoch).await,
+        "release"
+    ));
     let second = ok(leases.acquire(&owner, key, "b", 60_000).await, "acquire b")
         .expect("released lease must be acquirable");
     assert!(
@@ -103,8 +106,40 @@ async fn leases(storage: &ScopedStorage) {
         second.epoch
     );
     last_epoch = last_epoch.max(second.epoch);
-    let renewed =
-        ok(leases.renew(&owner, key, "b", 60_000).await, "renew").expect("holder can renew");
+    // A stale actor of the released tenure cannot renew or release the new one,
+    // even though the holder string is reusable.
+    let again = ok(
+        leases.release(&owner, key, "b", second.epoch).await,
+        "release b",
+    );
+    assert!(again, "the current tenure releases");
+    let third = ok(
+        leases.acquire(&owner, key, "b", 60_000).await,
+        "reacquire b",
+    )
+    .expect("released lease must be acquirable by the same holder");
+    assert!(third.epoch > second.epoch, "a reacquire raises the epoch");
+    assert!(
+        ok(
+            leases.renew(&owner, key, "b", second.epoch, 60_000).await,
+            "stale renew"
+        )
+        .is_none(),
+        "a stale tenure must not renew the new one"
+    );
+    assert!(
+        !ok(
+            leases.release(&owner, key, "b", second.epoch).await,
+            "stale release"
+        ),
+        "a stale tenure must not release the new one"
+    );
+    let renewed = ok(
+        leases.renew(&owner, key, "b", third.epoch, 60_000).await,
+        "renew",
+    )
+    .expect("holder can renew");
+    last_epoch = last_epoch.max(third.epoch);
     assert_eq!(renewed.epoch, last_epoch, "renew must keep the epoch");
 }
 
