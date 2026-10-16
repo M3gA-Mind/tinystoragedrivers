@@ -175,8 +175,10 @@ async fn a_bounded_budget_does_not_pay_for_the_whole_file_conversion() {
     let file = dir.path().join("old.db");
     {
         let conn = Connection::open(&file).unwrap();
-        conn.execute_batch("PRAGMA auto_vacuum = NONE; PRAGMA journal_mode = WAL; CREATE TABLE keep (v TEXT);")
-            .unwrap();
+        conn.execute_batch(
+            "PRAGMA auto_vacuum = NONE; PRAGMA journal_mode = WAL; CREATE TABLE keep (v TEXT);",
+        )
+        .unwrap();
     }
     let storage = SqliteStorage::open(&file).unwrap();
     fill_and_empty(&storage).await;

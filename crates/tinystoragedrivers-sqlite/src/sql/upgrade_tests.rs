@@ -61,8 +61,12 @@ fn epoch_seconds_are_converted_to_milliseconds() {
 
 #[test]
 fn epoch_milliseconds_are_kept_as_they_are() {
-    let doc = serde_json::json!({"created_ms": 1_700_000_000_123_i64, "created_at": 99_999_999_999_i64});
-    assert_eq!(recognised_ms(&doc, &["created_ms"]), Some(1_700_000_000_123));
+    let doc =
+        serde_json::json!({"created_ms": 1_700_000_000_123_i64, "created_at": 99_999_999_999_i64});
+    assert_eq!(
+        recognised_ms(&doc, &["created_ms"]),
+        Some(1_700_000_000_123)
+    );
     // The last value read as seconds, one below the cut-off.
     assert_eq!(
         recognised_ms(&doc, &["created_at"]),

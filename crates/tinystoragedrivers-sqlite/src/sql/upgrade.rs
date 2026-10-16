@@ -295,8 +295,11 @@ fn recognised_ms(doc: &Value, fields: &[&str]) -> Option<i64> {
                 Some(n) => Some(n),
                 None => {
                     let n = number.as_f64().filter(|n| n.is_finite())?;
-                    #[allow(clippy::cast_possible_truncation, reason = "bounded by the range check")]
-                    ((n.abs() < SECONDS_BELOW as f64).then(|| (n * 1000.0).round() as i64))
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "bounded by the range check"
+                    )]
+                    ((n.abs() < 1e11).then(|| (n * 1000.0).round() as i64))
                 }
             }
         }

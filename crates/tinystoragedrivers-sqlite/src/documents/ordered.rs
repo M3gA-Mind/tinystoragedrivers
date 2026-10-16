@@ -120,15 +120,13 @@ pub(super) fn matching_ordered(
         if returned < batch {
             return Ok(Some(found));
         }
-        batch = (limit - found.len())
-            .max(MIN_CONTINUATION)
-            .min(MAX_SQL_LIMIT);
+        batch = (limit - found.len()).clamp(MIN_CONTINUATION, MAX_SQL_LIMIT);
     }
 }
 
-/// The largest `LIMIT` SQLite takes: a signed 64-bit integer. A larger caller
-/// limit (`usize::MAX` means "all") is clamped, since no table holds more rows.
-const MAX_SQL_LIMIT: usize = i64::MAX as usize;
+/// The largest `LIMIT` SQLite takes: a signed 64-bit integer. On a 64-bit target that is
+/// `i64::MAX`. A larger caller limit (`usize::MAX` means "all") is clamped, since no table holds more rows.
+const MAX_SQL_LIMIT: usize = usize::MAX >> 1;
 
 /// Rows fetched when a page comes up short and the query continues.
 const MIN_CONTINUATION: usize = 16;
