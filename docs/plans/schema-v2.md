@@ -88,7 +88,7 @@ cargo test --all-features            # needs the Mongo replica set for mongodb
 ## Checklist
 
 - [ ] 1 scope grammar
-- [ ] 2 key
+- [x] 2 key
 - [ ] 3 metadata
 - [ ] 4 registry
 - [ ] 5 primitives

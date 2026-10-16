@@ -59,6 +59,7 @@ mod document;
 mod error;
 mod fence;
 mod filter;
+mod key;
 mod memory;
 mod scope;
 mod stream;
@@ -91,6 +92,7 @@ pub use document::{
 pub use error::{ErrorKind, Result, StorageError};
 pub use fence::{Fence, GuardDatabase};
 pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
+pub use key::Key;
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
 pub use scope::{MAX_SCOPE_LEN, Scope};
 pub use stream::{StreamEntry, StreamStore, validate_stream};

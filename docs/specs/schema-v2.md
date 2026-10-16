@@ -100,9 +100,9 @@ segment   = 1*( ALPHA / DIGIT / "-" / "_" / "." / "@" )   ; at most 96 bytes
 - **`entity`** is a lowercase snake_case plural noun.
 - **No version suffixes.** The version lives in the [registry](#4-schema-registry).
 - **The owner `tsd` is reserved** for the shared primitives (§5). The prefix `_tsd` stays reserved for driver internals.
-- **`Key::of(parts)`** joins parts with `/`, escaping `%`, `/` and NUL as `%25`, `%2F` and `%00`. If the result exceeds 512 bytes it becomes `~` plus the base32 SHA-256 of the escaped key. `Key::split` reverses an unhashed key.
+- **`Key::of(parts)`** joins parts with `/`, escaping `%`, `/` and NUL as `%25`, `%2F` and `%00`, and a leading `~` of the first part as `%7E` so only a hashed key starts with `~`. If the result exceeds 512 bytes it becomes `~` plus the full 52-character lowercase base32 SHA-256 of the escaped key (an id is a primary key, so the digest is not truncated). `Key::split` reverses an unhashed key and returns `None` for a hashed one.
 - **The length-prefixed and `h:` schemes are retired.**
-- **New entity ids are ULIDs** (`Key::ulid()`): 26 characters, sortable by creation time. That makes `_ns` tie-break fields unnecessary.
+- **New entity ids are ULIDs** (`Key::ulid()`; `Key::ulid_at(ms)` for a migration that keeps a record's creation time): 26 characters, sortable by creation time. That makes `_ns` tie-break fields unnecessary.
 
 ### 3. Bodies and record metadata
 
