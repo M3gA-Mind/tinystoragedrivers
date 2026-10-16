@@ -183,23 +183,9 @@ fn unescape(segment: &str) -> Option<String> {
 
 /// RFC 4648 base32, lowercase, without padding.
 fn base32_lower(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-    for byte in bytes {
-        buffer = (buffer << 8) | u32::from(*byte);
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            out.push(char::from(ALPHABET[((buffer >> bits) & 31) as usize]));
-        }
-        buffer &= (1 << bits) - 1;
-    }
-    if bits > 0 {
-        out.push(char::from(ALPHABET[((buffer << (5 - bits)) & 31) as usize]));
-    }
-    out
+    data_encoding::BASE32_NOPAD
+        .encode(bytes)
+        .to_ascii_lowercase()
 }
 
 impl fmt::Display for Key {

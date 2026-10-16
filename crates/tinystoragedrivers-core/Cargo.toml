@@ -20,6 +20,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 # `Key::ulid`: time-sortable entity ids.
 ulid = { workspace = true }
+# Hashed scope segments and keys: lowercase RFC 4648 base32.
+data-encoding = { workspace = true }
 # AsyncRead is the streaming blob port; io-util adds no runtime or transport.
 tokio = { workspace = true, features = ["io-util", "time"] }
 
