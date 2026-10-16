@@ -223,6 +223,7 @@ keeps `maintenance` and `scope_enumeration` out of every capability list):
   the seal and retention policies across the whole database. A module could
   use them to spend the host's I/O budget or stall other tenants, so the host
   runs them on its own schedule.
+- `StreamStore::delete_sealed_stream` is the conditional delete retention uses so it never removes a stream recreated after it was inspected. It has no selector: a bus client answers `Unsupported(StreamSeal)`, and a module deletes its own streams with `DeleteStream`.
 - `StorageBackend::scopes` enumerates every tenant. A module is bound to one
   scope and must not learn that others exist.
 

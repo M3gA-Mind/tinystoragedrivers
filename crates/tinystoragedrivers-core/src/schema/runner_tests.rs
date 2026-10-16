@@ -263,11 +263,14 @@ async fn resumes_when_a_crash_left_a_batch_written_but_not_recorded() {
     seed_legacy(&storage).await;
     storage
         .documents()
-        .put(
+        .put_with(
             "shop.orders",
             "n-o000",
             json!({"n": 0, "step": 2}),
             Precondition::Absent,
+            // What the interrupted run wrote: the step's schema and the
+            // source's creation time (`o000` was created at 1000).
+            WriteOptions::new().schema(2).created_ms(1_000),
         )
         .await
         .unwrap();
@@ -588,4 +591,89 @@ async fn migrations_records_importer_completion() {
         json!({"owner": "threads", "step": "import_v1", "from": 0, "to": 0,
                "cursor": null, "written": 0, "done": true})
     );
+}
+
+/// A one-record import whose output keeps the source's creation time when
+/// `keep_created` is set.
+fn import_step(keep_created: bool) -> Step {
+    Step::new("import", "shop.orders", 1, 2, move |batch| {
+        Ok(batch
+            .into_iter()
+            .map(|record| {
+                let target =
+                    TargetRecord::new("shop.orders", format!("n-{}", record.id), record.body);
+                if keep_created {
+                    target.created_ms(record.meta.created_ms)
+                } else {
+                    target
+                }
+            })
+            .collect())
+    })
+    .source("orders_v1")
+}
+
+async fn seed_one_legacy_and_leftover(storage: &ScopedStorage, leftover: WriteOptions) {
+    let body = json!({"sku": "x"});
+    storage
+        .documents()
+        .put_with(
+            "orders_v1",
+            "o1",
+            body.clone(),
+            Precondition::Absent,
+            WriteOptions::new().schema(1),
+        )
+        .await
+        .unwrap();
+    storage
+        .documents()
+        .put_with("shop.orders", "n-o1", body, Precondition::Absent, leftover)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_existing_output_with_the_same_body_but_another_schema_stops_the_migration() {
+    let storage = scoped();
+    seed_one_legacy_and_leftover(&storage, WriteOptions::new().schema(1)).await;
+    let registry = registry(import_step(false), None);
+    let error = registry.migrate(&storage, &opts()).await.unwrap_err();
+    assert!(
+        matches!(error.kind(), ErrorKind::Conflict | ErrorKind::AlreadyExists),
+        "{error}"
+    );
+    assert_eq!(
+        snapshot(&storage, "orders_v1").await.len(),
+        1,
+        "the source survives a refused output"
+    );
+    assert!(registry.check_ready("shop.orders").is_err());
+}
+
+#[tokio::test]
+async fn an_existing_output_with_another_creation_time_stops_a_step_that_supplies_one() {
+    let storage = scoped();
+    seed_one_legacy_and_leftover(&storage, WriteOptions::new().schema(2).created_ms(1)).await;
+    let error = registry(import_step(true), None)
+        .migrate(&storage, &opts())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), ErrorKind::Conflict | ErrorKind::AlreadyExists),
+        "{error}"
+    );
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_existing_output_matching_body_schema_and_creation_time_is_accepted() {
+    let storage = scoped();
+    seed_one_legacy_and_leftover(&storage, WriteOptions::new().schema(2).created_ms(5_000)).await;
+    registry(import_step(true), None)
+        .migrate(&storage, &opts())
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&storage, "orders_v1").await.len(), 0);
+    assert_eq!(snapshot(&storage, "shop.orders").await.len(), 1);
 }
