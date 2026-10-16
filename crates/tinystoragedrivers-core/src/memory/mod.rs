@@ -1,6 +1,8 @@
 //! The in-memory driver: the reference implementation of every port.
 //!
 //! It provides every [`Capability`](crate::Capability), including
+//! [`Maintenance`](crate::Capability::Maintenance) (it has nothing to reclaim,
+//! so `maintain` and `checkpoint` succeed and report zero),
 //! [`Fencing`](crate::Capability::Fencing) on every write (the fence is
 //! checked under the same lock as the write), keeps nothing across process
 //! restarts, and is what tests and stateless embedders run on. Because
@@ -14,12 +16,13 @@ mod purge;
 mod state;
 mod streams;
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::backend::{ScopedStorage, StorageBackend, validate_database};
+use crate::backend::{
+    Checkpoint, MaintenanceBudget, MaintenanceReport, ScopedStorage, StorageBackend,
+};
 use crate::capabilities::Capabilities;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
@@ -35,7 +38,7 @@ use state::DbState;
 /// this so tests can drive document expiry deterministically.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
-fn system_clock() -> u64 {
+pub(crate) fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -43,62 +46,29 @@ fn system_clock() -> u64 {
         })
 }
 
-/// One in-memory database.
+/// The in-memory database behind a [`MemoryStorage`].
 #[derive(Debug, Default)]
 pub(crate) struct MemoryDb {
     state: Mutex<DbState>,
-    gate: Arc<Mutex<()>>,
 }
 
 impl MemoryDb {
-    fn lock(&self) -> Result<MemoryGuard<'_>> {
-        let gate = self
-            .gate
+    fn lock(&self) -> Result<MutexGuard<'_, DbState>> {
+        self.state
             .lock()
-            .map_err(|_| StorageError::backend("memory root lock poisoned"))?;
-        let state = self.state.lock().map_err(|_| {
-            StorageError::backend("memory storage lock poisoned by a panicked writer")
-        })?;
-        Ok(MemoryGuard { state, _gate: gate })
+            .map_err(|_| StorageError::backend("memory storage lock poisoned by a panicked writer"))
     }
-    fn guard(&self, state: &DbState, fence: Option<&MemoryFence>, now: u64) -> Result<()> {
+    fn guard(state: &DbState, fence: Option<&MemoryFence>, now: u64) -> Result<()> {
         match fence {
             None => Ok(()),
-            Some(binding) if std::ptr::eq(self, binding.db.as_ref()) => {
-                state.guard(Some(&binding.fence), now)
-            }
-            Some(binding) => {
-                let guard_state = binding
-                    .db
-                    .state
-                    .lock()
-                    .map_err(|_| StorageError::backend("memory guard lock poisoned"))?;
-                guard_state.guard(Some(&binding.fence), now)
-            }
+            Some(binding) => state.guard(Some(&binding.fence), now),
         }
     }
 }
 
 #[derive(Debug)]
-struct MemoryGuard<'a> {
-    state: MutexGuard<'a, DbState>,
-    _gate: MutexGuard<'a, ()>,
-}
-impl std::ops::Deref for MemoryGuard<'_> {
-    type Target = DbState;
-    fn deref(&self) -> &DbState {
-        &self.state
-    }
-}
-impl std::ops::DerefMut for MemoryGuard<'_> {
-    fn deref_mut(&mut self) -> &mut DbState {
-        &mut self.state
-    }
-}
-#[derive(Debug)]
 pub(super) struct MemoryFence {
     fence: Fence,
-    db: Arc<MemoryDb>,
 }
 
 /// An in-memory [`StorageBackend`].
@@ -114,8 +84,6 @@ pub(super) struct MemoryFence {
 #[derive(Clone)]
 pub struct MemoryStorage {
     db: Arc<MemoryDb>,
-    root: Arc<MemoryDb>,
-    databases: Arc<Mutex<BTreeMap<String, Arc<MemoryDb>>>>,
     clock: Clock,
     existing: bool,
 }
@@ -130,11 +98,8 @@ impl MemoryStorage {
     /// An empty backend reading time from `clock`.
     #[must_use]
     pub fn with_clock(clock: Clock) -> Self {
-        let root = Arc::new(MemoryDb::default());
         Self {
-            db: Arc::clone(&root),
-            root,
-            databases: Arc::default(),
+            db: Arc::new(MemoryDb::default()),
             clock,
             existing: false,
         }
@@ -226,6 +191,25 @@ impl StorageBackend for MemoryStorage {
         Ok(())
     }
 
+    /// Nothing to reclaim: memory is freed as records go.
+    async fn maintain(&self, _: MaintenanceBudget) -> Result<MaintenanceReport> {
+        Ok(MaintenanceReport::default())
+    }
+
+    /// Nothing to flush: there is no log.
+    async fn checkpoint(&self, _: Checkpoint) -> Result<()> {
+        Ok(())
+    }
+
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        self.db
+            .lock()?
+            .scopes(prefix)
+            .into_iter()
+            .map(Scope::new)
+            .collect()
+    }
+
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
         let mut storage = self.clone();
         storage.existing = true;
@@ -242,29 +226,6 @@ impl StorageBackend for MemoryStorage {
             scope,
             Some(&Arc::new(MemoryFence {
                 fence: fence.clone(),
-                db: Arc::clone(&self.db),
-            })),
-        ))
-    }
-
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        guard_database: &crate::GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        fence.validate()?;
-        guard_database.validate()?;
-        let db = match guard_database {
-            crate::GuardDatabase::Current => Arc::clone(&self.db),
-            crate::GuardDatabase::Default => Arc::clone(&self.root),
-            crate::GuardDatabase::Named(name) => self.named(name)?,
-        };
-        Ok(self.handles(
-            scope,
-            Some(&Arc::new(MemoryFence {
-                fence: fence.clone(),
-                db,
             })),
         ))
     }
@@ -277,63 +238,20 @@ impl StorageBackend for MemoryStorage {
         Ok(self.handles_generation(scope, None, generation))
     }
 
-    fn for_scope_fenced_in_database_generation(
+    fn for_scope_fenced_generation(
         &self,
         scope: &Scope,
         generation: crate::ScopeGeneration,
         fence: &Fence,
-        guard_database: &crate::GuardDatabase,
     ) -> Result<ScopedStorage> {
         fence.validate()?;
-        guard_database.validate()?;
-        let db = match guard_database {
-            crate::GuardDatabase::Current => Arc::clone(&self.db),
-            crate::GuardDatabase::Default => Arc::clone(&self.root),
-            crate::GuardDatabase::Named(name) => self.named(name)?,
-        };
         Ok(self.handles_generation(
             scope,
             Some(&Arc::new(MemoryFence {
                 fence: fence.clone(),
-                db,
             })),
             generation,
         ))
-    }
-
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        validate_database(name)?;
-        let db = self.named(name)?;
-        Ok(Arc::new(Self {
-            db,
-            root: Arc::clone(&self.root),
-            databases: Arc::clone(&self.databases),
-            clock: Arc::clone(&self.clock),
-            existing: self.existing,
-        }))
-    }
-}
-
-impl MemoryStorage {
-    fn named(&self, name: &str) -> Result<Arc<MemoryDb>> {
-        let mut databases = self
-            .databases
-            .lock()
-            .map_err(|_| StorageError::backend("memory database registry lock poisoned"))?;
-        if self.existing {
-            return databases
-                .get(name)
-                .cloned()
-                .ok_or_else(|| StorageError::not_found("named database does not exist"));
-        }
-        Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
-            || {
-                Arc::new(MemoryDb {
-                    state: Mutex::default(),
-                    gate: Arc::clone(&self.root.gate),
-                })
-            },
-        )))
     }
 }
 
@@ -352,3 +270,11 @@ mod generation_tests;
 #[cfg(test)]
 #[path = "blob_ttl_tests.rs"]
 mod blob_ttl_tests;
+
+#[cfg(test)]
+#[path = "meta_tests.rs"]
+mod meta_tests;
+
+#[cfg(test)]
+#[path = "seal_tests.rs"]
+mod seal_tests;

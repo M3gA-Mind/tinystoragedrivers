@@ -18,7 +18,7 @@ use serde_json::Value;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, DocumentStore, Filter, Page,
     Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
-    validate_collection, validate_doc, validate_id, value,
+    WriteOptions, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -30,24 +30,23 @@ use store::Docs;
 pub struct FileDocuments {
     db: Arc<Db>,
     scope: Scope,
-    /// Checked under the database lock before every write, when set.
+    /// Checked under the directory lock before every write, when set.
     fence: Option<Arc<Fencing>>,
     existing: bool,
 }
 
 /// Refuse a write unless `fence` (when there is one) holds. Called under the
-/// database lock, so the check and the write are one step for every handle
+/// directory lock, so the check and the write are one step for every handle
 /// in this process.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::Fenced`](tinystoragedrivers_core::ErrorKind::Fenced), or a
 /// failure reading the guard document.
-pub(crate) fn guard(_db: &Db, fence: Option<&Fencing>) -> Result<()> {
+pub(crate) fn guard(db: &Db, fence: Option<&Fencing>) -> Result<()> {
     let Some(fence) = fence else {
         return Ok(());
     };
-    let db = &fence.db;
     let fence = &fence.fence;
     let docs = Docs {
         db,
@@ -72,7 +71,7 @@ impl FileDocuments {
         }
     }
 
-    /// Run `work` under the database lock with this scope's document view.
+    /// Run `work` under the directory lock with this scope's document view.
     async fn with<T, F>(&self, work: F) -> Result<T>
     where
         T: Send + 'static,
@@ -98,18 +97,15 @@ impl FileDocuments {
     {
         let scope = self.scope.clone();
         self.db
-            .run_with_guard(
-                fence.as_ref().map(|fence| Arc::clone(&fence.db)),
-                move |db| {
-                    guard(db, fence.as_deref())?;
-                    let docs = Docs {
-                        db,
-                        scope: &scope,
-                        now: db.now(),
-                    };
-                    work(&docs)
-                },
-            )
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                let docs = Docs {
+                    db,
+                    scope: &scope,
+                    now: db.now(),
+                };
+                work(&docs)
+            })
             .await
     }
 }
@@ -181,6 +177,18 @@ impl DocumentStore for FileDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.put_with(collection, id, doc, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&doc)?;
@@ -189,7 +197,7 @@ impl DocumentStore for FileDocuments {
                 .await?;
         }
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.write(move |docs| docs.put(&collection, &id, doc, precondition))
+        self.write(move |docs| docs.put(&collection, &id, doc, precondition, options))
             .await
     }
 
@@ -219,7 +227,7 @@ impl DocumentStore for FileDocuments {
             let found = docs.matching(&collection, &query.filter, &query.sort)?;
             let start = position.as_ref().map_or(0, |cursor| {
                 found.partition_point(|item| {
-                    CursorPosition::for_document(&item.id, &item.doc, &query.sort)
+                    CursorPosition::for_record(&item.id, &item.doc, &item.meta, &query.sort)
                         .compare(cursor, &query.sort)
                         != std::cmp::Ordering::Greater
                 })
@@ -235,7 +243,7 @@ impl DocumentStore for FileDocuments {
                 Some(Cursor::keyset(
                     "file",
                     fingerprint,
-                    &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                    &CursorPosition::for_record(&last.id, &last.doc, &last.meta, &query.sort),
                 )?)
             } else {
                 None
@@ -302,16 +310,27 @@ impl DocumentStore for FileDocuments {
             };
             let mut doc = first.doc;
             value::merge_patch(&mut doc, &patch);
+            // A claim patches the body only: the schema and expiry carry over.
+            let options = WriteOptions {
+                schema: first.meta.schema,
+                expires_ms: first.meta.expires_ms,
+                created_ms: None,
+            };
             let version = docs.put(
                 &collection,
                 &first.id,
                 doc.clone(),
                 Precondition::Version(first.version),
+                options,
             )?;
+            let meta = docs
+                .get(&collection, &first.id)?
+                .map_or(first.meta, |found| found.meta);
             Ok(Some(Versioned {
                 id: first.id,
                 version,
                 doc,
+                meta,
             }))
         })
         .await

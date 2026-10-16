@@ -42,7 +42,7 @@ fn handles_render_their_scope_and_file() {
     let db = Db::open(&dir.path().join("d.db")).unwrap();
     let docs = SqliteDocuments::new(
         db,
-        Arc::new(Tables::new("")),
+        Arc::new(Tables::new()),
         Scope::local(),
         Arc::new(|| 0),
         None,
@@ -57,7 +57,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("snapshot.db");
     let db = Db::open(&path).unwrap();
-    let tables = Arc::new(Tables::new(""));
+    let tables = Arc::new(Tables::new());
     db.run_now(|conn| tables.ensure(conn)).unwrap();
     let scope = Scope::new("snapshot_reader").unwrap();
     let docs = SqliteDocuments::new(db, tables, scope, Arc::new(|| 0), None, false);
@@ -74,7 +74,7 @@ async fn scope_generation_and_payload_share_one_read_snapshot() {
         // handle's generation check, before its payload SELECT.
         let writer = Connection::open(path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-        writer.execute(&format!("UPDATE {} SET doc=?1 WHERE scope=?2", crate::sql::ident(&ctx.tables.docs)),
+        writer.execute(&format!("UPDATE {} SET body=?1 WHERE scope=?2", crate::sql::ident(&ctx.tables.docs)),
             rusqlite::params![r#"{"source":"new"}"#, ctx.scope]).unwrap();
         writer.execute(&format!("INSERT INTO {} (scope,generation,operation) VALUES (?1,1,'reset_snapshot')", crate::sql::ident(&ctx.tables.admissions)),
             [ctx.scope]).unwrap();

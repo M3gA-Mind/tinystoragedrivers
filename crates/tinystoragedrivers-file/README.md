@@ -16,11 +16,9 @@ the data stays human-inspectable and easy to back up or diff. Selected with the
 │   ├── streams/<name>.meta.json            {"name", "base"}
 │   ├── blobs/<key>                         the raw bytes
 │   └── blobs/<key>.meta.json               {"key", "content_type"}
-└── databases/<name>/                       the same layout per named database
 ```
 
-Scopes sit under `scopes/` and named databases under `databases/`, so neither
-can shadow the other or `_meta`.
+Scopes sit under `scopes/`, so none can shadow `_meta`.
 
 ## Names on disk
 
@@ -63,25 +61,21 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
 | `Ttl` | yes | Expired documents stay on disk and read as absent, like the memory driver. |
 | `FullText` | yes | Same tokenizer and scoring as the memory driver. |
 | `Transactions` | no | A batch over several files cannot be crash-atomic with renames, so `atomic_batch` returns `Unsupported`. |
-| `Fencing` | yes | The current-database guard and target mutation share their native directory lock, within one process only. |
-| `CrossDatabaseFencing` | yes | Explicit Default/Named guard and target directories are locked together, within one process only. |
+| `Fencing` | yes | The guard and target mutation share their native directory lock, within one process only. |
+| `ScopeEnumeration` | yes | `scopes(prefix)` walks `scopes/`, decodes each directory name (rejoining the `+` continuation chunks of long names) and lists those with at least one file under `docs/`, `streams/` or `blobs/`. Undecodable stray directories are skipped. Cost is proportional to the number of scope directories. |
+| `Maintenance` | no | `maintain` and `checkpoint` return `Unsupported`: there is nothing to reclaim or flush. |
 
 ## Concurrency
 
-All operations on one database are serialized by a mutex shared by every handle
+All operations on one directory are serialized by a mutex shared by every handle
 in the process that opened the same (canonicalized) directory, which makes
 `claim` and compare-and-swap atomic within the process. File IO runs on tokio's
 blocking pool when a runtime is present, and inline otherwise. Several
 processes writing the same directory are **not** coordinated.
 
-`for_scope_fenced` checks a guard in the current database.
-`for_scope_fenced_in_database` accepts `GuardDatabase::Default` or
-`GuardDatabase::Named` to select a guard in another database owned by the same
-backend. The driver holds both canonical directory locks in sorted path order
-through guard validation and the document, stream or blob mutation. Matching
-canonical paths share one lock; ordinary operations on unrelated roots retain
-independent locks. This fencing guarantee is process-local and does not extend
-to other processes writing either directory.
+`for_scope_fenced` holds the directory lock through guard validation and the
+document, stream or blob mutation. This fencing guarantee is process-local and
+does not extend to other processes writing the directory.
 
 
 ## Limits

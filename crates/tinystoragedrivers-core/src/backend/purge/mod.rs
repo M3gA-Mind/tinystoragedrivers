@@ -1,30 +1,7 @@
 //! Scope reset addresses, admission generations and optional purge port.
-use crate::{Capability, Result, Scope, StorageBackend, StorageError, async_trait};
+use crate::{Capability, Result, Scope, StorageError, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
-
-/// Root-relative owner namespace. Hosts must enumerate every owned database.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
-pub enum DatabaseAddress {
-    /// The root backend passed to the host.
-    Default,
-    /// A root-relative named database.
-    Named(String),
-}
-impl DatabaseAddress {
-    /// Resolve against the root backend, never an arbitrary named handle.
-    ///
-    /// # Errors
-    /// Invalid database name or backend failure.
-    pub fn resolve(&self, root: &Arc<dyn StorageBackend>) -> Result<Arc<dyn StorageBackend>> {
-        match self {
-            Self::Default => Ok(Arc::clone(root)),
-            Self::Named(name) => root.database(name),
-        }
-    }
-}
 
 /// Native data-access admission generation, issued by purge rather than model input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

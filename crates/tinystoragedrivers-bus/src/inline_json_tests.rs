@@ -22,6 +22,7 @@ fn nested_stream_shaped_business_data_roundtrips_as_inline_text() {
         id: "index".into(),
         version: Version(1),
         doc: document.clone(),
+        meta: None,
     };
     let wire = serde_json::to_value(result).unwrap();
     assert_eq!(

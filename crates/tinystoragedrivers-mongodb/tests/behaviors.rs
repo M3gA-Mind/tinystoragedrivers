@@ -388,10 +388,6 @@ async fn live_backend_reports_its_driver_and_capabilities() {
     assert!(format!("{:?}", scoped.documents()).contains("shown"));
     assert!(format!("{:?}", scoped.streams()).contains("MongoStreams"));
     assert!(format!("{:?}", scoped.blobs()).contains("MongoBlobs"));
-    assert_eq!(
-        backend.database("Bad").unwrap_err().kind(),
-        ErrorKind::InvalidInput
-    );
 }
 
 #[tokio::test]

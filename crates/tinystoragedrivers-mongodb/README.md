@@ -13,15 +13,13 @@ with rustls (never OpenSSL), matching the copy OpenHuman already links.
 
 | Port | MongoDB |
 | --- | --- |
-| Document collection `c` | collection `<prefix>c`, one document `{_id: {s, k}, _scope, _key, _v, d}` per port document; the body is under `d` |
-| Declarations | `<prefix>_tsd_meta`, `{_id: c, spec: <json>, rev}`, collection-wide |
-| Removed versions | `<prefix>_tsd_tombstones`, `{_id: {c, s, k}, _scope, _v}` |
-| Streams | `<prefix>_tsd_streams`, one segment per append: `{_scope, s, o, n, e, t, vs}` |
-| Blobs | GridFS bucket `<prefix>_tsd_blobs`, `metadata: {_scope, content_type}` |
+| Document collection `c` | collection `c`, one document `{_id: {s, k}, _scope, _key, _v, d}` per port document; the body is under `d` |
+| Declarations | `_tsd_meta`, `{_id: c, spec: <json>, rev}`, collection-wide |
+| Removed versions | `_tsd_tombstones`, `{_id: {c, s, k}, _scope, _v}` |
+| Streams | `_tsd_streams`, one segment per append: `{_scope, s, o, n, e, t, vs}` |
+| Blobs | GridFS bucket `_tsd_blobs`, `metadata: {_scope, content_type}` |
 
-`<prefix>` is empty for the root database and `<name>:` for
-`database(name)`. Port collection names cannot contain `:`, so a root
-collection never collides with a named database's.
+Collections carry no prefix: they sit directly in the connected database.
 
 ## Tenant isolation
 
@@ -75,7 +73,7 @@ id that was itself resolved under the scope.
 
 - **Validated batches** (`atomic_batch_checked`) validate exact live document
   versions or absence before applying writes in the same transaction. Reserved
-  metadata serializes mutations per named database and scope, including writes
+  metadata serializes mutations per scope, including writes
   through independent handles. Dependencies retain their user JSON and logical
   versions. Collection-wide schema changes and expiry burial participate in
   this protocol; the driver does not use server TTL deletion indexes.
@@ -124,6 +122,15 @@ documents chosen to trip MongoDB's semantics, and focused behavior tests.
 Without it they print a note and pass; the pure translation, naming and
 error-mapping logic is unit-tested without a server.
 
+## Maintenance and scope listing
+
+`Capability::Maintenance` and `Capability::ScopeEnumeration` are not provided:
+`maintain`, `checkpoint` and `scopes` return `Unsupported`. MongoDB reclaims
+space itself, so a caller treats `maintain` as nothing to do. Listing scopes is
+not a single query here: documents live in one collection per name, so it would
+take a distinct `_scope` over every document collection plus the stream and
+blob collections, which is left for the tenant-purge task that needs it.
+
 ## Document invalidation
 
 Replica sets and sharded deployments provide native `Capability::Watch`.
@@ -147,14 +154,15 @@ subscription drops the owned driver cursor, including a pending getMore.
 ### Mongo live-test database permissions
 
 Run the complete live suite on a disposable MongoDB server. Transaction race
-fixtures use isolated logical collection prefixes inside the database named in
-`TSD_MONGO_URL` (or `tsd_test` when the URL has no database). This prevents
-parallel schema changes from invalidating unrelated transactions without
-requiring access to other databases.
+fixtures each use their own database on the server named in `TSD_MONGO_URL`
+(`tsd_fx_*`, `tsd_<label>_<pid>` and `tsd_schema_default_*`; the URL's own
+database, or `tsd_test` when it has none, backs the rest). This prevents
+parallel schema changes from invalidating unrelated transactions.
 
-The test account must be allowed to create collections and indexes, and read,
-write and delete documents in the configured database. On an authenticated
-disposable server, `readWrite` on that database is sufficient. The URL's
-`authSource` continues to select the authentication database independently.
+The test account must be allowed to create databases, collections and indexes,
+and read, write and delete documents in them. On an authenticated disposable
+server, `readWrite` on any database (or on those name patterns) is sufficient.
+The URL's `authSource` continues to select the authentication database
+independently.
 
 Existing-schema handles also refuse scope purge before any mutation: native reset may initialize its private receipt and manifest collections. Use trusted bootstrap authority for reset, with actual writer quiescence. Schema validation reads remain bound to the captured scope generation and refuse after that generation retires.

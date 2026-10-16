@@ -4,6 +4,10 @@
 //! row per stream holds the first retained offset (`base`) and the next offset
 //! to allocate (`len`). Allocating and inserting happen in one immediate
 //! transaction, so offsets are dense even with concurrent appenders.
+//!
+//! A sealed stream (see [`StreamStore::seal`]) keeps its entries as one
+//! compressed blob in the blob table instead of rows, and its head row's
+//! `sealed` flag says to read the blob. [`seal`] holds the protocol.
 
 use std::fmt;
 use std::sync::Arc;
@@ -11,7 +15,8 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, StorageError, StreamEntry, StreamStore, async_trait, validate_stream,
+    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore, async_trait,
+    validate_stream,
 };
 
 use crate::connection::Db;
@@ -28,6 +33,8 @@ pub struct SqliteStreams {
     generation: tinystoragedrivers_core::ScopeGeneration,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
+    /// Stamps appends and seals.
+    clock: tinystoragedrivers_core::Clock,
 }
 
 impl fmt::Debug for SqliteStreams {
@@ -39,24 +46,65 @@ impl fmt::Debug for SqliteStreams {
     }
 }
 
-/// `(base, len)` of a stream, if it exists.
-fn meta(
-    conn: &Connection,
-    tables: &Tables,
-    scope: &str,
-    stream: &str,
-) -> Result<Option<(u64, u64)>> {
+mod seal;
+
+/// A stream's head row.
+struct Head {
+    /// The first retained offset.
+    base: u64,
+    /// The next offset to allocate.
+    len: u64,
+    /// Whether the entries are in the sealed blob rather than in rows.
+    sealed: bool,
+    /// When the stream was sealed, if known.
+    sealed_ms: Option<i64>,
+    /// When a record was last appended, if known.
+    last_append_ms: Option<i64>,
+}
+
+/// The head of a stream, if it exists.
+fn head(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result<Option<Head>> {
     let sql = format!(
-        "SELECT base, len FROM {} WHERE scope = ?1 AND stream = ?2",
-        ident(&tables.stream_meta)
+        "SELECT base, len, sealed, sealed_ms, last_append_ms FROM {}
+         WHERE scope = ?1 AND name = ?2",
+        ident(&tables.stream_heads)
     );
-    let row: Option<(i64, i64)> = conn
-        .query_row(&sql, params![scope, stream], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+    conn.query_row(&sql, params![scope, stream], |row| {
+        Ok(Head {
+            base: to_offset(row.get(0)?),
+            len: to_offset(row.get(1)?),
+            sealed: row.get::<_, i64>(2)? != 0,
+            sealed_ms: row.get(3)?,
+            last_append_ms: row.get(4)?,
         })
-        .optional()
-        .map_err(during("read stream"))?;
-    Ok(row.map(|(base, len)| (to_offset(base), to_offset(len))))
+    })
+    .optional()
+    .map_err(during("read stream"))
+}
+
+/// Remove a stream's entries, head and sealed blob inside the caller's
+/// transaction; whether it existed.
+fn delete_in(conn: &Connection, tables: &Tables, scope: &str, stream: &str) -> Result<bool> {
+    conn.execute(
+        &format!(
+            "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
+            ident(&tables.streams)
+        ),
+        params![scope, stream],
+    )
+    .map_err(during("delete stream"))?;
+    let removed = conn
+        .execute(
+            &format!(
+                "DELETE FROM {} WHERE scope = ?1 AND name = ?2",
+                ident(&tables.stream_heads)
+            ),
+            params![scope, stream],
+        )
+        .map_err(during("delete stream"))?;
+    // Even when the stream is gone, clear a blob a crashed seal left.
+    seal::delete_blob(conn, tables, scope, stream)?;
+    Ok(removed > 0)
 }
 
 fn to_offset(stored: i64) -> u64 {
@@ -73,6 +121,7 @@ impl SqliteStreams {
         tables: Arc<Tables>,
         scope: Scope,
         fencing: Option<Arc<Fencing>>,
+        clock: tinystoragedrivers_core::Clock,
     ) -> Self {
         Self {
             db,
@@ -80,6 +129,7 @@ impl SqliteStreams {
             scope,
             generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fencing,
+            clock,
         }
     }
 
@@ -123,6 +173,11 @@ impl SqliteStreams {
 }
 
 impl SqliteStreams {
+    /// The injected clock's reading, as the signed value SQLite stores.
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.clock)()).unwrap_or(i64::MAX)
+    }
+
     async fn append_inner(
         &self,
         stream: &str,
@@ -131,8 +186,15 @@ impl SqliteStreams {
     ) -> Result<u64> {
         validate_stream(stream)?;
         let stream = stream.to_owned();
+        let now_ms = self.now_ms();
         self.with(true, move |conn, tables, scope| {
-            let (base, first) = meta(conn, tables, scope, &stream)?.unwrap_or((0, 0));
+            let (base, first) = match head(conn, tables, scope, &stream)? {
+                Some(head) if head.sealed => {
+                    return Err(StorageError::conflict("stream is sealed"));
+                }
+                Some(head) => (head.base, head.len),
+                None => (0, 0),
+            };
             if expected.is_some_and(|offset| offset != first) {
                 return Err(StorageError::conflict("stream next offset changed"));
             }
@@ -143,7 +205,7 @@ impl SqliteStreams {
                 return Ok(first);
             }
             let insert = format!(
-                "INSERT INTO {} (scope, stream, seq, value) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO {} (scope, name, seq, body) VALUES (?1, ?2, ?3, ?4)",
                 ident(&tables.streams)
             );
             let mut next = first;
@@ -161,13 +223,14 @@ impl SqliteStreams {
                 next += 1;
             }
             let upsert = format!(
-                "INSERT INTO {} (scope, stream, base, len) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (scope, stream) DO UPDATE SET len = excluded.len",
-                ident(&tables.stream_meta)
+                "INSERT INTO {} (scope, name, base, len, last_append_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (scope, name) DO UPDATE SET len = excluded.len,
+                     last_append_ms = excluded.last_append_ms",
+                ident(&tables.stream_heads)
             );
             conn.execute(
                 &upsert,
-                params![scope, stream, to_stored(base)?, to_stored(next)?],
+                params![scope, stream, to_stored(base)?, to_stored(next)?, now_ms],
             )
             .map_err(during("append"))?;
             Ok(first)
@@ -200,8 +263,11 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(false, move |conn, tables, scope| {
+            if head(conn, tables, scope, &stream)?.is_some_and(|head| head.sealed) {
+                return Ok(seal::read_sealed(conn, tables, scope, &stream)?.window(from, limit));
+            }
             let sql = format!(
-                "SELECT seq, value FROM {} WHERE scope = ?1 AND stream = ?2 AND seq >= ?3
+                "SELECT seq, body FROM {} WHERE scope = ?1 AND name = ?2 AND seq >= ?3
                  ORDER BY seq LIMIT ?4",
                 ident(&tables.streams)
             );
@@ -231,7 +297,7 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(false, move |conn, tables, scope| {
-            Ok(meta(conn, tables, scope, &stream)?.map_or(0, |(_, len)| len))
+            Ok(head(conn, tables, scope, &stream)?.map_or(0, |head| head.len))
         })
         .await
     }
@@ -240,19 +306,25 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(true, move |conn, tables, scope| {
-            let Some((base, len)) = meta(conn, tables, scope, &stream)? else {
+            let Some(Head {
+                base, len, sealed, ..
+            }) = head(conn, tables, scope, &stream)?
+            else {
                 return Ok(0);
             };
+            if sealed {
+                return Err(StorageError::conflict("stream is sealed"));
+            }
             let cut = offset.clamp(base, len);
             let delete = format!(
-                "DELETE FROM {} WHERE scope = ?1 AND stream = ?2 AND seq < ?3",
+                "DELETE FROM {} WHERE scope = ?1 AND name = ?2 AND seq < ?3",
                 ident(&tables.streams)
             );
             conn.execute(&delete, params![scope, stream, to_stored(cut)?])
                 .map_err(during("truncate stream"))?;
             let update = format!(
-                "UPDATE {} SET base = ?3 WHERE scope = ?1 AND stream = ?2",
-                ident(&tables.stream_meta)
+                "UPDATE {} SET base = ?3 WHERE scope = ?1 AND name = ?2",
+                ident(&tables.stream_heads)
             );
             conn.execute(&update, params![scope, stream, to_stored(cut)?])
                 .map_err(during("truncate stream"))?;
@@ -265,24 +337,38 @@ impl StreamStore for SqliteStreams {
         validate_stream(stream)?;
         let stream = stream.to_owned();
         self.with(true, move |conn, tables, scope| {
-            conn.execute(
-                &format!(
-                    "DELETE FROM {} WHERE scope = ?1 AND stream = ?2",
-                    ident(&tables.streams)
-                ),
-                params![scope, stream],
-            )
-            .map_err(during("delete stream"))?;
-            let removed = conn
-                .execute(
-                    &format!(
-                        "DELETE FROM {} WHERE scope = ?1 AND stream = ?2",
-                        ident(&tables.stream_meta)
-                    ),
-                    params![scope, stream],
-                )
-                .map_err(during("delete stream"))?;
-            Ok(removed > 0)
+            delete_in(conn, tables, scope, &stream)
+        })
+        .await
+    }
+
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        validate_stream(stream)?;
+        let stream = stream.to_owned();
+        // The check and the delete share the write transaction, so the stream
+        // cannot be replaced between them.
+        self.with(true, move |conn, tables, scope| {
+            let sealed = head(conn, tables, scope, &stream)?
+                .is_some_and(|head| head.sealed_ms == Some(sealed_ms));
+            if !sealed {
+                return Ok(false);
+            }
+            delete_in(conn, tables, scope, &stream)
+        })
+        .await
+    }
+
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        self.seal_stream(stream).await
+    }
+
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        validate_stream(stream)?;
+        let stream = stream.to_owned();
+        self.with(false, move |conn, tables, scope| {
+            Ok(head(conn, tables, scope, &stream)?.map(|head| {
+                StreamInfo::new(head.base, head.len, head.sealed_ms, head.last_append_ms)
+            }))
         })
         .await
     }
@@ -291,8 +377,8 @@ impl StreamStore for SqliteStreams {
         let prefix = prefix.to_owned();
         self.with(false, move |conn, tables, scope| {
             let sql = format!(
-                "SELECT stream FROM {} WHERE scope = ?1 ORDER BY stream",
-                ident(&tables.stream_meta)
+                "SELECT name FROM {} WHERE scope = ?1 ORDER BY name",
+                ident(&tables.stream_heads)
             );
             let mut statement = conn.prepare(&sql).map_err(during("list streams"))?;
             let names: Vec<String> = statement

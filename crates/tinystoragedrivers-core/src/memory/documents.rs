@@ -7,15 +7,16 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::MemoryFence;
-use super::state::DbState;
+use super::state::{DbState, Write};
 use super::{Clock, MemoryDb};
 use crate::capabilities::{Capabilities, Capability};
 use crate::document::{
     CollectionSpec, Cursor, CursorPosition, DocumentStore, Page, Precondition, Query, ReadCheck,
-    SearchHit, Version, Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
+    SearchHit, Version, Versioned, WriteOp, WriteOptions, WriteResult, validate_collection,
+    validate_doc,
 };
 use crate::error::{Result, StorageError};
-use crate::filter::{Filter, Sort, sort_documents};
+use crate::filter::{Filter, Sort, sort_documents_with_meta};
 use crate::scope::Scope;
 use crate::value;
 
@@ -80,7 +81,7 @@ impl MemoryDocuments {
     /// Refuse a write unless this handle's fence (if any) holds.
     fn guard(&self, state: &DbState, now_ms: u64) -> Result<()> {
         state.check_generation(self.scope.as_str(), self.generation)?;
-        self.db.guard(state, self.fence.as_deref(), now_ms)
+        MemoryDb::guard(state, self.fence.as_deref(), now_ms)
     }
 
     fn matching(
@@ -95,14 +96,17 @@ impl MemoryDocuments {
         let mut found: Vec<Versioned<Value>> = state
             .live(self.scope.as_str(), collection, self.now())
             .into_iter()
-            .filter(|(id, stored)| filter.matches(id, &stored.doc))
+            .filter(|(id, stored)| filter.matches_with(id, &stored.doc, &stored.meta))
             .map(|(id, stored)| Versioned {
                 id: id.clone(),
                 version: stored.version,
                 doc: stored.doc.clone(),
+                meta: stored.meta,
             })
             .collect();
-        sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
+        sort_documents_with_meta(&mut found, sort, |item| {
+            (item.id.as_str(), &item.doc, &item.meta)
+        });
         Ok(found)
     }
 }
@@ -136,11 +140,12 @@ impl DocumentStore for MemoryDocuments {
             .with(Capability::ValidatedBatch)
             .with(Capability::Ttl)
             .with(Capability::Fencing)
-            .with(Capability::CrossDatabaseFencing)
             .with(Capability::ConditionalStreamAppend)
+            .with(Capability::StreamSeal)
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
+            .with(Capability::RecordMetadata)
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
@@ -194,6 +199,18 @@ impl DocumentStore for MemoryDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
+        self.put_with(collection, id, doc, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
         validate_collection(collection)?;
         crate::document::validate_id(id)?;
         validate_doc(&doc)?;
@@ -203,7 +220,12 @@ impl DocumentStore for MemoryDocuments {
         let mut state = self.db.lock()?;
         let now = self.now();
         self.guard(&state, now)?;
-        state.put(self.scope.as_str(), collection, id, doc, precondition, now)
+        let write = Write {
+            doc,
+            precondition,
+            options,
+        };
+        state.put(self.scope.as_str(), collection, id, write, now)
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
@@ -228,7 +250,7 @@ impl DocumentStore for MemoryDocuments {
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
         let start = position.as_ref().map_or(0, |cursor| {
             found.partition_point(|item| {
-                CursorPosition::for_document(&item.id, &item.doc, &query.sort)
+                CursorPosition::for_record(&item.id, &item.doc, &item.meta, &query.sort)
                     .compare(cursor, &query.sort)
                     != std::cmp::Ordering::Greater
             })
@@ -244,7 +266,7 @@ impl DocumentStore for MemoryDocuments {
             Some(Cursor::keyset(
                 "mem",
                 fingerprint(collection, &self.scope, query),
-                &CursorPosition::for_document(&last.id, &last.doc, &query.sort),
+                &CursorPosition::for_record(&last.id, &last.doc, &last.meta, &query.sort),
             )?)
         } else {
             None
@@ -303,18 +325,25 @@ impl DocumentStore for MemoryDocuments {
         };
         let mut doc = first.doc;
         value::merge_patch(&mut doc, patch);
-        let version = state.put(
-            self.scope.as_str(),
-            collection,
-            &first.id,
-            doc.clone(),
-            Precondition::Version(first.version),
-            now,
-        )?;
+        // A claim patches the body only: the schema and expiry carry over.
+        let write = Write {
+            doc: doc.clone(),
+            precondition: Precondition::Version(first.version),
+            options: WriteOptions {
+                schema: first.meta.schema,
+                expires_ms: first.meta.expires_ms,
+                created_ms: None,
+            },
+        };
+        let version = state.put(self.scope.as_str(), collection, &first.id, write, now)?;
+        let meta = state
+            .get(self.scope.as_str(), collection, &first.id, now)
+            .map_or(first.meta, |found| found.meta);
         Ok(Some(Versioned {
             id: first.id,
             version,
             doc,
+            meta,
         }))
     }
 
@@ -384,9 +413,16 @@ impl DocumentStore for MemoryDocuments {
                     id,
                     doc,
                     precondition,
-                } => WriteResult::Put {
-                    version: draft.put(scope, &collection, &id, doc, precondition, now)?,
-                },
+                } => {
+                    let write = Write {
+                        doc,
+                        precondition,
+                        options: WriteOptions::default(),
+                    };
+                    WriteResult::Put {
+                        version: draft.put(scope, &collection, &id, write, now)?,
+                    }
+                }
                 WriteOp::Delete {
                     collection,
                     id,

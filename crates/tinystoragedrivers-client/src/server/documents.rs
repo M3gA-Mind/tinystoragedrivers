@@ -22,12 +22,7 @@ impl StorageServer {
                 let found = native(docs.get(&r.collection, &r.id).await)?;
                 encode(&found.map(versioned_to_wire))
             }
-            "Put" => {
-                let r: wire::PutDocumentRequest = decode(request)?;
-                let precondition: Precondition = into_native(&r.precondition)?;
-                let version = native(docs.put(&r.collection, &r.id, r.doc, precondition).await)?;
-                encode(&wire::Version(version.0))
-            }
+            "Put" => self.put(decode(request)?).await,
             "Delete" => {
                 let r: wire::DeleteDocumentRequest = decode(request)?;
                 let precondition: Precondition = into_native(&r.precondition)?;
@@ -110,6 +105,30 @@ impl StorageServer {
             }
             _ => Err(invalid()),
         }
+    }
+
+    /// `Put`: default options are exactly `put`, so a plain write needs no
+    /// `record_metadata`. `created_ms` has no wire field.
+    async fn put(&self, request: wire::PutDocumentRequest) -> Reply {
+        let precondition: Precondition = into_native(&request.precondition)?;
+        let options = tinystoragedrivers_core::WriteOptions {
+            schema: request.schema,
+            expires_ms: request.expires_ms,
+            created_ms: None,
+        };
+        let version = native(
+            self.storage
+                .documents()
+                .put_with(
+                    &request.collection,
+                    &request.id,
+                    request.doc,
+                    precondition,
+                    options,
+                )
+                .await,
+        )?;
+        encode(&wire::Version(version.0))
     }
 
     /// A page that exceeds the item or byte cap is re-read with a smaller

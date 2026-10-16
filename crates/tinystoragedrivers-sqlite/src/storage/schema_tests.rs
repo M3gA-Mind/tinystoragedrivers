@@ -5,11 +5,11 @@ use serde_json::json;
 use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition};
 
 #[tokio::test]
-async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
+async fn existing_schema_keeps_declarations_and_scoped_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
     storage.prepare_schema().await.unwrap();
-    let named = storage.database("sessions").unwrap();
+    let named = &storage;
     let scope = Scope::new("alice").unwrap();
     let other = Scope::new("bob").unwrap();
     let spec = CollectionSpec::new("notes").ttl("until");
@@ -27,11 +27,7 @@ async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
         .put("notes", "other", json!({}), Precondition::None)
         .await
         .unwrap();
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
     let docs = restricted.for_scope(&scope).unwrap().documents().clone();
     docs.validate_collection_spec(&spec).await.unwrap();
     assert!(docs.ensure_collection(&spec).await.is_err());
@@ -50,19 +46,6 @@ async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn existing_schema_does_not_create_missing_named_database() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = SqliteStorage::open(dir.path()).unwrap();
-    let before = std::fs::read_dir(dir.path()).unwrap().count();
-    let restricted = storage.existing_schema().unwrap();
-    assert_eq!(
-        restricted.database("missing").unwrap_err().kind(),
-        ErrorKind::NotFound
-    );
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
 }
 
 #[tokio::test]
@@ -135,8 +118,6 @@ async fn existing_schema_preserves_cross_database_guard_for_every_port() {
         .await
         .unwrap();
     storage
-        .database("sessions")
-        .unwrap()
         .for_scope(&scope)
         .unwrap()
         .documents()
@@ -149,18 +130,8 @@ async fn existing_schema_preserves_cross_database_guard_for_every_port() {
         "alice",
         tinystoragedrivers_core::Filter::eq("epoch", 1),
     );
-    let backend = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
-    let actor = backend
-        .for_scope_fenced_in_database(
-            &scope,
-            &fence,
-            &tinystoragedrivers_core::GuardDatabase::Default,
-        )
-        .unwrap();
+    let backend = storage.existing_schema().unwrap();
+    let actor = backend.for_scope_fenced(&scope, &fence).unwrap();
     actor
         .documents()
         .put("notes", "n", json!({}), Precondition::None)
@@ -200,32 +171,13 @@ async fn existing_schema_preserves_cross_database_guard_for_every_port() {
 }
 
 #[tokio::test]
-async fn existing_schema_does_not_repair_incompatible_tables_or_create_guard_files() {
+async fn existing_schema_does_not_repair_incompatible_tables() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
-    let restricted = storage.existing_schema().unwrap();
-    let fence = tinystoragedrivers_core::Fence::new(
-        Scope::local(),
-        "leases",
-        "l",
-        tinystoragedrivers_core::Filter::All,
-    );
-    assert_eq!(
-        restricted
-            .for_scope_fenced_in_database(
-                &Scope::local(),
-                &fence,
-                &GuardDatabase::Named("missing".into())
-            )
-            .unwrap_err()
-            .kind(),
-        ErrorKind::NotFound
-    );
-    assert!(!dir.path().join("missing.db").exists());
     storage
         .db
         .run_now(|conn| {
-            conn.execute_batch("DROP TABLE _tsd_blobs; CREATE TABLE _tsd_blobs (wrong TEXT)")
+            conn.execute_batch("DROP TABLE blobs; CREATE TABLE blobs (wrong TEXT)")
                 .map_err(crate::error::during("replace test schema"))
         })
         .unwrap();
@@ -238,23 +190,23 @@ async fn existing_schema_does_not_repair_incompatible_tables_or_create_guard_fil
         .run_now(|conn| {
             let sql: String = conn
                 .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE name = '_tsd_blobs'",
+                    "SELECT sql FROM sqlite_schema WHERE name = 'blobs'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(sql, "CREATE TABLE _tsd_blobs (wrong TEXT)");
+            assert_eq!(sql, "CREATE TABLE blobs (wrong TEXT)");
             Ok(())
         })
         .unwrap();
 }
 
 #[tokio::test]
-async fn existing_schema_reopens_named_files_without_initializing_tables() {
+async fn existing_schema_reopens_files_without_initializing_tables() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();
     {
-        let named = storage.database("sessions").unwrap();
+        let named = &storage;
         named
             .for_scope(&Scope::local())
             .unwrap()
@@ -263,11 +215,7 @@ async fn existing_schema_reopens_named_files_without_initializing_tables() {
             .await
             .unwrap();
     }
-    let actor = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let actor = storage.existing_schema().unwrap();
     let docs = actor
         .for_scope(&Scope::local())
         .unwrap()

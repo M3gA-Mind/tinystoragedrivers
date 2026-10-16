@@ -79,6 +79,25 @@ impl StorageServer {
                 let r: wire::StreamRequest = decode(request)?;
                 encode(&native(streams.delete_stream(&r.stream).await)?)
             }
+            "Seal" => {
+                let r: wire::StreamRequest = decode(request)?;
+                let sealed = native(streams.seal(&r.stream).await)?;
+                encode(&wire::SealResponse {
+                    base: sealed.base,
+                    len: sealed.len,
+                    blob_bytes: sealed.blob_bytes,
+                })
+            }
+            "Info" => {
+                let r: wire::StreamRequest = decode(request)?;
+                let info = native(streams.info(&r.stream).await)?;
+                encode(&info.map(|info| wire::StreamInfoResponse {
+                    base: info.base,
+                    len: info.len,
+                    sealed_ms: info.sealed_ms,
+                    last_append_ms: info.last_append_ms,
+                }))
+            }
             "Streams" => {
                 let r: wire::ListStreamsRequest = decode(request)?;
                 bounded_list(&native(streams.streams(&r.prefix).await)?)

@@ -19,4 +19,4 @@ Prefer tasks that can be implemented and reviewed independently. Include short
 code snippets when they remove ambiguity, but do not paste entire future files
 into the plan.
 
-See [`storage-rollout.md`](storage-rollout.md).
+See [`storage-rollout.md`](storage-rollout.md) and [`schema-v2.md`](schema-v2.md).

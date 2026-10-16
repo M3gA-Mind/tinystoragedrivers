@@ -1,4 +1,4 @@
-//! Opening, databases, and the per-database lock.
+//! Opening and the per-directory lock.
 
 use super::*;
 use tinystoragedrivers_core::ErrorKind;
@@ -12,21 +12,6 @@ fn opening_a_file_as_the_root_fails() {
         FileStorage::open(&file).unwrap_err().kind(),
         ErrorKind::Backend
     );
-}
-
-#[test]
-fn rejects_invalid_database_names() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = FileStorage::open(dir.path()).unwrap();
-    assert_eq!(
-        storage.database("Bad Name").unwrap_err().kind(),
-        ErrorKind::InvalidInput
-    );
-    let named = storage.database("one").unwrap();
-    assert_eq!(named.driver(), "file");
-    assert_eq!(named.capabilities(), CAPABILITIES);
-    let nested = named.database("two").unwrap();
-    assert!(format!("{nested:?}").contains("databases"));
 }
 
 #[test]
@@ -64,35 +49,8 @@ async fn a_panicking_task_is_a_backend_error() {
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
 
-#[test]
-fn windows_device_names_become_encoded_database_directories() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = FileStorage::open(dir.path()).unwrap();
-    storage.database("con").unwrap();
-    assert!(storage.dir().join("databases/%63on").is_dir());
-    assert!(!storage.dir().join("databases/con").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn a_symlinked_database_directory_shares_the_targets_lock() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = FileStorage::open(dir.path()).unwrap();
-    let real = dir.path().join("real");
-    std::fs::create_dir(&real).unwrap();
-    std::fs::create_dir(dir.path().join("databases")).unwrap();
-    std::os::unix::fs::symlink(&real, dir.path().join("databases/linked")).unwrap();
-    let linked = storage.database("linked").unwrap();
-    let direct = FileStorage::open(&real).unwrap();
-    assert!(format!("{linked:?}").contains(real.canonicalize().unwrap().to_str().unwrap()));
-    assert!(Arc::ptr_eq(
-        &lock_for(&real.canonicalize().unwrap()),
-        &direct.db.lock
-    ));
-}
-
 #[tokio::test]
-async fn reopened_named_target_observes_default_guard_takeover() {
+async fn reopened_target_observes_guard_takeover() {
     let dir = tempfile::tempdir().unwrap();
     let root = FileStorage::open(dir.path()).unwrap();
     let scope = Scope::new("alice").unwrap();
@@ -108,14 +66,9 @@ async fn reopened_named_target_observes_default_guard_takeover() {
         )
         .await
         .unwrap();
-    let target = FileStorage::open(dir.path())
-        .unwrap()
-        .database("target")
-        .unwrap();
+    let target = FileStorage::open(dir.path()).unwrap();
     let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
-    let held = target
-        .for_scope_fenced_in_database(&scope, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let held = target.for_scope_fenced(&scope, &fence).unwrap();
     held.documents()
         .put(
             "docs",
@@ -177,7 +130,7 @@ async fn reopened_named_target_observes_default_guard_takeover() {
 }
 
 #[test]
-fn unrelated_database_roots_have_independent_native_locks() {
+fn unrelated_roots_have_independent_native_locks() {
     let left_dir = tempfile::tempdir().unwrap();
     let right_dir = tempfile::tempdir().unwrap();
     let left = FileStorage::open(left_dir.path()).unwrap();

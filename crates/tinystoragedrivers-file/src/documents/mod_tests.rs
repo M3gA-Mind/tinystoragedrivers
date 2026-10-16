@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use tinystoragedrivers_core::{ErrorKind, IndexSpec, StorageBackend};
+use tinystoragedrivers_core::{ErrorKind, IndexSpec, Meta, StorageBackend};
 
 use super::*;
 use crate::FileStorage;
@@ -378,4 +378,44 @@ async fn an_unreadable_scopes_directory_fails_the_declaration() {
         docs.ensure_collection(&unique).await.unwrap_err().kind(),
         ErrorKind::Backend
     );
+}
+
+#[tokio::test]
+async fn metadata_lives_in_the_document_envelope_and_survives_reopening() {
+    let (dir, storage, docs) = open();
+    docs.put_with(
+        "notes",
+        "n",
+        json!({"text": "hi"}),
+        Precondition::None,
+        WriteOptions::new().schema(3).expires_ms(4_000_000_000_000),
+    )
+    .await
+    .unwrap();
+    let file = std::fs::read(collection_dir(&storage, "notes").join("n.json")).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&file).unwrap();
+    assert_eq!(envelope["meta"]["schema"], 3);
+    assert_eq!(envelope["meta"]["expires_ms"], 4_000_000_000_000_i64);
+
+    let reopened = FileStorage::open(dir.path()).unwrap();
+    let again = Arc::clone(reopened.for_scope(&Scope::local()).unwrap().documents());
+    let found = again.get("notes", "n").await.unwrap().unwrap();
+    assert_eq!(found.meta.schema, 3);
+    assert!(found.meta.created_ms > 0);
+}
+
+#[tokio::test]
+async fn a_file_written_before_metadata_reads_as_unknown() {
+    let (_dir, storage, docs) = open();
+    docs.put("notes", "old", json!({"a": 1}), Precondition::None)
+        .await
+        .unwrap();
+    let path = collection_dir(&storage, "notes").join("old.json");
+    std::fs::write(
+        &path,
+        br#"{"id":"old","version":1,"doc":{"a":1}}"#.as_slice(),
+    )
+    .unwrap();
+    let found = docs.get("notes", "old").await.unwrap().unwrap();
+    assert_eq!(found.meta, Meta::unknown());
 }

@@ -268,11 +268,15 @@ fn an_exhausted_version_fails_the_write() {
             state::StoredDoc {
                 version: crate::Version(u64::MAX),
                 doc: json!({}),
+                meta: crate::Meta::unknown(),
             },
         );
-    let error = state
-        .put("local", "c", "max", json!({}), Precondition::None, 0)
-        .unwrap_err();
+    let write = state::Write {
+        doc: json!({}),
+        precondition: Precondition::None,
+        options: crate::WriteOptions::default(),
+    };
+    let error = state.put("local", "c", "max", write, 0).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
 
@@ -293,35 +297,7 @@ fn fenced_handles_say_so_in_their_debug_output() {
 }
 
 #[tokio::test]
-async fn a_guard_in_another_database_does_not_fence_this_one() {
-    use serde_json::json;
-    let storage = MemoryStorage::new();
-    storage
-        .database("leases")
-        .unwrap()
-        .for_scope(&Scope::local())
-        .unwrap()
-        .documents()
-        .put(
-            "leases",
-            "l",
-            json!({"epoch": 1}),
-            crate::Precondition::None,
-        )
-        .await
-        .unwrap();
-    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
-    let fenced = storage.for_scope_fenced(&Scope::local(), &fence).unwrap();
-    let refused = fenced
-        .documents()
-        .put("notes", "n", json!({}), crate::Precondition::None)
-        .await
-        .unwrap_err();
-    assert_eq!(refused.kind(), crate::ErrorKind::Fenced);
-}
-
-#[tokio::test]
-async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
+async fn unfenced_stream_delete_blob_and_drop_writes_never_read_the_clock() {
     let reads = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&reads);
     let storage = MemoryStorage::with_clock(Arc::new(move || {
@@ -329,12 +305,16 @@ async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
         0
     }));
     let scoped = storage.for_scope(&Scope::local()).unwrap();
+    // An append reads the clock for the stream's last-append time; a guard
+    // check on an unfenced handle does not.
     scoped.streams().append("s", json!({"n": 1})).await.unwrap();
+    let after_append = reads.load(Ordering::SeqCst);
+    assert_eq!(after_append, 1, "one read stamps the append");
     scoped.streams().delete_stream("s").await.unwrap();
     scoped.blobs().put("b", vec![1], None).await.unwrap();
     scoped.blobs().delete("b").await.unwrap();
     scoped.documents().drop_collection("c").await.unwrap();
-    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(reads.load(Ordering::SeqCst), after_append);
 }
 
 #[tokio::test]
@@ -627,95 +607,6 @@ fn reset_port_debug_identifies_scope_and_generation_without_clock() {
 }
 
 #[tokio::test]
-async fn cross_database_purge_serializes_public_guard_takeover_on_the_root_gate() {
-    use std::sync::{OnceLock, TryLockError, mpsc};
-
-    let gate: Arc<OnceLock<Arc<Mutex<()>>>> = Arc::new(OnceLock::new());
-    let (start_tx, start_rx) = mpsc::channel();
-    let (attempt_tx, attempt_rx) = mpsc::channel();
-    let start_tx = Mutex::new(Some(start_tx));
-    let attempt_rx = Mutex::new(attempt_rx);
-    let clock_gate = Arc::clone(&gate);
-    let storage = MemoryStorage::with_clock(Arc::new(move || {
-        // Arm the clock only for the purge. Its target and guard databases
-        // share this gate, which remains held after the guard-state lock drops.
-        if let Some(gate) = clock_gate.get()
-            && let Some(start) = start_tx.lock().unwrap().take()
-        {
-            assert!(matches!(gate.try_lock(), Err(TryLockError::WouldBlock)));
-            start.send(()).unwrap();
-            attempt_rx.lock().unwrap().recv().unwrap();
-        }
-        0
-    }));
-    let guard_scope = Scope::new("purge_guard").unwrap();
-    let target_scope = Scope::new("purge_target").unwrap();
-    let guard_backend = storage.database("guards").unwrap();
-    let target_backend = storage.database("target").unwrap();
-    let guard = guard_backend.for_scope(&guard_scope).unwrap();
-    guard
-        .documents()
-        .put("leases", "owner", json!({"epoch":1}), Precondition::None)
-        .await
-        .unwrap();
-    let target = target_backend.for_scope(&target_scope).unwrap();
-    target.blobs().put("old", vec![1], None).await.unwrap();
-    let fence = Fence::epoch(guard_scope, "leases", "owner", "epoch", 1);
-    let fenced = target_backend
-        .for_scope_fenced_in_database(
-            &target_scope,
-            &fence,
-            &crate::GuardDatabase::Named("guards".into()),
-        )
-        .unwrap();
-    let guard_db = storage.named("guards").unwrap();
-    let target_db = storage.named("target").unwrap();
-    assert!(Arc::ptr_eq(&guard_db.gate, &target_db.gate));
-    gate.set(Arc::clone(&guard_db.gate)).unwrap();
-    let takeover = std::thread::spawn(move || {
-        start_rx.recv().unwrap();
-        // This observes the lock using the guard database's own gate, then
-        // attempts takeover through the public document port.
-        assert!(matches!(
-            guard_db.gate.try_lock(),
-            Err(TryLockError::WouldBlock)
-        ));
-        attempt_tx.send(()).unwrap();
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(guard.documents().put(
-                "leases",
-                "owner",
-                json!({"epoch":2}),
-                Precondition::None,
-            ))
-            .unwrap();
-    });
-    let request = crate::PurgeRequest {
-        operation_id: "cross_database_reset".into(),
-        mode: crate::PurgeMode::Atomic,
-    };
-    let receipt = fenced.purge(&request).await.unwrap();
-    takeover.join().unwrap();
-    assert_eq!(receipt.status, crate::PurgeStatus::Complete);
-    assert_eq!(
-        fenced.purge(&request).await.unwrap_err().kind(),
-        ErrorKind::Fenced
-    );
-    assert!(
-        target_backend
-            .for_scope_generation(&target_scope, receipt.generation)
-            .unwrap()
-            .blobs()
-            .get("old")
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn retrying_a_completed_reset_after_another_reset_preserves_replacement_data() {
     let backend = MemoryStorage::new();
     let scope = Scope::new("historical_reset").unwrap();
@@ -795,4 +686,52 @@ async fn retrying_a_completed_reset_after_another_reset_preserves_replacement_da
             .bytes,
         vec![7]
     );
+}
+
+#[tokio::test]
+async fn scopes_drop_out_once_purged_and_keep_tombstone_only_scopes() {
+    let storage = MemoryStorage::new();
+    let kept = Scope::new("u:kept").unwrap();
+    let erased = Scope::new("u:erased").unwrap();
+    let deleted = Scope::new("u:deleted").unwrap();
+    for scope in [&kept, &erased] {
+        let handles = storage.for_scope(scope).unwrap();
+        handles
+            .documents()
+            .put("c", "d", json!({"n": 1}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let docs = storage.for_scope(&deleted).unwrap();
+    let docs = docs.documents();
+    docs.put("c", "d", json!({"n": 1}), Precondition::None)
+        .await
+        .unwrap();
+    docs.delete("c", "d", Precondition::None).await.unwrap();
+    storage
+        .for_scope(&erased)
+        .unwrap()
+        .purge(&crate::PurgeRequest {
+            operation_id: "erase-1".into(),
+            mode: crate::PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+
+    let listed = storage.scopes("u:").await.unwrap();
+    assert_eq!(listed, [deleted, kept]);
+}
+
+#[tokio::test]
+async fn maintenance_on_memory_reclaims_nothing() {
+    let storage = MemoryStorage::new();
+    let report = storage
+        .maintain(crate::MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert_eq!(report.reclaimed_bytes, 0);
+    storage
+        .checkpoint(crate::Checkpoint::Truncate)
+        .await
+        .unwrap();
 }

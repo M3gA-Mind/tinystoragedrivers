@@ -7,7 +7,6 @@ use tinystoragedrivers_core::{MemoryStorage, ScopedStorage, StorageBackend};
 struct Composite {
     documents: Arc<dyn StorageBackend>,
     objects: Arc<object_store::memory::InMemory>,
-    database: String,
 }
 
 impl StorageBackend for Composite {
@@ -29,30 +28,20 @@ impl StorageBackend for Composite {
                 None,
                 "test",
                 scope,
-                &self.database,
             )?),
         ))
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        validate_database(name)?;
-        Ok(Arc::new(Self {
-            documents: self.documents.database(name)?,
-            objects: self.objects.clone(),
-            database: name.to_owned(),
-        }))
     }
 }
 
 fn handle(objects: Arc<object_store::memory::InMemory>, scope: &str) -> S3Blobs {
-    S3Blobs::with_store(objects, None, "test", &Scope::new(scope).unwrap(), "blobs").unwrap()
+    S3Blobs::with_store(objects, None, "test", &Scope::new(scope).unwrap()).unwrap()
 }
 
 #[tokio::test]
-async fn blob_contract_and_scope_database_isolation() {
+async fn blob_contract_and_scope_isolation() {
     let backend = Composite {
         documents: Arc::new(MemoryStorage::new()),
         objects: Arc::new(object_store::memory::InMemory::new()),
-        database: "default".into(),
     };
     tinystoragedrivers_core::conformance::run(&backend, false).await;
 }
@@ -172,7 +161,6 @@ async fn presigning_binds_scope_method_and_expiry_without_network() {
         Some(client),
         "prefix",
         &Scope::new("alice/bob").unwrap(),
-        "media",
     )
     .unwrap();
     assert!(blobs.capabilities().contains(Capability::StreamingBlobs));
@@ -189,7 +177,7 @@ async fn presigning_binds_scope_method_and_expiry_without_network() {
     let put = url::Url::parse(&put).unwrap();
     assert_eq!(
         get.path(),
-        "/bucket/prefix/media/scopes/616c6963652f626f62/hello%20world.txt"
+        "/bucket/prefix/scopes/616c6963652f626f62/hello%20world.txt"
     );
     let query: std::collections::HashMap<_, _> = get.query_pairs().collect();
     assert_eq!(query.get("X-Amz-Expires").unwrap(), "60");
@@ -236,9 +224,8 @@ async fn scoped_key_limit_counts_utf8_and_rejects_overflow_without_network() {
         S3Blobs::with_store(
             Arc::new(object_store::memory::InMemory::new()),
             None,
-            &"x".repeat(1000),
+            &"x".repeat(1020),
             &Scope::new("alice").unwrap(),
-            "blobs"
         )
         .is_err()
     );
@@ -318,25 +305,23 @@ async fn listing_skips_oversized_keys_written_by_other_clients() {
 }
 
 #[test]
-fn scoped_s3_clients_and_named_databases_are_constructed_without_network() {
+fn scoped_s3_clients_are_constructed_without_network() {
     let config = S3Config::parse(
         "s3://test-bucket/root?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A1",
     )
     .unwrap();
     let scope = Scope::new("tenant").unwrap();
-    let blobs = config.blobs(&scope, "default").unwrap();
+    let blobs = config.blobs(&scope).unwrap();
     assert!(blobs.capabilities().contains(Capability::PresignedUrls));
     let backend = S3Storage::open(&config).unwrap();
     assert!(backend.capabilities().contains(Capability::StreamingBlobs));
-    let named = backend.database("named").unwrap();
     assert!(
-        named
+        backend
             .for_scope(&scope)
             .unwrap()
             .capabilities()
             .contains(Capability::PresignedUrls)
     );
-    assert!(backend.database("bad name").is_err());
     assert!(
         S3Storage::with_store(Arc::new(object_store::memory::InMemory::new()), None, "../")
             .is_err()

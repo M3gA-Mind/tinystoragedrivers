@@ -125,6 +125,8 @@ fn every_documents_message_shape_roundtrips() {
         id: "n".into(),
         doc: json!({"nested":{"id":"business-data","array":[1,true,null]}}),
         precondition: Precondition::Absent,
+        schema: 0,
+        expires_ms: None,
     };
     let put_wire = serde_json::to_value(&put).unwrap();
     assert!(put_wire["document_json"].is_string());
@@ -312,4 +314,29 @@ fn watch_open_response_and_capabilities_reply_reject_unknown_fields() {
     let wire = serde_json::to_value(&caps).unwrap();
     assert_eq!(wire, json!({"capabilities":["watch"]}));
     assert!(is_documents_selector("Capabilities"));
+}
+
+#[test]
+fn put_options_are_optional_pinned_and_never_carry_created_ms() {
+    let plain = json!({"collection":"c","document_id":"n","document_json":"{}","precondition":{"kind":"none"}});
+    let put: PutDocumentRequest = serde_json::from_value(plain.clone()).unwrap();
+    assert_eq!((put.schema, put.expires_ms), (0, None));
+    // Defaults are omitted, so a new module's plain put is an old host's put.
+    assert_eq!(serde_json::to_value(&put).unwrap(), plain);
+    let declared = PutDocumentRequest {
+        schema: 2,
+        expires_ms: Some(99),
+        ..put
+    };
+    let wire = serde_json::to_value(&declared).unwrap();
+    assert_eq!(wire["schema"], 2);
+    assert_eq!(wire["expires_ms"], 99);
+    assert_eq!(
+        serde_json::from_value::<PutDocumentRequest>(wire.clone()).unwrap(),
+        declared
+    );
+    // `created_ms` is a host-only migration option; the wire refuses it.
+    let mut forged = wire;
+    forged["created_ms"] = json!(1);
+    assert!(serde_json::from_value::<PutDocumentRequest>(forged).is_err());
 }

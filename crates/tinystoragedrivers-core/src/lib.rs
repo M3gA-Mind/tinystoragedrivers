@@ -15,8 +15,7 @@
 //! nothing about them.
 //!
 //! A [`StorageBackend`] hands out a [`ScopedStorage`] per [`Scope`], the
-//! tenant key every record carries, and splits into named databases with
-//! [`StorageBackend::database`]. [`StorageBackend::for_scope_fenced`] hands
+//! tenant key every record carries. [`StorageBackend::for_scope_fenced`] hands
 //! out handles whose writes the driver checks atomically against a [`Fence`]
 //! (a lease epoch), so a node that lost its lease cannot land a late write.
 //!
@@ -59,7 +58,10 @@ mod document;
 mod error;
 mod fence;
 mod filter;
+mod key;
 mod memory;
+pub mod primitives;
+pub mod schema;
 mod scope;
 mod stream;
 pub mod value;
@@ -71,29 +73,44 @@ mod blocking;
 pub mod conformance;
 
 pub use backend::{
-    BackendBlobs, BlobBackend, CompositeStorage, DatabaseAddress, PurgeMode, PurgeReceipt,
-    PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge, ScopedStorage,
-    StorageBackend, validate_database,
+    BackendBlobs, BlobBackend, Checkpoint, CompositeStorage, MaintenanceBudget, MaintenanceReport,
+    PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge,
+    ScopedStorage, StorageBackend,
 };
 pub use blob::{
     Blob, BlobMeta, BlobReader, BlobStore, BlobStream, MAX_BLOB_KEY_LEN, TreeEntry, TreeFile,
-    clamp_range, validate_blob_key,
+    clamp_range, validate_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 #[cfg(any(test, feature = "blocking"))]
 pub use blocking::Blocking;
 pub use capabilities::{Capabilities, Capability};
 pub use document::{
     CollectionSpec, Cursor, CursorPosition, DocumentStore, DocumentStoreExt, ExpectedDocument,
-    IndexSpec, MAX_COLLECTION_LEN, MAX_ID_LEN, Page, Precondition, Query, RESERVED_PREFIX,
-    ReadCheck, SearchHit, SearchSpec, Version, Versioned, WriteOp, WriteResult,
+    IndexSpec, MAX_COLLECTION_LEN, MAX_ID_LEN, Meta, Page, Precondition, Query, RESERVED_PREFIX,
+    ReadCheck, SearchHit, SearchSpec, Version, Versioned, WriteOp, WriteOptions, WriteResult,
     validate_collection, validate_doc, validate_id,
 };
 pub use error::{ErrorKind, Result, StorageError};
-pub use fence::{Fence, GuardDatabase};
-pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
+pub use fence::Fence;
+pub use filter::{
+    CREATED_FIELD, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort, UPDATED_FIELD,
+    sort_documents, sort_documents_with_meta,
+};
+pub use key::Key;
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
-pub use scope::{MAX_SCOPE_LEN, Scope};
-pub use stream::{StreamEntry, StreamStore, validate_stream};
+pub use primitives::{Counters, Kv, Lease, Leases, Repo, RetryPolicy};
+pub use schema::{
+    Expiry, Item, MIGRATIONS_COLLECTION, MigrateOptions, MigrationReport, Migrations, Owner,
+    Progress, Registry, Schema, ScopeClass, SourceRecord, Step, StepFn, StepReport, TargetRecord,
+};
+pub use scope::{
+    AGENT_INFIX, CLUSTER, MAX_SCOPE_LEN, MAX_SEGMENT_LEN, MODULE_INFIX, ParsedScope, Principal,
+    Scope, Tenant, USER_PREFIX,
+};
+pub use stream::{
+    SEALED_BLOB_PREFIX, SealOutcome, SealPolicy, SealWhen, SealedLog, StreamEntry, StreamInfo,
+    StreamStore, is_reserved_blob_key, sealed_blob_key, validate_stream,
+};
 
 /// The `async_trait` attribute the port traits are declared with, re-exported
 /// so a driver implements them without naming the dependency itself.

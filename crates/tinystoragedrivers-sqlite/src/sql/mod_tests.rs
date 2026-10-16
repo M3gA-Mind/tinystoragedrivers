@@ -1,4 +1,4 @@
-//! Quoting, JSON paths and schema creation.
+//! Quoting and schema creation.
 
 use super::*;
 
@@ -9,84 +9,80 @@ fn quotes_identifiers_and_literals() {
 }
 
 #[test]
-fn builds_quoted_json_paths() {
-    assert_eq!(json_path("a").as_deref(), Some("$.\"a\""));
-    assert_eq!(
-        json_path("owner.name").as_deref(),
-        Some("$.\"owner\".\"name\"")
-    );
-    assert_eq!(json_path("we\"ird"), None, "quotes cannot be escaped");
-    assert_eq!(json_path("back\\slash"), None);
-    assert_eq!(json_path("tags.1"), None, "digits may be an array index");
-    assert_eq!(json_path("v1.x").as_deref(), Some("$.\"v1\".\"x\""));
-}
-
-#[test]
-fn json_paths_resolve_in_sqlite() {
+fn creates_layout_two_tables_idempotently() {
     let conn = Connection::open_in_memory().unwrap();
-    let path = json_path("owner.na-me").unwrap();
-    let found: String = conn
-        .query_row(
-            "SELECT json_extract(?1, ?2)",
-            [r#"{"owner":{"na":"x","na-me":"ada"}}"#, &path],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(found, "ada");
-}
-
-#[test]
-fn creates_prefixed_tables_idempotently() {
-    let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("flows__");
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
     tables.ensure(&conn).unwrap();
-    assert_eq!(tables.docs, "flows___tsd_docs");
+    assert_eq!(tables.docs, "docs");
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN (
-                 'flows___tsd_docs', 'flows___tsd_collections', 'flows___tsd_fts',
-                 'flows___tsd_streams', 'flows___tsd_stream_meta', 'flows___tsd_blobs',
-                 'flows___tsd_tombstones')",
+                 'docs', '_tsd_collections', 'fts', 'streams',
+                 'stream_heads', 'blobs', 'meta', 'doc_fields',
+                 '_tsd_scope_admissions', '_tsd_purge_receipts')",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 7);
-    assert_eq!(Tables::new("").prefix, "");
+    assert_eq!(count, 10);
+    assert_eq!(tables.layout(&conn).unwrap().as_deref(), Some("2"));
 }
 
 #[test]
-fn a_blob_table_from_before_lifetimes_gains_the_column_and_validates() {
+fn a_foreign_table_in_the_way_is_refused() {
     let conn = Connection::open_in_memory().unwrap();
-    let tables = Tables::new("old__");
+    conn.execute_batch("CREATE TABLE docs (id TEXT)").unwrap();
+    assert!(Tables::new().ensure(&conn).is_err());
+}
+
+#[test]
+fn a_layout_two_file_with_v0_tables_is_corrupt() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new();
     tables.ensure(&conn).unwrap();
-    // Recreate the blob table as the previous release declared it.
-    conn.execute_batch(&format!(
-        "DROP TABLE {blobs};
-         CREATE TABLE {blobs} (
-             scope TEXT NOT NULL,
-             key TEXT NOT NULL,
-             content_type TEXT,
-             bytes BLOB NOT NULL,
-             PRIMARY KEY (scope, key)
+    conn.execute_batch("CREATE TABLE _tsd_docs (scope TEXT)")
+        .unwrap();
+    let error = tables.ensure(&conn).unwrap_err();
+    assert!(error.to_string().contains("corrupt"), "{error}");
+}
+
+#[test]
+fn a_file_without_the_layout_marker_does_not_validate() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new();
+    tables.ensure(&conn).unwrap();
+    conn.execute_batch(&format!("DELETE FROM {}", ident(&tables.meta)))
+        .unwrap();
+    assert!(tables.validate(&conn).is_err());
+}
+
+#[test]
+fn stream_heads_gain_their_time_columns_on_an_older_layout_two_file() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new();
+    tables.ensure(&conn).unwrap();
+    // A layout-2 file written before heads recorded times.
+    conn.execute_batch(
+        "DROP TABLE stream_heads;
+         CREATE TABLE \"stream_heads\" (
+             scope TEXT NOT NULL, name TEXT NOT NULL, base INTEGER NOT NULL,
+             len INTEGER NOT NULL, sealed INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (scope, name)
          ) WITHOUT ROWID;
-         INSERT INTO {blobs} (scope, key, bytes) VALUES ('s', 'k', x'01');",
-        blobs = ident(&tables.blobs)
-    ))
+         INSERT INTO stream_heads (scope, name, base, len) VALUES ('s', 'old', 0, 3)",
+    )
     .unwrap();
-    assert!(
-        tables.validate(&conn).is_err(),
-        "a read-only open refuses a table that has not been migrated"
-    );
+
     tables.ensure(&conn).unwrap();
-    tables.validate(&conn).unwrap();
-    let expiry: Option<i64> = conn
+    tables.ensure(&conn).unwrap();
+
+    let row: (Option<i64>, Option<i64>) = conn
         .query_row(
-            &format!("SELECT expires_at_ms FROM {}", ident(&tables.blobs)),
+            "SELECT sealed_ms, last_append_ms FROM stream_heads WHERE name = 'old'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(expiry, None, "existing blobs keep no lifetime");
+    assert_eq!(row, (None, None), "old heads have unknown times");
 }

@@ -4,7 +4,9 @@
 use super::stored::*;
 use mongodb::bson::{Bson, doc};
 use serde_json::json;
-use tinystoragedrivers_core::{CollectionSpec, ErrorKind, Precondition, Scope, Version};
+use tinystoragedrivers_core::{
+    CollectionSpec, ErrorKind, Meta, Precondition, Scope, Version, WriteOptions,
+};
 
 fn scope() -> Scope {
     Scope::new("alice").unwrap()
@@ -13,10 +15,20 @@ fn scope() -> Scope {
 #[test]
 fn encodes_and_decodes_the_stored_shape() {
     let body = json!({"n": 1});
-    let encoded = encode(&scope(), "k", Version(3), body.as_object().unwrap()).unwrap();
+    let meta = Meta {
+        schema: 2,
+        created_ms: 10,
+        updated_ms: 20,
+        expires_ms: Some(30),
+    };
+    let encoded = encode(&scope(), "k", Version(3), body.as_object().unwrap(), &meta).unwrap();
     assert_eq!(
         encoded,
-        doc! {"_id": {"s": "alice", "k": "k"}, "_key": "k", "_v": 3_i64, "d": {"n": 1_i64}}
+        doc! {
+            "_id": {"s": "alice", "k": "k"}, "_key": "k", "_v": 3_i64,
+            "_schema": 2_i64, "_c": 10_i64, "_u": 20_i64, "_x": 30_i64,
+            "d": {"n": 1_i64},
+        }
     );
     let stored = Stored::decode(&encoded).unwrap();
     assert_eq!(
@@ -25,6 +37,7 @@ fn encodes_and_decodes_the_stored_shape() {
             key: "k".into(),
             version: Version(3),
             body: body.clone(),
+            meta,
             deleted: false,
         }
     );
@@ -35,9 +48,15 @@ fn encodes_and_decodes_the_stored_shape() {
     );
 
     assert_eq!(
-        encode(&scope(), "k", Version(u64::MAX), &serde_json::Map::new())
-            .unwrap_err()
-            .kind(),
+        encode(
+            &scope(),
+            "k",
+            Version(u64::MAX),
+            &serde_json::Map::new(),
+            &Meta::unknown()
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
@@ -45,7 +64,8 @@ fn encodes_and_decodes_the_stored_shape() {
             &scope(),
             "k",
             Version(1),
-            json!({"n": u64::MAX}).as_object().unwrap()
+            json!({"n": u64::MAX}).as_object().unwrap(),
+            &Meta::unknown()
         )
         .unwrap_err()
         .kind(),
@@ -123,6 +143,7 @@ fn expiry_uses_numbers_at_or_below_now() {
         key: "k".into(),
         version: Version(1),
         body,
+        meta: Meta::unknown(),
         deleted: false,
     };
     assert!(!is_live(&spec, &stored(json!({"exp": 10})), 10));
@@ -131,8 +152,58 @@ fn expiry_uses_numbers_at_or_below_now() {
     assert!(is_live(&spec, &stored(json!({})), 10));
     let forever = CollectionSpec::new("c");
     assert!(is_live(&forever, &stored(json!({"exp": 1})), 10));
-    assert!(expired_filter(&forever, 10).is_none());
-    assert!(expired_filter(&spec, 10).is_some());
+    // Only the record's own expiry applies without a TTL field.
+    let with_expiry = |expires_ms| Stored {
+        meta: Meta {
+            expires_ms,
+            ..Meta::unknown()
+        },
+        ..stored(json!({}))
+    };
+    assert!(!is_live(&forever, &with_expiry(Some(10)), 10));
+    assert!(is_live(&forever, &with_expiry(Some(11)), 10));
+    assert!(is_live(&forever, &with_expiry(None), 10));
+    assert!(expired_filter(&forever, 10).matches_with(
+        "k",
+        &json!({}),
+        &with_expiry(Some(10)).meta
+    ));
+    assert!(expired_filter(&spec, 10).matches("k", &json!({"exp": 10})));
+}
+
+#[test]
+fn metadata_keeps_creation_across_updates_and_restarts_it_after_a_gap() {
+    let before = Meta {
+        schema: 1,
+        created_ms: 100,
+        updated_ms: 200,
+        expires_ms: Some(900),
+    };
+    // An update keeps the creation time, replaces schema and expiry, and never
+    // moves the update time backwards.
+    let update = next_meta(Some(&before), WriteOptions::new().schema(2), 150);
+    assert_eq!(
+        update,
+        Meta {
+            schema: 2,
+            created_ms: 100,
+            updated_ms: 200,
+            expires_ms: None,
+        }
+    );
+    // Created afresh (never there, deleted or expired) starts both at now.
+    let fresh = next_meta(None, WriteOptions::new().expires_ms(5), 150);
+    assert_eq!((fresh.created_ms, fresh.updated_ms), (150, 150));
+    assert_eq!(fresh.expires_ms, Some(5));
+    // A migration may supply the creation time; the update time stays on the clock.
+    let migrated = next_meta(None, WriteOptions::new().created_ms(7), 150);
+    assert_eq!((migrated.created_ms, migrated.updated_ms), (7, 150));
+}
+
+#[test]
+fn rows_written_before_metadata_decode_as_unknown() {
+    let stored = Stored::decode(&doc! {"_key": "k", "_v": 1_i64, "d": {}}).unwrap();
+    assert_eq!(stored.meta, Meta::unknown());
 }
 
 fn labelled(labels: &[&str]) -> mongodb::error::Error {
@@ -173,6 +244,7 @@ fn tombstones_are_never_live_and_queries_hide_them() {
         key: "k".into(),
         version: Version(4),
         body: json!({}),
+        meta: Meta::unknown(),
         deleted: true,
     };
     assert!(!is_live(&spec, &buried, 0));

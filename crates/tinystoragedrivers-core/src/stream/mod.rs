@@ -11,6 +11,12 @@ use serde_json::Value;
 
 use crate::error::{Result, StorageError};
 
+mod sealed;
+mod types;
+
+pub use sealed::{SEALED_BLOB_PREFIX, SealedLog, is_reserved_blob_key, sealed_blob_key};
+pub use types::{SealOutcome, SealPolicy, SealWhen, StreamInfo};
+
 /// One record and its offset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEntry {
@@ -91,6 +97,91 @@ pub trait StreamStore: Send + Sync + std::fmt::Debug {
     ///
     /// An invalid stream name, or a backend error.
     async fn delete_stream(&self, stream: &str) -> Result<bool>;
+
+    /// Close the stream to appends and keep its entries as one compressed
+    /// blob (see [`SealedLog`]), so a finished journal costs one row instead
+    /// of one per entry.
+    ///
+    /// Sealing changes nothing a reader can see. `read_window`, `len` and
+    /// `streams` return exactly the offsets, values and lengths they returned
+    /// before, whatever the driver does underneath.
+    ///
+    /// - The blob lives in the same scope's blob store under
+    ///   [`sealed_blob_key`]. A driver writes the blob first, then marks the
+    ///   stream sealed, then deletes the per-entry storage, so a crash at any
+    ///   step leaves a readable stream and a repeated `seal` finishes the job.
+    /// - Sealing is idempotent: sealing a sealed stream changes nothing and
+    ///   returns an equal [`SealOutcome`].
+    /// - A stream that exists but retains nothing (everything truncated)
+    ///   seals with an empty blob and `len == base`.
+    /// - Every append, including an empty batch and a conditional append, is
+    ///   `Conflict` on a sealed stream, and so is `truncate_before`.
+    ///   [`delete_stream`](Self::delete_stream) removes the stream and its
+    ///   blob, after which the name is free to start a new, unsealed stream.
+    ///
+    /// Which streams to seal, and when, is the owner's decision; see
+    /// [`SealPolicy`], which maintenance applies.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` when the stream does not exist (a name nothing was ever
+    /// appended to), `Conflict` when the stream changed while it was being
+    /// sealed (retry), `Fenced` for a stale fence, an invalid stream name,
+    /// `Unsupported(StreamSeal)` when the driver cannot seal (the default), or
+    /// a backend error.
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        let _ = stream;
+        Err(StorageError::unsupported(
+            crate::Capability::StreamSeal,
+            "this driver cannot seal a stream",
+        ))
+    }
+
+    /// Remove `stream` only if it is sealed and was sealed at exactly
+    /// `sealed_ms` (the value [`info`](Self::info) reported), atomically with
+    /// that check, and report whether it did. Retention uses this so that a
+    /// stream deleted and recreated after it was inspected is never removed
+    /// in the old one's place.
+    ///
+    /// Returns `false`, and changes nothing, when the stream is missing, is
+    /// not sealed, or was sealed at another time. A recreated stream that is
+    /// sealed again within the same millisecond is indistinguishable; the
+    /// instant is the incarnation's identity.
+    ///
+    /// # Errors
+    ///
+    /// An invalid stream name, `Fenced` for a stale fence,
+    /// `Unsupported(StreamSeal)` when the driver cannot seal (the default), or
+    /// a backend error.
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        let _ = (stream, sealed_ms);
+        Err(StorageError::unsupported(
+            crate::Capability::StreamSeal,
+            "this driver cannot conditionally delete a sealed stream",
+        ))
+    }
+
+    /// The extent and recorded times of `stream`, or `None` when it does not
+    /// exist. A sealed stream still reports (its head outlives the seal) with
+    /// `sealed_ms` set; `len` and `base` equal what [`len`](Self::len) and
+    /// the seal outcome report.
+    ///
+    /// Reading time is part of the [`Capability::StreamSeal`](crate::Capability::StreamSeal)
+    /// capability, not a capability of its own: a driver that can seal records
+    /// when it sealed and when a stream last grew, which is everything a
+    /// [`SealPolicy`] needs.
+    ///
+    /// # Errors
+    ///
+    /// An invalid stream name, `Unsupported(StreamSeal)` when the driver
+    /// records no times (the default), or a backend error.
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        let _ = stream;
+        Err(StorageError::unsupported(
+            crate::Capability::StreamSeal,
+            "this driver does not record stream times",
+        ))
+    }
 
     /// Names of the streams in this scope that start with `prefix`, sorted.
     ///

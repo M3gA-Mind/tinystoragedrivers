@@ -85,6 +85,12 @@ impl Db {
         }
         let conn = Connection::open(&path).map_err(during("open"))?;
         conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
+        // Must come before anything else touches a new file: the setting is
+        // fixed by the first table (and WAL mode writes the header). It is
+        // inert on a file that already has tables; `maintenance::maintain`
+        // converts those.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+            .map_err(during("open"))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(during("open"))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
@@ -94,33 +100,6 @@ impl Db {
             conn: Mutex::new(conn),
         });
         open.retain(|_, weak| weak.strong_count() > 0);
-        open.insert(path, Arc::downgrade(&db));
-        Ok(db)
-    }
-
-    /// Open an existing database without creating files or changing journal mode.
-    pub(crate) fn open_existing(path: &Path) -> Result<Arc<Self>> {
-        let path = path.canonicalize().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                StorageError::not_found("sqlite database does not exist").with_source(error)
-            } else {
-                StorageError::backend("cannot resolve existing sqlite database").with_source(error)
-            }
-        })?;
-        let mut open = registry()
-            .lock()
-            .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
-        if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
-            return Ok(db);
-        }
-        let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(during("open existing database"))?;
-        conn.busy_timeout(BUSY_TIMEOUT)
-            .map_err(during("open existing database"))?;
-        let db = Arc::new(Self {
-            path: path.clone(),
-            conn: Mutex::new(conn),
-        });
         open.insert(path, Arc::downgrade(&db));
         Ok(db)
     }

@@ -28,8 +28,12 @@ tinystoragedrivers-bus = { path = "crates/tinystoragedrivers-bus" }
 tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
 # The real TinyBus transport for the storage bus: module-side connect and host-side serve.
 tinystoragedrivers-busproxy = { path = "crates/tinystoragedrivers-busproxy" }
-# SHA-256 binds Mongo watch cursors and protects native secret key identities.
+# SHA-256 binds Mongo watch cursors, protects native secret key identities and
+# names over-long document keys (`Key::of`).
 sha2 = "0.10"
+# Lowercase base32 text of the SHA-256 digest that stands in for a scope segment the
+# grammar cannot hold (`Scope::tenant`, `agent`, `module`).
+data-encoding = "2"
 # Shared streaming buffers for the S3 driver and zeroized cloud KMS payloads.
 bytes = "1"
 # HTTP transports for AWS/GCP KMS; also used by the S3 HTTP contract tests.
@@ -62,6 +66,14 @@ tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
 async-trait = "0.1"
 # Derive macros for `StorageError`.
 thiserror = "2"
+# Time-sortable 26-character entity ids (`Key::ulid`); the only id generator the
+# core needs, and it links no database client or transport.
+ulid = "1"
+# Sealed streams are stored as one zstd-compressed blob (`StreamStore::seal`).
+# Only the codec is needed, so the dictionary builder and legacy-format
+# decoders are left out. It links a C library but no database client or
+# transport, which is what the core's dependency check forbids.
+zstd = { version = "0.13", default-features = false }
 # Documents and stream records are JSON values; `CollectionSpec` and the query
 # types serialize so a host can log or persist them.
 serde = { version = "1", features = ["derive"] }

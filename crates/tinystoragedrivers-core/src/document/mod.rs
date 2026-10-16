@@ -9,6 +9,7 @@
 //! pattern optimistic writes cannot express cheaply, "take the next eligible
 //! item and mark it mine", as a single atomic step on every driver.
 
+mod meta;
 mod types;
 
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ use crate::capabilities::{Capabilities, Capability};
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
+pub use meta::{Meta, WriteOptions};
 pub use types::{
     CollectionSpec, Cursor, CursorPosition, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN,
     MAX_ID_LEN, Page, Precondition, Query, RESERVED_PREFIX, ReadCheck, SearchHit, SearchSpec,
@@ -78,7 +80,9 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         ))
     }
 
-    /// Read one document. Expired documents read as `None`.
+    /// Read one document. Expired documents (past their collection's
+    /// [`ttl_field`](CollectionSpec::ttl_field) or their [`Meta::expires_ms`])
+    /// read as `None`.
     ///
     /// # Errors
     ///
@@ -101,6 +105,35 @@ pub trait DocumentStore: Send + Sync + std::fmt::Debug {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version>;
+
+    /// As [`put`](Self::put), also declaring the document's schema version and
+    /// expiry (see [`WriteOptions`]). The driver stamps the creation and update
+    /// times itself; read all four back as [`Versioned::meta`].
+    ///
+    /// Passing [`WriteOptions::default`] is exactly [`put`](Self::put).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) naming
+    /// [`Capability::RecordMetadata`] when `options` declare a schema or an
+    /// expiry and the driver cannot keep them (the default); otherwise as
+    /// [`put`](Self::put).
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
+        if !options.is_default() {
+            return Err(StorageError::unsupported(
+                Capability::RecordMetadata,
+                "this driver cannot keep a document's schema, expiry or creation time",
+            ));
+        }
+        self.put(collection, id, doc, precondition).await
+    }
 
     /// Remove one document and report whether it existed.
     ///
@@ -342,6 +375,7 @@ fn decode<T: DeserializeOwned>(found: Versioned<Value>) -> Result<Versioned<T>> 
         id: found.id,
         version: found.version,
         doc,
+        meta: found.meta,
     })
 }
 

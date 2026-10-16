@@ -1,5 +1,4 @@
-//! [`FileStorage`], the backend, and the per-database state every port handle
-//! shares.
+//! [`FileStorage`], the backend, and the state every port handle shares.
 //!
 //! # Layout
 //!
@@ -15,16 +14,14 @@
 //! └── databases/<name>/                       the same layout per named database
 //! ```
 //!
-//! Names are encoded by the `encode` module. Scopes live under `scopes/` and
-//! named databases under `databases/`, so neither can shadow the other or the
-//! `_meta` directory.
+//! Names are encoded by the `encode` module. Scopes live under `scopes/`, so
+//! none can shadow the `_meta` directory.
 //!
 //! # Concurrency
 //!
 //! Every directory has one native mutex shared by independently reopened
-//! handles. Cross-database fenced operations take the target and guard locks
-//! in canonical-path order, so `claim` and guard validation are atomic while
-//! unrelated directories retain independent IO. The file
+//! handles. Guard validation and the write it fences run under that one lock,
+//! so `claim` and fenced writes are atomic. The file
 //! IO runs on tokio's blocking pool when a runtime is present. Several
 //! *processes* writing the same directory are not coordinated: each file
 //! replacement is atomic, but a compare-and-swap, claim or fenced write can
@@ -37,31 +34,35 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, GuardDatabase, Result, Scope, ScopedStorage,
-    StorageBackend, StorageError, validate_database,
+    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError,
 };
 
 use crate::blobs::FileBlobs;
 use crate::documents::FileDocuments;
-use crate::encode::{dir_components, file_stem};
+use crate::encode::dir_components;
 use crate::fsio::io_error;
+use crate::scopes;
 use crate::streams::FileStreams;
 
-/// What this driver provides: expiry, full-text search and fencing. Not
+/// What this driver provides: expiry, full-text search, fencing and scope
+/// listing. Not maintenance (plain files have nothing to reclaim or flush) and not
 /// transactions, because a batch spanning several files cannot be made
 /// crash-atomic with renames alone. Fencing holds only among the handles of
 /// one process, like every other guarantee here: the fence is checked under
 /// the process-wide native gate.
 pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Ttl)
+    .with(Capability::RecordMetadata)
     .with(Capability::FullText)
     .with(Capability::Fencing)
-    .with(Capability::CrossDatabaseFencing)
     .with(Capability::ConditionalStreamAppend)
     .with(Capability::CollectionEnumeration)
     .with(Capability::ExistingSchema)
     .with(Capability::CollectionValidation)
-    .with(Capability::BlobTtl);
+    .with(Capability::BlobTtl)
+    .with(Capability::ScopeEnumeration)
+    .with(Capability::StreamSeal);
 
 fn system_clock() -> u64 {
     SystemTime::now()
@@ -71,7 +72,7 @@ fn system_clock() -> u64 {
         })
 }
 
-/// One native lock per canonical database directory in this process.
+/// One native lock per canonical storage directory in this process.
 fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
@@ -81,14 +82,13 @@ fn lock_for(dir: &Path) -> Arc<Mutex<()>> {
     Arc::clone(locks.entry(dir.to_path_buf()).or_default())
 }
 
-/// A validated guard address bound by the host when creating a handle.
+/// A validated fence bound by the host when creating a handle.
 #[derive(Debug)]
 pub(crate) struct Fencing {
     pub(crate) fence: Fence,
-    pub(crate) db: Arc<Db>,
 }
 
-/// One database directory and the lock guarding it.
+/// The storage directory and the lock guarding it.
 pub(crate) struct Db {
     dir: PathBuf,
     lock: Arc<Mutex<()>>,
@@ -129,49 +129,22 @@ impl Db {
         self.scopes_dir().join(dir_components(scope.as_str()))
     }
 
-    /// Hold the database lock. It guards no in-memory state (everything is on
+    /// Hold the directory lock. It guards no in-memory state (everything is on
     /// disk and every file replacement is atomic), so a poisoned lock is
     /// simply taken over.
     fn lock(&self) -> MutexGuard<'_, ()> {
         self.lock.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Run `work` under the database lock, on the blocking pool when called
+    /// Run `work` under the directory lock, on the blocking pool when called
     /// from inside a tokio runtime, inline otherwise.
     pub(crate) async fn run<T, F>(self: &Arc<Self>, work: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Db) -> Result<T> + Send + 'static,
     {
-        self.run_with_guard(None, work).await
-    }
-
-    /// Hold target and optional guard directories in canonical order for the
-    /// entire native operation; aliases share a lock and are acquired once.
-    pub(crate) async fn run_with_guard<T, F>(
-        self: &Arc<Self>,
-        guard: Option<Arc<Db>>,
-        work: F,
-    ) -> Result<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&Db) -> Result<T> + Send + 'static,
-    {
         let db = Arc::clone(self);
         let job = move || {
-            if let Some(guard) = guard
-                .as_ref()
-                .filter(|guard| !Arc::ptr_eq(&db.lock, &guard.lock))
-            {
-                let (first, second) = if db.dir < guard.dir {
-                    (db.as_ref(), guard.as_ref())
-                } else {
-                    (guard.as_ref(), db.as_ref())
-                };
-                let _first = first.lock();
-                let _second = second.lock();
-                return work(&db);
-            }
             let _guard = db.lock();
             work(&db)
         };
@@ -205,8 +178,7 @@ impl Db {
 /// ```
 #[derive(Clone)]
 pub struct FileStorage {
-    root: PathBuf,
-    db: Arc<Db>,
+    pub(crate) db: Arc<Db>,
     existing: bool,
 }
 
@@ -244,9 +216,8 @@ impl FileStorage {
         let root = root
             .canonicalize()
             .map_err(io_error("resolve the storage directory"))?;
-        let db = Arc::new(Db::new(root.clone(), clock));
+        let db = Arc::new(Db::new(root, clock));
         Ok(Self {
-            root,
             db,
             existing: false,
         })
@@ -288,7 +259,7 @@ impl FileStorage {
             .await
     }
 
-    /// The directory this store keeps its root database in.
+    /// The directory this store keeps its data in.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.db.dir
@@ -303,6 +274,13 @@ impl StorageBackend for FileStorage {
 
     fn capabilities(&self) -> Capabilities {
         CAPABILITIES
+    }
+
+    /// Lists the scopes that have a stored file by walking `scopes/`. A walk
+    /// under the database lock, so it sees whole writes only.
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let prefix = prefix.to_owned();
+        self.db.run(move |db| scopes::list(db, &prefix)).await
     }
 
     async fn prepare_schema(&self) -> Result<()> {
@@ -331,59 +309,8 @@ impl StorageBackend for FileStorage {
             scope,
             Some(&Arc::new(Fencing {
                 fence: fence.clone(),
-                db: Arc::clone(&self.db),
             })),
         ))
-    }
-
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        guard_database: &GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        fence.validate()?;
-        guard_database.validate()?;
-        let db = match guard_database {
-            GuardDatabase::Current => Arc::clone(&self.db),
-            GuardDatabase::Default => {
-                Arc::new(Db::new(self.root.clone(), Arc::clone(&self.db.clock)))
-            }
-            GuardDatabase::Named(name) => self.named(name)?,
-        };
-        Ok(self.handles(
-            scope,
-            Some(&Arc::new(Fencing {
-                fence: fence.clone(),
-                db,
-            })),
-        ))
-    }
-
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Self {
-            root: self.root.clone(),
-            db: self.named(name)?,
-            existing: self.existing,
-        }))
-    }
-}
-
-impl FileStorage {
-    fn named(&self, name: &str) -> Result<Arc<Db>> {
-        validate_database(name)?;
-        let dir = self.root.join("databases").join(file_stem(name));
-        if self.existing {
-            if !dir.is_dir() {
-                return Err(StorageError::not_found("named database does not exist"));
-            }
-        } else {
-            std::fs::create_dir_all(&dir).map_err(io_error("create the database directory"))?;
-        }
-        let dir = dir
-            .canonicalize()
-            .map_err(io_error("resolve the database directory"))?;
-        Ok(Arc::new(Db::new(dir, Arc::clone(&self.db.clock))))
     }
 }
 

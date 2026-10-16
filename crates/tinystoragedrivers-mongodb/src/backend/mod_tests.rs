@@ -220,16 +220,21 @@ async fn live_records_are_stamped_scoped_and_buried() {
         2
     );
 
-    let named = backend.database("stamped").unwrap();
-    named
+    backend
         .for_scope(&Scope::local())
         .unwrap()
         .documents()
         .put(&coll, "k", json!({}), Precondition::None)
         .await
         .unwrap();
-    let prefixed = backend.shared.raw(&format!("stamped:{coll}"));
-    assert_eq!(prefixed.count_documents(doc! {}).await.unwrap(), 1);
+    let local = backend.shared.raw(&coll);
+    assert_eq!(
+        local
+            .count_documents(doc! {"_scope": "local"})
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -305,7 +310,7 @@ async fn live_an_append_racing_a_delete_never_leaves_a_gap() {
     assert!(streams.delete_stream(&stream).await.unwrap());
     // An appender that read generation 0 and the end 2 before the delete
     // lands its segment afterwards.
-    let late = crate::streams::new_segment(&stream, 0, 2, &[json!("late")]).unwrap();
+    let late = crate::streams::new_segment(&stream, 0, 2, &[json!("late")], 0).unwrap();
     let raw = backend.shared.raw(crate::naming::STREAMS);
     let mut stamped = late;
     stamped.insert("_scope", "local");
@@ -339,34 +344,6 @@ async fn live_an_append_racing_a_delete_never_leaves_a_gap() {
         Vec::<Document>::new(),
         "the next delete clears leftovers"
     );
-}
-
-#[tokio::test]
-async fn live_cross_database_capability_is_projected_on_document_handles() {
-    let Some(backend) =
-        live("live_cross_database_capability_is_projected_on_document_handles").await
-    else {
-        return;
-    };
-    let expected = backend
-        .capabilities()
-        .contains(Capability::CrossDatabaseFencing);
-    for storage in [
-        backend.for_scope(&Scope::local()).unwrap(),
-        backend
-            .database("capability_projection")
-            .unwrap()
-            .for_scope(&Scope::local())
-            .unwrap(),
-    ] {
-        assert_eq!(
-            storage
-                .documents()
-                .capabilities()
-                .contains(Capability::CrossDatabaseFencing),
-            expected
-        );
-    }
 }
 
 #[tokio::test]
@@ -564,4 +541,77 @@ async fn live_expired_blobs_read_absent_and_the_sweep_reclaims_the_rest() {
     );
     assert!(blobs.get("later").await.unwrap().is_none());
     assert!(blobs.get("kept").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn live_metadata_queries_see_a_legacy_record_as_zero() {
+    use tinystoragedrivers_core::{DocumentStoreExt as _, Query, Sort, WriteOptions};
+
+    let Some(backend) = live("live_metadata_queries_see_a_legacy_record_as_zero").await else {
+        return;
+    };
+    let coll = unique("legacy_meta");
+    let raw = backend.shared.raw(&coll);
+    let scope = Scope::new("legacy").unwrap();
+    let docs_scope = backend.for_scope(&scope).unwrap();
+    let docs = docs_scope.documents();
+    // Written before the metadata fields existed: no `_schema`, `_c` or `_u`.
+    for key in ["a", "b"] {
+        raw.insert_one(doc! {
+            "_id": {"s": "legacy", "k": key},
+            "_scope": "legacy",
+            "_key": key,
+            "_v": 1_i64,
+            "d": {"n": 1_i64},
+        })
+        .await
+        .unwrap();
+    }
+    docs.put_with(
+        &coll,
+        "c",
+        json!({"n": 1}),
+        Precondition::None,
+        WriteOptions::new().schema(2),
+    )
+    .await
+    .unwrap();
+
+    let ids = |filter: Filter| {
+        let docs = &docs;
+        let coll = &coll;
+        async move {
+            let mut found: Vec<String> = docs
+                .query_all(coll, &Query::filter(filter))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect();
+            found.sort();
+            found
+        }
+    };
+    assert_eq!(ids(Filter::eq("_schema", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::lt("_schema", 2)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::eq("_schema", 2)).await, ["c"]);
+    assert_eq!(ids(Filter::eq("_schema", 2).negate()).await, ["a", "b"]);
+    assert_eq!(ids(Filter::lte("_created_ms", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::eq("_updated_ms", 0)).await, ["a", "b"]);
+    assert_eq!(ids(Filter::gt("_created_ms", 0)).await, ["c"]);
+    assert_eq!(ids(Filter::exists("_schema", true)).await, ["a", "b", "c"]);
+
+    // A legacy record sorts as created at 0, before the stamped one.
+    let by_created = docs
+        .query_all(&coll, &Query::all().sort(Sort::desc("_created_ms")))
+        .await
+        .unwrap();
+    let order: Vec<&str> = by_created.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(order, ["c", "a", "b"]);
+    let by_schema = docs
+        .query_all(&coll, &Query::all().sort(Sort::asc("_schema")))
+        .await
+        .unwrap();
+    let order: Vec<&str> = by_schema.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(order, ["a", "b", "c"]);
 }

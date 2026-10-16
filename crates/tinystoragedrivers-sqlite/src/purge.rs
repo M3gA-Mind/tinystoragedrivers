@@ -141,7 +141,7 @@ impl ScopePurge for SqlitePurge {
             check(tx, &tables, scope.as_str(), expected)?;
             let generation = expected.0.checked_add(1).and_then(|next| i64::try_from(next).ok())
                 .ok_or_else(|| StorageError::backend("scope generation space is exhausted"))?;
-            for table in [&tables.docs, &tables.tombstones, &tables.fts, &tables.streams, &tables.stream_meta, &tables.blobs] {
+            for table in [&tables.docs, &tables.fields, &tables.fts, &tables.streams, &tables.stream_heads, &tables.blobs] {
                 tx.execute(&format!("DELETE FROM {} WHERE scope = ?1", ident(table)), [scope.as_str()])
                     .map_err(during("purge scope data"))?;
             }

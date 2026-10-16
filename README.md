@@ -7,7 +7,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Deployment | URL | Driver |
 | --- | --- | --- |
 | Tests, stateless embedders | `memory` | in-process maps |
-| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
+| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 | Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
@@ -31,12 +31,25 @@ a MongoDB client, and a cloud build never links SQLite.
 
 A `StorageBackend` hands out a `ScopedStorage` for each `Scope`, the tenant key
 every record carries. Two scopes on one backend never see each other's data.
-`StorageBackend::database(name)` splits a backend into named databases. Under
-SQLite each is its own file; under MongoDB each is a collection prefix.
+A backend is one database: a SQLite file, a MongoDB database, a directory of
+files. Owners keep their data apart with the scope they open, not with a
+separate database.
 
 This repository holds no typed repository for any particular record. Those
 belong to the crate that owns the record, which keeps this crate free of every
 consumer's schema.
+
+## The schema
+
+Since v1.0.0, every record follows one uniform schema
+([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
+
+- **Scopes.** `local` or `u:<id>` for the tenant, optionally narrowed with `/agent:<id>` or `/module:<id>`; `cluster` for placement. Build them with `Scope::tenant`, `.agent` and `.module`.
+- **Names.** Collections are `<owner>.<entity>`, streams `<owner>.<stream>/<key>`, blobs `<owner>/<path>`. Ids come from `Key::of(parts)` or `Key::ulid()`.
+- **Bodies.** Bare snake_case JSON objects, every time an `*_ms` epoch millisecond. tsd keeps `schema`, `created_ms`, `updated_ms` and `expires_ms` per record (`Meta`, `WriteOptions`).
+- **Registry.** Each owning crate exports `storage_schema()`. The host composes them with `Registry::compose`, prepares them, runs their resumable migration steps (`Registry::migrate`) and applies their seal and retention policies (`Registry::maintain`).
+- **Primitives.** `Repo<T>`, `Leases`, `Kv` and `Counters` replace hand-written CAS loops, lease documents, key-value stores and counters.
+- **Streams seal.** A finished stream is folded into one compressed blob and reads exactly as before (`StreamStore::seal`).
 
 ```rust
 use serde_json::json;
@@ -44,7 +57,7 @@ use tinystoragedrivers::{Filter, Precondition, Scope, StorageConfig};
 
 async fn demo() -> tinystoragedrivers::Result<()> {
     let backend = tinystoragedrivers::open(&StorageConfig::parse("memory")?).await?;
-    let jobs = backend.database("cron")?.for_scope(&Scope::local())?;
+    let jobs = backend.for_scope(&Scope::local())?;
     let docs = jobs.documents();
 
     docs.put("jobs", "nightly", json!({"state": "queued", "run_at": 0}), Precondition::Absent)
@@ -83,7 +96,7 @@ against every driver:
 - stream offsets
 - blob ranges
 - scope isolation
-- database isolation
+- scope isolation
 
 ## Develop
 
@@ -125,12 +138,13 @@ GPL-3.0-only. See [`LICENSE`](LICENSE).
 ### Mongo live-test database permissions
 
 Run the complete live suite on a disposable MongoDB server. Transaction race
-fixtures use isolated logical collection prefixes inside the database named in
-`TSD_MONGO_URL` (or `tsd_test` when the URL has no database). This prevents
-parallel schema changes from invalidating unrelated transactions without
-requiring access to other databases.
+fixtures each use their own database on the server named in `TSD_MONGO_URL`
+(`tsd_fx_*`, `tsd_<label>_<pid>` and `tsd_schema_default_*`; the URL's own
+database, or `tsd_test` when it has none, backs the rest). This prevents
+parallel schema changes from invalidating unrelated transactions.
 
-The test account must be allowed to create collections and indexes, and read,
-write and delete documents in the configured database. On an authenticated
-disposable server, `readWrite` on that database is sufficient. The URL's
-`authSource` continues to select the authentication database independently.
+The test account must be allowed to create databases, collections and indexes,
+and read, write and delete documents in them. On an authenticated disposable
+server, `readWrite` on any database (or on those name patterns) is sufficient.
+The URL's `authSource` continues to select the authentication database
+independently.

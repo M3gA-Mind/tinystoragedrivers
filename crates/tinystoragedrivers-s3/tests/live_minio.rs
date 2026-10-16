@@ -27,11 +27,7 @@ async fn live_minio_500_mib_streaming_roundtrip() {
     let Some(driver) = driver().unwrap() else {
         return;
     };
-    let scope = driver
-        .database("large")
-        .unwrap()
-        .for_scope(&Scope::local())
-        .unwrap();
+    let scope = driver.for_scope(&Scope::new("large").unwrap()).unwrap();
     let len = 500 * 1024 * 1024;
     let meta = scope
         .put_stream(
@@ -64,11 +60,7 @@ async fn live_minio_direct_presigned_upload_and_download() {
     let Some(driver) = driver().unwrap() else {
         return;
     };
-    let scope = driver
-        .database("presigned")
-        .unwrap()
-        .for_scope(&Scope::local())
-        .unwrap();
+    let scope = driver.for_scope(&Scope::new("presigned").unwrap()).unwrap();
     let ttl = std::time::Duration::from_secs(60);
     let client = reqwest::Client::new();
     let put = scope.presign_put("direct", ttl).await.unwrap();

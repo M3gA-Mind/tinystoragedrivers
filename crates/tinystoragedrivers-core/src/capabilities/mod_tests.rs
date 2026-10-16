@@ -34,12 +34,15 @@ fn all_holds_every_capability() {
             Capability::StreamingBlobs,
             Capability::CollectionEnumeration,
             Capability::ConditionalStreamAppend,
-            Capability::CrossDatabaseFencing,
             Capability::ValidatedBatch,
             Capability::ScopePurge,
             Capability::AtomicScopePurge,
             Capability::Watch,
             Capability::BlobTtl,
+            Capability::RecordMetadata,
+            Capability::Maintenance,
+            Capability::ScopeEnumeration,
+            Capability::StreamSeal,
         ]
     );
 }
@@ -75,13 +78,16 @@ fn renders_names() {
             Capability::ConditionalStreamAppend,
             "conditional_stream_append",
         ),
-        (Capability::CrossDatabaseFencing, "cross_database_fencing"),
         (Capability::ValidatedBatch, "validated_batch"),
         (Capability::ExistingSchema, "existing_schema"),
         (Capability::CollectionValidation, "collection_validation"),
         (Capability::ScopePurge, "scope_purge"),
         (Capability::AtomicScopePurge, "atomic_scope_purge"),
         (Capability::Watch, "watch"),
+        (Capability::RecordMetadata, "record_metadata"),
+        (Capability::Maintenance, "maintenance"),
+        (Capability::ScopeEnumeration, "scope_enumeration"),
+        (Capability::StreamSeal, "stream_seal"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }

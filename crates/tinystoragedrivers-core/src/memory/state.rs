@@ -12,8 +12,8 @@ use serde_json::Value;
 
 use crate::blob::BlobMeta;
 use crate::document::{
-    CollectionSpec, Precondition, Version, Versioned, validate_collection, validate_doc,
-    validate_id,
+    CollectionSpec, Meta, Precondition, Version, Versioned, WriteOptions, validate_collection,
+    validate_doc, validate_id,
 };
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
@@ -28,6 +28,21 @@ pub(super) type ScopedKey = (String, String);
 pub(super) struct StoredDoc {
     pub(super) version: Version,
     pub(super) doc: Value,
+    pub(super) meta: Meta,
+}
+
+/// One document write: the body, what must hold of the stored document, and
+/// what the writer declares about it.
+#[derive(Debug, Clone)]
+pub(super) struct Write {
+    pub(super) doc: Value,
+    pub(super) precondition: Precondition,
+    pub(super) options: WriteOptions,
+}
+
+/// A clock reading as the signed milliseconds [`Meta`] stores.
+fn clock_ms(now_ms: u64) -> i64 {
+    i64::try_from(now_ms).unwrap_or(i64::MAX)
 }
 
 /// One stream: offsets `base..base + entries.len()` are retained.
@@ -35,11 +50,20 @@ pub(super) struct StoredDoc {
 pub(super) struct StoredStream {
     pub(super) base: u64,
     pub(super) entries: VecDeque<Value>,
+    /// The length the stream had when it was sealed. Once set, the entries
+    /// are read from the sealed blob and `entries` is leftover that sealing
+    /// removes (a sealed stream whose entries survive a crash).
+    pub(super) sealed_len: Option<u64>,
+    /// When the stream was sealed, epoch milliseconds.
+    pub(super) sealed_ms: Option<i64>,
+    /// When a record was last appended, epoch milliseconds.
+    pub(super) last_append_ms: Option<i64>,
 }
 
 impl StoredStream {
     pub(super) fn len(&self) -> u64 {
-        self.base + self.entries.len() as u64
+        self.sealed_len
+            .unwrap_or_else(|| self.base + self.entries.len() as u64)
     }
 }
 
@@ -62,6 +86,31 @@ pub(super) struct DbState {
 }
 
 impl DbState {
+    /// Scopes with any stored record (a document, a tombstone, a stream or a
+    /// blob) that start with `prefix`, in byte order.
+    pub(super) fn scopes(&self, prefix: &str) -> Vec<String> {
+        let documents = self
+            .docs
+            .iter()
+            .filter(|(_, docs)| !docs.is_empty())
+            .map(|(key, _)| key);
+        let tombstones = self
+            .tombstones
+            .iter()
+            .filter(|(_, versions)| !versions.is_empty())
+            .map(|(key, _)| key);
+        documents
+            .chain(tombstones)
+            .chain(self.streams.keys())
+            .chain(self.blobs.keys())
+            .map(|(scope, _)| scope)
+            .filter(|scope| scope.starts_with(prefix))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub(super) fn check_generation(
         &self,
         scope: &str,
@@ -88,8 +137,14 @@ impl DbState {
             .unwrap_or_else(|| CollectionSpec::new(collection))
     }
 
-    /// Whether `doc` has passed its collection's expiry time.
-    pub(super) fn expired(spec: &CollectionSpec, doc: &Value, now_ms: u64) -> bool {
+    /// Whether `stored` has passed its collection's expiry field or its own
+    /// [`Meta::expires_ms`].
+    pub(super) fn expired(spec: &CollectionSpec, stored: &StoredDoc, now_ms: u64) -> bool {
+        stored.meta.is_expired(clock_ms(now_ms))
+            || Self::ttl_field_expired(spec, &stored.doc, now_ms)
+    }
+
+    fn ttl_field_expired(spec: &CollectionSpec, doc: &Value, now_ms: u64) -> bool {
         spec.ttl_field
             .as_deref()
             .and_then(|field| value::lookup(doc, field))
@@ -114,7 +169,7 @@ impl DbState {
             .get(&(scope.to_owned(), collection.to_owned()))
             .map(|docs| {
                 docs.iter()
-                    .filter(|(_, stored)| !Self::expired(&spec, &stored.doc, now_ms))
+                    .filter(|(_, stored)| !Self::expired(&spec, stored, now_ms))
                     .collect()
             })
             .unwrap_or_default()
@@ -131,11 +186,12 @@ impl DbState {
         self.docs
             .get(&(scope.to_owned(), collection.to_owned()))
             .and_then(|docs| docs.get(id))
-            .filter(|stored| !Self::expired(&spec, &stored.doc, now_ms))
+            .filter(|stored| !Self::expired(&spec, stored, now_ms))
             .map(|stored| Versioned {
                 id: id.to_owned(),
                 version: stored.version,
                 doc: stored.doc.clone(),
+                meta: stored.meta,
             })
     }
 
@@ -161,10 +217,14 @@ impl DbState {
         scope: &str,
         collection: &str,
         id: &str,
-        doc: Value,
-        precondition: Precondition,
+        write: Write,
         now_ms: u64,
     ) -> Result<Version> {
+        let Write {
+            doc,
+            precondition,
+            options,
+        } = write;
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&doc)?;
@@ -191,8 +251,22 @@ impl DbState {
                 .next()
                 .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
         };
+        // A live document keeps its creation time; one that was never there,
+        // was deleted or has expired is created now. The update time never
+        // runs backwards, whatever the clock does.
+        let now = clock_ms(now_ms);
+        let meta = Meta {
+            schema: options.schema,
+            created_ms: options
+                .created_ms
+                .unwrap_or_else(|| current.as_ref().map_or(now, |found| found.meta.created_ms)),
+            updated_ms: current
+                .as_ref()
+                .map_or(now, |found| now.max(found.meta.updated_ms)),
+            expires_ms: options.expires_ms,
+        };
         let docs = self.docs.entry(key).or_default();
-        docs.insert(id.to_owned(), StoredDoc { version, doc });
+        docs.insert(id.to_owned(), StoredDoc { version, doc, meta });
         Ok(version)
     }
 
@@ -278,7 +352,7 @@ impl DbState {
         let doomed: Vec<String> = self
             .live(scope, collection, now_ms)
             .into_iter()
-            .filter(|(id, stored)| filter.matches(id, &stored.doc))
+            .filter(|(id, stored)| filter.matches_with(id, &stored.doc, &stored.meta))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &doomed {

@@ -18,6 +18,12 @@
 //! instead), so `len` survives. Each step is idempotent and monotonic, so an
 //! interrupted truncation is finished by the next one.
 //!
+//! A truncation that changed anything then counts itself on the stream head
+//! (`truncate_epoch`) and checks that no seal marked the stream meanwhile. A
+//! seal conditions its marker on that count (see `seal`), so truncation and
+//! sealing are ordered one way or the other: the seal snapshots the truncated
+//! stream, or the truncation is refused with `Conflict`.
+//!
 //! **Deletion** is coordinated with appends through a *generation*. Each
 //! stream has a header in `<prefix>_tsd_stream_heads` holding its generation
 //! `g` (0 when absent), every segment records the generation it was appended
@@ -39,10 +45,14 @@ use mongodb::options::{FindOptions, IndexOptions};
 use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capability, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore,
+    validate_stream,
 };
 
+mod seal;
+
 use crate::backend::Shared;
+use crate::blobs::MongoBlobs;
 use crate::convert::{from_bson, to_bson};
 use crate::errors;
 use crate::fence::in_write;
@@ -53,6 +63,12 @@ use crate::scoped::ScopedCollection;
 
 /// How many times an append retries after another appender took its offset.
 const APPEND_ATTEMPTS: usize = 128;
+
+/// The stream head's count of truncations that changed segments. A seal reads
+/// it before its snapshot and conditions its marker on it being unchanged, so
+/// a truncation that completes after the snapshot can never be undone by a
+/// marker that publishes the older blob (see `seal`).
+const TRUNCATE_EPOCH: &str = "truncate_epoch";
 
 /// One stored segment.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +82,15 @@ pub(crate) struct Segment {
     pub(crate) trimmed: u64,
     /// The retained records, for offsets `start + trimmed..end`.
     pub(crate) values: Vec<Bson>,
+    /// For the seal marker, the first retained offset of the sealed stream.
+    /// A marker is the stream's last segment and holds no entries.
+    pub(crate) sealed_base: Option<u64>,
+    /// When the segment was appended (`ms`), or for the seal marker when the
+    /// stream was sealed. Absent on segments written before times existed.
+    pub(crate) at_ms: Option<i64>,
+    /// On a seal marker, when the last entry was appended (`la`): the entry
+    /// segments that held it are gone once sealing finishes.
+    pub(crate) last_append_ms: Option<i64>,
 }
 
 fn offset(doc: &Document, field: &str) -> Result<u64> {
@@ -96,6 +121,13 @@ impl Segment {
                 .get_array("vs")
                 .map_err(|_| StorageError::serialization("malformed stream segment"))?
                 .clone(),
+            sealed_base: if doc.get_bool("seal").unwrap_or(false) {
+                Some(offset(doc, "sb")?)
+            } else {
+                None
+            },
+            at_ms: doc.get_i64("ms").ok(),
+            last_append_ms: doc.get_i64("la").ok(),
         };
         let covered = segment
             .start
@@ -128,6 +160,7 @@ pub(crate) fn new_segment(
     generation: i64,
     start: u64,
     values: &[Value],
+    now_ms: i64,
 ) -> Result<Document> {
     let values: Vec<Bson> = values.iter().map(to_bson).collect::<Result<_>>()?;
     let count = values.len() as u64;
@@ -142,6 +175,7 @@ pub(crate) fn new_segment(
         "e": stored_offset(end)?,
         "t": 0_i64,
         "vs": values,
+        "ms": now_ms,
     })
 }
 
@@ -195,6 +229,11 @@ impl MongoStreams {
         self
     }
 
+    /// The injected clock's reading, as the signed value BSON stores.
+    fn now_ms(&self) -> i64 {
+        i64::try_from((self.shared.clock)()).unwrap_or(i64::MAX)
+    }
+
     async fn hold_admission(&self, session: &mut ClientSession) -> Result<()> {
         self.shared
             .hold_validation(Some(&self.scope), &mut *session)
@@ -210,6 +249,15 @@ impl MongoStreams {
         Ok(self.shared.scoped(STREAMS, &self.scope))
     }
 
+    /// Blobs of this scope, unfenced: GridFS cannot join a fenced transaction,
+    /// and a sealed stream's blob is written and removed around the fenced
+    /// document writes, never inside one.
+    fn blobs(&self) -> MongoBlobs {
+        MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false)
+            .with_generation(self.generation)
+            .with_sealed_access()
+    }
+
     fn heads(&self) -> ScopedCollection {
         self.shared.scoped(STREAM_HEADS, &self.scope)
     }
@@ -222,6 +270,74 @@ impl MongoStreams {
             .await
             .map_err(errors::failed("read a stream header"))?;
         Ok(head.map_or(0, |head| head.get_i64("g").unwrap_or(0)))
+    }
+
+    /// How many truncations of `stream` have changed its segments.
+    async fn truncate_epoch(
+        &self,
+        stream: &str,
+        session: Option<&mut ClientSession>,
+    ) -> Result<i64> {
+        let head = self
+            .heads()
+            .find_one(doc! {"_id": head_id(&self.scope, stream)}, session)
+            .await
+            .map_err(errors::failed("read a stream header"))?;
+        Ok(head.map_or(0, |head| head.get_i64(TRUNCATE_EPOCH).unwrap_or(0)))
+    }
+
+    /// Record a truncation that changed segments on the stream's head. The
+    /// head is created at generation 0 when the stream never had one.
+    async fn bump_truncate_epoch(
+        &self,
+        stream: &str,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<()> {
+        // Two truncations of a head-less stream race to create it; the loser
+        // retries against the head the winner made (outside a transaction,
+        // where a failed write leaves nothing to abort).
+        let attempts = if session.is_some() { 1 } else { 3 };
+        for attempt in 1..=attempts {
+            let bumped = self
+                .heads()
+                .update_one(
+                    doc! {"_id": head_id(&self.scope, stream), "n": stream},
+                    doc! {"$inc": {TRUNCATE_EPOCH: 1_i64}, "$max": {"g": 0_i64}},
+                    true,
+                    session.as_deref_mut(),
+                )
+                .await;
+            match bumped {
+                Ok(_) => return Ok(()),
+                Err(error) if errors::duplicate_index(&error).is_some() && attempt < attempts => {}
+                Err(error) if errors::duplicate_index(&error).is_some() => {
+                    return Err(StorageError::unavailable(
+                        "stream header changed concurrently; retry",
+                    ));
+                }
+                Err(error) => return Err(errors::map(error, "record a truncation")),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// Refuse to acknowledge a truncation of a stream that a seal marked
+    /// meanwhile: the seal's blob may still hold the entries just cut, and a
+    /// reader of the sealed stream would see them again. The truncation is
+    /// then ordered after the seal, which refuses it as an operation on a
+    /// sealed stream.
+    async fn ensure_unsealed_after_truncate(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        generation: i64,
+        session: Option<&mut ClientSession>,
+    ) -> Result<()> {
+        let last = self.edge(handle, stream, generation, -1, session).await?;
+        if last.is_some_and(|last| last.sealed_base.is_some()) {
+            return Err(StorageError::conflict("stream was sealed while truncating"));
+        }
+        Ok(())
     }
 
     /// The segment of `stream` in `generation` first in `order` (`1` first,
@@ -279,10 +395,13 @@ impl MongoStreams {
                 })?;
         }
         let generation = self.generation(stream, session.as_deref_mut()).await?;
-        let end = self
+        let last = self
             .edge(handle, stream, generation, -1, session.as_deref_mut())
-            .await?
-            .map_or(0, |last| last.end);
+            .await?;
+        if last.as_ref().is_some_and(|last| last.sealed_base.is_some()) {
+            return Err(StorageError::conflict("stream is sealed"));
+        }
+        let end = last.map_or(0, |last| last.end);
         if expected.is_some_and(|offset| offset != end) {
             return Err(StorageError::conflict("stream next offset changed"));
         }
@@ -290,7 +409,10 @@ impl MongoStreams {
             return Ok(Some(end));
         }
         match handle
-            .insert_one(new_segment(stream, generation, end, values)?, session)
+            .insert_one(
+                new_segment(stream, generation, end, values, self.now_ms())?,
+                session,
+            )
             .await
         {
             Ok(()) => Ok(Some(end)),
@@ -317,6 +439,9 @@ impl MongoStreams {
         else {
             return Ok(0);
         };
+        if last.sealed_base.is_some() {
+            return Err(StorageError::conflict("stream is sealed"));
+        }
         let affected = handle
             .find_in(
                 doc! {"s": stream, "g": generation, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
@@ -342,14 +467,17 @@ impl MongoStreams {
                 |segment| segment.start + segment.trimmed,
             );
         let cut = offset.clamp(base, last.end);
+        let mut changed = false;
         for segment in &segments {
             let keep_from = cut.clamp(segment.start, segment.end) - segment.start;
             if segment.end <= cut && segment.start != last.start {
+                changed = true;
                 handle
                     .delete_many(doc! {"_id": segment.id.clone()}, session.as_deref_mut())
                     .await
                     .map_err(errors::failed("truncate a stream"))?;
             } else if keep_from > segment.trimmed {
+                changed = true;
                 let drop = usize::try_from(keep_from - segment.trimmed).unwrap_or(usize::MAX);
                 let rest: Vec<Bson> = segment.values.iter().skip(drop).cloned().collect();
                 handle
@@ -362,6 +490,15 @@ impl MongoStreams {
                     .await
                     .map_err(errors::failed("truncate a stream"))?;
             }
+        }
+        if changed {
+            // Last, so a seal whose snapshot predates this truncation sees the
+            // count move before it publishes (and one that publishes first is
+            // seen here).
+            self.bump_truncate_epoch(stream, session.as_deref_mut())
+                .await?;
+            self.ensure_unsealed_after_truncate(handle, stream, generation, session)
+                .await?;
         }
         Ok(cut - base)
     }
@@ -472,7 +609,12 @@ impl StreamStore for MongoStreams {
                 .await
                 .map_err(errors::failed("read a stream"))?
             {
-                for (offset, value) in Segment::decode(&doc)?.entries_from(from) {
+                let segment = Segment::decode(&doc)?;
+                if segment.sealed_base.is_some() {
+                    // The marker is the last segment: the blob holds it all.
+                    return self.sealed_window(stream, generation, from, limit).await;
+                }
+                for (offset, value) in segment.entries_from(from) {
                     out.push(StreamEntry {
                         offset,
                         value: from_bson(value)?,
@@ -498,6 +640,35 @@ impl StreamStore for MongoStreams {
         })
     }
 
+    async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
+        crate::purge::admitted!(self, {
+            validate_stream(stream)?;
+            let handle = self.segments().await?;
+            let generation = self.generation(stream, None).await?;
+            let Some(last) = self.edge(&handle, stream, generation, -1, None).await? else {
+                return Ok(None);
+            };
+            if let Some(base) = last.sealed_base {
+                return Ok(Some(StreamInfo::new(
+                    base,
+                    last.end,
+                    last.at_ms,
+                    last.last_append_ms,
+                )));
+            }
+            let first = self
+                .edge(&handle, stream, generation, 1, None)
+                .await?
+                .unwrap_or_else(|| last.clone());
+            Ok(Some(StreamInfo::new(
+                first.start + first.trimmed,
+                last.end,
+                None,
+                last.at_ms,
+            )))
+        })
+    }
+
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         crate::purge::admitted!(self, {
             validate_stream(stream)?;
@@ -517,15 +688,31 @@ impl StreamStore for MongoStreams {
         crate::purge::admitted!(self, {
             validate_stream(stream)?;
             let handle = self.segments().await?;
-            if !self.shared.physical_transactions {
-                return self.delete_in(&handle, stream, None).await;
-            }
-            self.shared.prepare_validation(Some(&self.scope)).await?;
-            in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
-                self.delete_in(&handle, stream, Some(session)).await
-            })
+            let removed = if self.shared.physical_transactions {
+                self.shared.prepare_validation(Some(&self.scope)).await?;
+                in_write!(&self.shared, self.fence.as_deref(), session => {
+                    self.hold_admission(&mut *session).await?;
+                    self.delete_in(&handle, stream, Some(session)).await
+                })?
+            } else {
+                self.delete_in(&handle, stream, None).await?
+            };
+            // Even when the stream is gone, clear the blobs of the generations
+            // it deleted, including one a crashed or stalled seal left.
+            self.purge_stale_sealed_blobs(stream).await?;
+            Ok(removed)
         })
+    }
+
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        crate::purge::admitted!(self, self.seal_stream(stream).await)
+    }
+
+    async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
+        crate::purge::admitted!(
+            self,
+            self.delete_sealed_stream_impl(stream, sealed_ms).await
+        )
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {

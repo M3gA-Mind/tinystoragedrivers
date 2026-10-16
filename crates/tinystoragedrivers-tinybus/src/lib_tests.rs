@@ -74,7 +74,8 @@ async fn native_cas_conflicts_preserve_document_and_version() {
         Versioned {
             id: "index".into(),
             version: Version(1),
-            doc: json!({"value":1})
+            doc: json!({"value":1}),
+            meta: None,
         }
     );
     let second = service
@@ -183,7 +184,7 @@ async fn selector_fields_are_rejected_by_actual_dispatch_without_mutation() {
         .documents()
         .clone();
     let (_binding, service) = service(docs.clone(), "learned").await;
-    for field in ["scope", "collection", "url", "database", "generation"] {
+    for field in ["scope", "collection", "url", "generation"] {
         let mut request =
             json!({"document_id":"index","document_json":"{}","precondition":{"kind":"absent"}});
         request[field] = json!("forged");
@@ -290,9 +291,7 @@ fn every_native_failure_category_has_a_content_free_wire_mapping() {
 
 #[tokio::test]
 async fn generation_rejection_wire_mapping_does_not_claim_native_lease_loss() {
-    use tinystoragedrivers_core::{
-        Fence, GuardDatabase, Precondition, PurgeMode, PurgeRequest, PurgeStatus,
-    };
+    use tinystoragedrivers_core::{Fence, Precondition, PurgeMode, PurgeRequest, PurgeStatus};
     let storage = MemoryStorage::new();
     let owner = Scope::new("generation_owner").unwrap();
     let guard_scope = Scope::new("generation_guard").unwrap();
@@ -303,9 +302,7 @@ async fn generation_rejection_wire_mapping_does_not_claim_native_lease_loss() {
         .await
         .unwrap();
     let fence = Fence::epoch(guard_scope, "leases", "active", "epoch", 1);
-    let old = storage
-        .for_scope_fenced_in_database(&owner, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let old = storage.for_scope_fenced(&owner, &fence).unwrap();
     let (_binding, captured) = service(old.documents().clone(), "learned").await;
     let receipt = old
         .purge(&PurgeRequest {
@@ -316,12 +313,7 @@ async fn generation_rejection_wire_mapping_does_not_claim_native_lease_loss() {
         .unwrap();
     assert_eq!(receipt.status, PurgeStatus::Complete);
     let fresh = storage
-        .for_scope_fenced_in_database_generation(
-            &owner,
-            receipt.generation,
-            &fence,
-            &GuardDatabase::Default,
-        )
+        .for_scope_fenced_generation(&owner, receipt.generation, &fence)
         .unwrap();
     fresh
         .documents()

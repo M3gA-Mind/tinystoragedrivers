@@ -28,7 +28,7 @@ pub enum StorageConfig {
     /// Process memory; nothing survives a restart.
     Memory,
     /// SQLite. A path ending in `.db` or `.sqlite` is one database file; any
-    /// other path is a directory holding one file per named database.
+    /// other path is a directory holding the one file `storage.db`.
     Sqlite {
         /// File or directory.
         path: PathBuf,

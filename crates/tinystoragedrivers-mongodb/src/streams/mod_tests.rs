@@ -6,7 +6,7 @@ use tinystoragedrivers_core::ErrorKind;
 
 #[test]
 fn new_segments_cover_their_batch() {
-    let segment = new_segment("log", 0, 4, &[json!(1), json!({"a": 2})]).unwrap();
+    let segment = new_segment("log", 0, 4, &[json!(1), json!({"a": 2})], 77).unwrap();
     assert_eq!(segment.get_str("s").unwrap(), "log");
     assert_eq!(segment.get_i64("o").unwrap(), 4);
     assert_eq!(segment.get_i64("n").unwrap(), 2);
@@ -15,21 +15,27 @@ fn new_segments_cover_their_batch() {
     let decoded = Segment::decode(&segment).unwrap();
     assert_eq!((decoded.start, decoded.end, decoded.trimmed), (4, 6, 0));
     assert_eq!(decoded.id, Bson::Null);
+    assert_eq!(
+        decoded.at_ms,
+        Some(77),
+        "a segment records when it was appended"
+    );
+    assert_eq!(decoded.last_append_ms, None);
 
     assert_eq!(
-        new_segment("log", 0, u64::MAX, &[json!(1)])
+        new_segment("log", 0, u64::MAX, &[json!(1)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", 0, u64::MAX - 1, &[json!(1)])
+        new_segment("log", 0, u64::MAX - 1, &[json!(1)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", 0, 0, &[json!(u64::MAX)])
+        new_segment("log", 0, 0, &[json!(u64::MAX)], 0)
             .unwrap_err()
             .kind(),
         ErrorKind::Serialization
@@ -134,5 +140,28 @@ async fn live_conditional_append_rejects_a_generation_deleted_after_its_snapshot
     assert_eq!(
         streams.read_window(&name, 0, 10).await.unwrap()[0].value,
         json!(3)
+    );
+}
+
+#[test]
+fn a_seal_marker_is_an_empty_last_segment_carrying_the_base() {
+    let marker = Segment::decode(&doc! {
+        "_id": 1, "o": 7_i64, "e": 7_i64, "t": 0_i64, "vs": [],
+        "seal": true, "sb": 3_i64,
+    })
+    .unwrap();
+    assert_eq!(marker.sealed_base, Some(3));
+    assert_eq!(marker.entries_from(0).count(), 0);
+    let plain = Segment::decode(&doc! {
+        "_id": 2, "o": 0_i64, "e": 1_i64, "t": 0_i64, "vs": ["a"],
+    })
+    .unwrap();
+    assert_eq!(plain.sealed_base, None);
+    // A marker without its base is malformed rather than silently unsealed.
+    assert!(
+        Segment::decode(&doc! {
+            "_id": 3, "o": 7_i64, "e": 7_i64, "t": 0_i64, "vs": [], "seal": true,
+        })
+        .is_err()
     );
 }

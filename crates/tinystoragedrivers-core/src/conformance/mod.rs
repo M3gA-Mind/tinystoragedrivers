@@ -21,8 +21,12 @@ mod documents;
 mod fencing;
 mod isolation;
 mod ledger;
+mod maintenance;
+mod primitives;
 mod purge;
 mod purge_history;
+mod schema;
+mod seal;
 mod semantics;
 mod streams;
 mod validated;
@@ -41,17 +45,20 @@ use crate::scope::Scope;
 /// against one already-scoped handle.
 ///
 /// This is the part of [`run`] that needs nothing from the backend itself, so
-/// a client that cannot choose scopes, databases or fences (a storage-bus
-/// client bound by its host) runs it directly. The scope, database, purge and
+/// a client that cannot choose scopes or fences (a storage-bus
+/// client bound by its host) runs it directly. The scope, purge and
 /// fencing checks stay in [`run`].
 pub async fn run_ports(storage: &ScopedStorage) {
     documents::run(storage).await;
     ledger::run(storage).await;
     semantics::run(storage).await;
+    schema::run(storage).await;
     validated::run(storage).await;
     watch::run(storage).await;
     streams::run(storage).await;
+    seal::run(storage).await;
     blobs::run(storage).await;
+    primitives::run(storage).await;
 }
 
 /// Run every check against `backend`.
@@ -69,6 +76,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
     run_ports(&local).await;
+    seal::run_host(&local).await;
     if single_scope {
         let other = Scope::new("conformance-b").expect("valid scope");
         assert!(
@@ -80,8 +88,8 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         validated::isolation(backend).await;
         purge::run(backend).await;
         purge_history::run(backend).await;
+        maintenance::run(backend).await;
     }
-    isolation::databases(backend).await;
     fencing::run(backend, single_scope).await;
 }
 

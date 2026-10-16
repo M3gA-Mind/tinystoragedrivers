@@ -31,12 +31,16 @@
 //! dependency graph.
 
 mod blobs;
+mod body;
 mod connection;
 mod documents;
 mod error;
 mod fence;
+mod fields;
+mod maintenance;
 mod native;
 mod purge;
+mod scopes;
 mod sql;
 mod storage;
 mod streams;

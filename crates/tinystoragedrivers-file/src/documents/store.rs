@@ -1,4 +1,4 @@
-//! The document rules applied to files, run under the database lock.
+//! The document rules applied to files, run under the directory lock.
 //!
 //! These mirror the memory driver's `DbState` one for one: expired documents
 //! stay on disk (so versions keep rising across expiry) but read as absent.
@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CollectionSpec, Filter, Precondition, Result, Scope, Sort, StorageError, Version, Versioned,
-    sort_documents, validate_collection, validate_doc, validate_id, value,
+    CollectionSpec, Filter, Meta, Precondition, Result, Scope, Sort, StorageError, Version,
+    Versioned, WriteOptions, sort_documents_with_meta, validate_collection, validate_doc,
+    validate_id, value,
 };
 
 use crate::encode::{decode, dir_components, file_stem};
@@ -32,16 +33,29 @@ struct Record {
     version: Version,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     doc: Option<Value>,
+    /// The record metadata, kept in the envelope beside the body. A file
+    /// written before it existed reads as [`Meta::unknown`].
+    #[serde(default, skip_serializing_if = "is_unknown")]
+    meta: Meta,
+}
+
+fn is_unknown(meta: &Meta) -> bool {
+    *meta == Meta::unknown()
 }
 
 impl Record {
     /// The stored document, unless it is a tombstone or has expired.
     fn live(self, spec: &CollectionSpec, now_ms: u64) -> Option<StoredDoc> {
         let doc = self.doc?;
-        (!expired(spec, &doc, now_ms)).then_some(StoredDoc {
+        let lapsed = expired(spec, &doc, now_ms)
+            || self
+                .meta
+                .is_expired(i64::try_from(now_ms).unwrap_or(i64::MAX));
+        (!lapsed).then_some(StoredDoc {
             id: self.id,
             version: self.version,
             doc,
+            meta: self.meta,
         })
     }
 }
@@ -52,6 +66,7 @@ pub(super) struct StoredDoc {
     pub(super) id: String,
     pub(super) version: Version,
     pub(super) doc: Value,
+    pub(super) meta: Meta,
 }
 
 impl StoredDoc {
@@ -60,6 +75,7 @@ impl StoredDoc {
             id: self.id,
             version: self.version,
             doc: self.doc,
+            meta: self.meta,
         }
     }
 }
@@ -71,7 +87,7 @@ pub(super) fn collision() -> StorageError {
     StorageError::backend("file storage name hash collision; refusing to overwrite another entry")
 }
 
-/// One scope's documents in one database.
+/// One scope's documents.
 #[derive(Debug)]
 pub(super) struct Docs<'a> {
     pub(super) db: &'a Db,
@@ -171,6 +187,7 @@ impl Docs<'_> {
         id: &str,
         doc: Value,
         precondition: Precondition,
+        options: WriteOptions,
     ) -> Result<Version> {
         validate_collection(collection)?;
         validate_id(id)?;
@@ -180,7 +197,7 @@ impl Docs<'_> {
         let current = stored
             .clone()
             .and_then(|record| record.live(&spec, self.now));
-        check(precondition, current.map(|stored| stored.version))?;
+        check(precondition, current.as_ref().map(|stored| stored.version))?;
         if spec.indexes.iter().any(|index| index.unique) {
             unique_clash(&spec, &self.live(&spec)?, id, &doc)?;
         }
@@ -193,10 +210,25 @@ impl Docs<'_> {
                 .next()
                 .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
         };
+        // A live document keeps its creation time; one that was never there,
+        // was deleted or has expired is created now. The update time never
+        // runs backwards (the memory driver's rule).
+        let now = i64::try_from(self.now).unwrap_or(i64::MAX);
+        let meta = Meta {
+            schema: options.schema,
+            created_ms: options
+                .created_ms
+                .unwrap_or_else(|| current.as_ref().map_or(now, |found| found.meta.created_ms)),
+            updated_ms: current
+                .as_ref()
+                .map_or(now, |found| now.max(found.meta.updated_ms)),
+            expires_ms: options.expires_ms,
+        };
         let record = Record {
             id: id.to_owned(),
             version,
             doc: Some(doc),
+            meta,
         };
         write_json(&self.doc_path(collection, id), &record)?;
         Ok(version)
@@ -234,6 +266,7 @@ impl Docs<'_> {
         }
         let tombstone = Record {
             doc: None,
+            meta: Meta::unknown(),
             ..record
         };
         write_json(&self.doc_path(collection, &tombstone.id), &tombstone)?;
@@ -253,10 +286,12 @@ impl Docs<'_> {
         let mut found: Vec<Versioned<Value>> = self
             .live(&spec)?
             .into_iter()
-            .filter(|stored| filter.matches(&stored.id, &stored.doc))
+            .filter(|stored| filter.matches_with(&stored.id, &stored.doc, &stored.meta))
             .map(StoredDoc::versioned)
             .collect();
-        sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
+        sort_documents_with_meta(&mut found, sort, |item| {
+            (item.id.as_str(), &item.doc, &item.meta)
+        });
         Ok(found)
     }
 
@@ -270,6 +305,7 @@ impl Docs<'_> {
                     id: doc.id,
                     version: doc.version,
                     doc: Some(doc.doc),
+                    meta: doc.meta,
                 },
             )?;
         }

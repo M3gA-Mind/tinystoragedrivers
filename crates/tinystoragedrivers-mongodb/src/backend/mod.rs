@@ -7,7 +7,7 @@
 
 pub(crate) mod specs;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,15 +17,15 @@ use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, ClientSession, Collection, Database};
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Fence, GuardDatabase, Result, Scope, ScopedStorage,
-    StorageBackend, StorageError, validate_collection, validate_database,
+    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError, validate_collection,
 };
 
 use crate::blobs::MongoBlobs;
 use crate::documents::MongoDocuments;
 use crate::errors;
 use crate::fence::Fencing;
-use crate::naming::{BLOBS, STREAM_HEADS, STREAMS, database_prefix, validate_mongo_database};
+use crate::naming::{BLOBS, STREAM_HEADS, STREAMS, validate_mongo_database};
 use crate::scoped::ScopedCollection;
 use crate::streams::MongoStreams;
 
@@ -48,13 +48,11 @@ pub(crate) fn supports_transactions(hello: &Document) -> bool {
     sessions && (replica_set || router)
 }
 
-/// What every handle of one named database shares.
+/// What every handle of the database shares.
 pub(crate) struct Shared {
     pub(crate) client: Client,
     pub(crate) watch_origin: mongodb::bson::oid::ObjectId,
     pub(crate) db: Database,
-    /// Prepended to every Mongo collection name: empty for the root database.
-    pub(crate) prefix: String,
     pub(crate) clock: Clock,
     pub(crate) transactions: bool,
     /// Detected server support, retained when public capabilities are disabled.
@@ -66,10 +64,9 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn new(
+    pub(crate) fn new(
         client: Client,
         db: Database,
-        prefix: String,
         clock: Clock,
         transactions: bool,
         physical_transactions: bool,
@@ -78,7 +75,6 @@ impl Shared {
             watch_origin: mongodb::bson::oid::ObjectId::new(),
             client,
             db,
-            prefix,
             clock,
             transactions,
             physical_transactions,
@@ -203,7 +199,7 @@ impl Shared {
     /// The raw Mongo collection behind a driver or port collection name.
     /// Only collection-wide bookkeeping (specs, indexes) uses this directly.
     pub(crate) fn raw(&self, name: &str) -> Collection<Document> {
-        self.db.collection(&format!("{}{name}", self.prefix))
+        self.db.collection(name)
     }
 
     /// The scoped handle to a port or driver collection.
@@ -215,7 +211,6 @@ impl Shared {
 impl fmt::Debug for Shared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
-            .field("prefix", &self.prefix)
             .field("transactions", &self.transactions)
             .finish_non_exhaustive()
     }
@@ -224,8 +219,7 @@ impl fmt::Debug for Shared {
 /// A [`StorageBackend`] on MongoDB.
 ///
 /// Every scope shares the database; each record carries a `_scope` field that
-/// every query, write and index includes. [`StorageBackend::database`] maps a
-/// name to the collection prefix `<name>:`.
+/// every query, write and index includes.
 ///
 /// ```no_run
 /// # async fn demo() -> tinystoragedrivers_core::Result<()> {
@@ -233,7 +227,7 @@ impl fmt::Debug for Shared {
 /// use tinystoragedrivers_mongodb::MongoStorage;
 ///
 /// let storage = MongoStorage::connect("mongodb://db.internal/openhuman", "openhuman").await?;
-/// let alice = storage.database("approvals")?.for_scope(&Scope::new("alice")?)?;
+/// let alice = storage.for_scope(&Scope::new("alice")?)?;
 /// assert_eq!(alice.driver(), "mongodb");
 /// # Ok(())
 /// # }
@@ -241,7 +235,6 @@ impl fmt::Debug for Shared {
 #[derive(Clone)]
 pub struct MongoStorage {
     pub(crate) shared: Arc<Shared>,
-    pub(crate) databases: Arc<Mutex<BTreeMap<String, Arc<Shared>>>>,
 }
 
 impl MongoStorage {
@@ -289,14 +282,12 @@ impl MongoStorage {
         let shared = Shared::new(
             client,
             db,
-            String::new(),
             Arc::new(system_clock),
             supports_transactions(&hello),
             supports_transactions(&hello),
         );
         Ok(Self {
             shared: Arc::new(shared),
-            databases: Arc::default(),
         })
     }
 
@@ -324,7 +315,6 @@ impl MongoStorage {
         let shared = Shared::new(
             self.shared.client.clone(),
             self.shared.db.clone(),
-            self.shared.prefix.clone(),
             clock,
             transactions,
             self.shared.physical_transactions,
@@ -332,7 +322,6 @@ impl MongoStorage {
         .with_existing(self.shared.existing);
         Self {
             shared: Arc::new(shared),
-            databases: Arc::default(),
         }
     }
 
@@ -473,7 +462,9 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionEnumeration)
             .with(Capability::ExistingSchema)
             .with(Capability::CollectionValidation)
-            .with(Capability::BlobTtl);
+            .with(Capability::BlobTtl)
+            .with(Capability::ScopeEnumeration)
+            .with(Capability::StreamSeal);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {
@@ -484,18 +475,20 @@ impl StorageBackend for MongoStorage {
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
-                .with(Capability::CrossDatabaseFencing)
                 .with(Capability::ScopePurge)
         } else {
             base
         }
     }
 
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        crate::scopes::list(&self.shared, prefix).await
+    }
+
     fn existing_schema(&self) -> Result<Arc<dyn StorageBackend>> {
         let shared = Shared::new(
             self.shared.client.clone(),
             self.shared.db.clone(),
-            self.shared.prefix.clone(),
             Arc::clone(&self.shared.clock),
             self.shared.transactions,
             self.shared.physical_transactions,
@@ -503,7 +496,6 @@ impl StorageBackend for MongoStorage {
         .with_existing(true);
         Ok(Arc::new(Self {
             shared: Arc::new(shared),
-            databases: Arc::default(),
         }))
     }
 
@@ -526,7 +518,7 @@ impl StorageBackend for MongoStorage {
             if !self.shared.collection_exists(&name).await? {
                 self.shared
                     .db
-                    .create_collection(format!("{}{name}", self.shared.prefix))
+                    .create_collection(name.clone())
                     .await
                     .map_err(errors::failed("prepare internal collection"))?;
             }
@@ -586,121 +578,44 @@ impl StorageBackend for MongoStorage {
         ))
     }
 
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        locator: &GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        fence.validate()?;
-        locator.validate()?;
-        if *locator == GuardDatabase::Current {
-            return self.for_scope_fenced(scope, fence);
-        }
-        if !self.shared.transactions {
-            return Err(StorageError::unsupported(
-                Capability::CrossDatabaseFencing,
-                "cross-database fencing needs transactions",
-            ));
-        }
-        let guard = match locator {
-            GuardDatabase::Default => Arc::new(
-                Shared::new(
-                    self.shared.client.clone(),
-                    self.shared.db.clone(),
-                    String::new(),
-                    Arc::clone(&self.shared.clock),
-                    true,
-                    self.shared.physical_transactions,
-                )
-                .with_existing(self.shared.existing),
-            ),
-            GuardDatabase::Named(name) => self.named(name)?,
-            GuardDatabase::Current => unreachable!(),
-        };
-        Ok(self.handles(
-            scope,
-            Some(&Arc::new(Fencing {
-                fence: fence.clone(),
-                shared: guard,
-            })),
-        ))
-    }
-
-    fn for_scope_fenced_in_database_generation(
+    fn for_scope_fenced_generation(
         &self,
         scope: &Scope,
         generation: tinystoragedrivers_core::ScopeGeneration,
         fence: &Fence,
-        locator: &GuardDatabase,
     ) -> Result<ScopedStorage> {
-        // Validate and resolve the guard using the existing native binding contract.
-        self.for_scope_fenced_in_database(scope, fence, locator)?;
-        let shared = match locator {
-            GuardDatabase::Current => Arc::clone(&self.shared),
-            GuardDatabase::Default => Arc::new(
-                Shared::new(
-                    self.shared.client.clone(),
-                    self.shared.db.clone(),
-                    String::new(),
-                    Arc::clone(&self.shared.clock),
-                    true,
-                    self.shared.physical_transactions,
-                )
-                .with_existing(self.shared.existing),
-            ),
-            GuardDatabase::Named(name) => self.named(name)?,
-        };
+        self.for_scope_fenced(scope, fence)?;
         Ok(self.handles_generation(
             scope,
             Some(&Arc::new(Fencing {
                 fence: fence.clone(),
-                shared,
+                shared: Arc::clone(&self.shared),
             })),
             generation,
         ))
     }
-
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Self {
-            shared: self.named(name)?,
-            databases: Arc::clone(&self.databases),
-        }))
-    }
 }
 
 impl MongoStorage {
-    /// Typed fixture access to the same logical namespace as `database(name)`.
-    /// Kept test-only so fixture isolation does not expand the production API.
+    /// Test-only: the same client on a separate MongoDB database named after
+    /// `name`, so live tests do not share collections. Kept out of the
+    /// production API; a deployment connects to one database.
     #[cfg(test)]
     pub(crate) fn fixture_named(&self, name: &str) -> Result<Self> {
+        let database = format!("tsd_fx_{:016x}", crate::naming::fnv1a(name.as_bytes()));
+        validate_mongo_database(&database)?;
         Ok(Self {
-            shared: self.named(name)?,
-            databases: Arc::clone(&self.databases),
-        })
-    }
-
-    pub(crate) fn named(&self, name: &str) -> Result<Arc<Shared>> {
-        validate_database(name)?;
-        let mut databases = self
-            .databases
-            .lock()
-            .map_err(|_| StorageError::backend("mongodb database registry lock poisoned"))?;
-        Ok(Arc::clone(databases.entry(name.to_owned()).or_insert_with(
-            || {
-                Arc::new(
-                    Shared::new(
-                        self.shared.client.clone(),
-                        self.shared.db.clone(),
-                        database_prefix(name),
-                        Arc::clone(&self.shared.clock),
-                        self.shared.transactions,
-                        self.shared.physical_transactions,
-                    )
-                    .with_existing(self.shared.existing),
+            shared: Arc::new(
+                Shared::new(
+                    self.shared.client.clone(),
+                    self.shared.client.database(&database),
+                    Arc::clone(&self.shared.clock),
+                    self.shared.transactions,
+                    self.shared.physical_transactions,
                 )
-            },
-        )))
+                .with_existing(self.shared.existing),
+            ),
+        })
     }
 }
 

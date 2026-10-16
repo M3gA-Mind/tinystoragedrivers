@@ -16,6 +16,14 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `Key::of` hashes keys that outgrow the document id limit.
+sha2 = { workspace = true }
+# `Key::ulid`: time-sortable entity ids.
+ulid = { workspace = true }
+# Hashed scope segments and keys: lowercase RFC 4648 base32.
+data-encoding = { workspace = true }
+# Sealed streams (`SealedLog`) are zstd-compressed JSON.
+zstd = { workspace = true }
 # AsyncRead is the streaming blob port; io-util adds no runtime or transport.
 tokio = { workspace = true, features = ["io-util", "time"] }
 

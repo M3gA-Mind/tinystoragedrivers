@@ -5,16 +5,19 @@
 //! (preconditions, unique indexes, claims) is atomic.
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CollectionSpec, CursorPosition, Filter, Precondition, Result, Sort, StorageError, Version,
-    Versioned, sort_documents, validate_collection, validate_doc, validate_id, value,
+    CollectionSpec, CursorPosition, Filter, Meta, Precondition, Result, Sort, StorageError,
+    Version, Versioned, WriteOptions, sort_documents_with_meta, validate_collection, validate_doc,
+    validate_id, value,
 };
 
-use super::pushdown;
+use super::{ordered, pushdown};
+use crate::body;
 use crate::error::during;
-use crate::sql::{Tables, ident, json_path, literal};
+use crate::fields;
+use crate::sql::{Tables, ident, literal};
 
 /// Who is asking and when.
 #[derive(Debug, Clone, Copy)]
@@ -89,30 +92,8 @@ pub(crate) fn declare(
     );
     conn.execute(&sql, params![merged.name, serde_json::to_string(&merged)?])
         .map_err(during("declare collection"))?;
-    for index in &merged.indexes {
-        // An index is a performance hint: skip one whose paths SQLite cannot
-        // express; queries on it are evaluated in Rust either way.
-        let Some(columns) = index
-            .fields
-            .iter()
-            .map(|field| {
-                json_path(field).map(|path| format!("json_extract(doc, {})", literal(&path)))
-            })
-            .collect::<Option<Vec<String>>>()
-        else {
-            continue;
-        };
-        let sql = format!(
-            "CREATE INDEX IF NOT EXISTS {name} ON {docs} (scope, {columns}) WHERE coll = {coll}",
-            name = ident(&format!(
-                "{}tsd_ix_{}_{}",
-                tables.prefix, merged.name, index.name
-            )),
-            docs = ident(&tables.docs),
-            columns = columns.join(", "),
-            coll = literal(&merged.name),
-        );
-        conn.execute_batch(&sql).map_err(during("create index"))?;
+    if fields::projected(&existing) != fields::projected(&merged) {
+        fields::rebuild(conn, tables, &merged)?;
     }
     if existing.search != merged.search {
         reindex(conn, tables, &merged)?;
@@ -138,19 +119,21 @@ fn check_existing_unique(
         return Ok(());
     }
     let sql = format!(
-        "SELECT scope, doc FROM {} WHERE coll = ?1",
+        "SELECT scope, body, expires_ms FROM {} WHERE coll = ?1 AND deleted = 0",
         ident(&tables.docs)
     );
     let mut statement = conn.prepare(&sql).map_err(during("check unique"))?;
-    let rows: Vec<(String, String)> = statement
-        .query_map([&merged.name], |row| Ok((row.get(0)?, row.get(1)?)))
+    let rows: Vec<(String, SqlValue, Option<i64>)> = statement
+        .query_map([&merged.name], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(during("check unique"))?
         .collect::<rusqlite::Result<_>>()
         .map_err(during("check unique"))?;
     let mut docs = Vec::with_capacity(rows.len());
-    for (scope, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
-        if !expired(merged, &doc, now_ms) {
+    for (scope, doc, expires_ms) in rows {
+        let doc = body::decode(&doc)?;
+        if !lapsed(merged, &doc, expires_ms, now_ms) {
             docs.push((scope, doc));
         }
     }
@@ -190,11 +173,11 @@ fn reindex(conn: &Connection, tables: &Tables, spec: &CollectionSpec) -> Result<
     conn.execute(&sql, [&spec.name])
         .map_err(during("reindex"))?;
     let sql = format!(
-        "SELECT scope, id, doc FROM {} WHERE coll = ?1",
+        "SELECT scope, id, body FROM {} WHERE coll = ?1 AND deleted = 0",
         ident(&tables.docs)
     );
     let mut statement = conn.prepare(&sql).map_err(during("reindex"))?;
-    let rows: Vec<(String, String, String)> = statement
+    let rows: Vec<(String, String, SqlValue)> = statement
         .query_map([&spec.name], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
@@ -202,7 +185,7 @@ fn reindex(conn: &Connection, tables: &Tables, spec: &CollectionSpec) -> Result<
         .collect::<rusqlite::Result<_>>()
         .map_err(during("reindex"))?;
     for (scope, id, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
+        let doc = body::decode(&doc)?;
         index_text(conn, tables, spec, &scope, &id, &doc)?;
     }
     Ok(())
@@ -272,28 +255,68 @@ pub(crate) fn expired(spec: &CollectionSpec, doc: &Value, now_ms: u64) -> bool {
         })
 }
 
-/// The stored row, live or expired.
-fn stored(
+/// Whether a document with `expires_ms` has lapsed: past its own expiry or
+/// its collection's v1 ttl field.
+pub(crate) fn lapsed(
+    spec: &CollectionSpec,
+    doc: &Value,
+    expires_ms: Option<i64>,
+    now_ms: u64,
+) -> bool {
+    let now = i64::try_from(now_ms).unwrap_or(i64::MAX);
+    expires_ms.is_some_and(|expires| expires <= now) || expired(spec, doc, now_ms)
+}
+
+/// A stored row: live, expired or deleted.
+pub(super) struct Stored {
+    pub(super) version: Version,
+    pub(super) meta: Meta,
+    deleted: bool,
+    pub(super) doc: Value,
+}
+
+impl Stored {
+    /// Whether a reader sees this row.
+    pub(super) fn is_live(&self, spec: &CollectionSpec, now_ms: u64) -> bool {
+        !self.deleted && !lapsed(spec, &self.doc, self.meta.expires_ms, now_ms)
+    }
+}
+
+/// The metadata columns `schema, created_ms, updated_ms, expires_ms`, read
+/// from `first` onward.
+fn meta_at(row: &Row<'_>, first: usize) -> rusqlite::Result<Meta> {
+    Ok(Meta {
+        schema: u32::try_from(row.get::<_, i64>(first)?).unwrap_or(0),
+        created_ms: row.get(first + 1)?,
+        updated_ms: row.get(first + 2)?,
+        expires_ms: row.get(first + 3)?,
+    })
+}
+
+/// The stored row, live, expired or deleted.
+pub(super) fn stored(
     conn: &Connection,
     ctx: Ctx<'_>,
     collection: &str,
     id: &str,
-) -> Result<Option<Versioned<Value>>> {
+) -> Result<Option<Stored>> {
     let sql = format!(
-        "SELECT version, doc FROM {} WHERE scope = ?1 AND coll = ?2 AND id = ?3",
+        "SELECT version, schema, created_ms, updated_ms, expires_ms, deleted, body FROM {}
+         WHERE scope = ?1 AND coll = ?2 AND id = ?3",
         ident(&ctx.tables.docs)
     );
-    let row: Option<(i64, String)> = conn
+    let row: Option<(i64, Meta, bool, SqlValue)> = conn
         .query_row(&sql, params![ctx.scope, collection, id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, meta_at(row, 1)?, row.get(5)?, row.get(6)?))
         })
         .optional()
         .map_err(during("get"))?;
-    row.map(|(version, doc)| {
-        Ok(Versioned {
-            id: id.to_owned(),
+    row.map(|(version, meta, deleted, body)| {
+        Ok(Stored {
             version: to_version(version),
-            doc: serde_json::from_str(&doc)?,
+            meta,
+            deleted,
+            doc: body::decode(&body)?,
         })
     })
     .transpose()
@@ -309,17 +332,24 @@ pub(crate) fn get(
     validate_collection(collection)?;
     validate_id(id)?;
     let spec = load_spec(conn, ctx.tables, collection)?;
-    Ok(stored(conn, ctx, collection, id)?.filter(|found| !expired(&spec, &found.doc, ctx.now_ms)))
+    Ok(stored(conn, ctx, collection, id)?
+        .filter(|found| found.is_live(&spec, ctx.now_ms))
+        .map(|found| Versioned {
+            id: id.to_owned(),
+            version: found.version,
+            doc: found.doc,
+            meta: found.meta,
+        }))
 }
 
 /// Enforce a precondition against the live document, if any.
-fn check(precondition: Precondition, current: Option<&Versioned<Value>>) -> Result<()> {
+fn check(precondition: Precondition, current: Option<Version>) -> Result<()> {
     match (precondition, current) {
         (Precondition::None, _) | (Precondition::Absent, None) => Ok(()),
         (Precondition::Absent, Some(_)) => {
             Err(StorageError::conflict("the document already exists"))
         }
-        (Precondition::Version(expected), Some(found)) if found.version == expected => Ok(()),
+        (Precondition::Version(expected), Some(found)) if found == expected => Ok(()),
         (Precondition::Version(_), _) => Err(StorageError::conflict(
             "the document is not at the expected version",
         )),
@@ -334,10 +364,11 @@ pub(crate) fn matching(
     filter: &Filter,
     sort: &[Sort],
 ) -> Result<Vec<Versioned<Value>>> {
-    matching_after(conn, ctx, collection, filter, sort, None)
+    matching_after(conn, ctx, collection, filter, sort, None, None)
 }
 
-/// Live documents strictly after an optional cursor in `sort` order.
+/// Live documents strictly after an optional cursor in `sort` order; with a
+/// `limit`, at least the first `limit` of them (SQL may stop there).
 pub(crate) fn matching_after(
     conn: &Connection,
     ctx: Ctx<'_>,
@@ -345,51 +376,60 @@ pub(crate) fn matching_after(
     filter: &Filter,
     sort: &[Sort],
     after: Option<&CursorPosition>,
+    limit: Option<usize>,
 ) -> Result<Vec<Versioned<Value>>> {
     validate_collection(collection)?;
     filter.validate()?;
     let spec = load_spec(conn, ctx.tables, collection)?;
+    if let Some(limit) = limit
+        && let Some(found) =
+            ordered::matching_ordered(conn, ctx, &spec, filter, sort, after, limit)?
+    {
+        return Ok(found);
+    }
     let mut sql = format!(
-        "SELECT id, version, doc FROM {} WHERE scope = ? AND coll = {}",
+        "SELECT id, version, schema, created_ms, updated_ms, expires_ms, body FROM {}
+         WHERE scope = ? AND coll = {} AND deleted = 0 AND (expires_ms IS NULL OR expires_ms > ?)",
         ident(&ctx.tables.docs),
         literal(collection)
     );
-    let mut params = vec![SqlValue::Text(ctx.scope.to_owned())];
-    if let Some(clause) = pushdown::clause(filter) {
-        sql.push_str(" AND (");
-        sql.push_str(&clause.sql);
-        sql.push(')');
-        params.extend(clause.params);
-    }
-    if let Some(clause) = after.and_then(|position| pushdown::after(position, sort)) {
+    let mut params = vec![
+        SqlValue::Text(ctx.scope.to_owned()),
+        SqlValue::Integer(i64::try_from(ctx.now_ms).unwrap_or(i64::MAX)),
+    ];
+    let projection = pushdown::Projection::new(ctx, &spec, collection);
+    if let Some(clause) = pushdown::clause(filter, &projection) {
         sql.push_str(" AND (");
         sql.push_str(&clause.sql);
         sql.push(')');
         params.extend(clause.params);
     }
     let mut statement = conn.prepare(&sql).map_err(during("query"))?;
-    let rows: Vec<(String, i64, String)> = statement
+    let rows: Vec<(String, i64, Meta, SqlValue)> = statement
         .query_map(params_from_iter(params), |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, meta_at(row, 2)?, row.get(6)?))
         })
         .map_err(during("query"))?
         .collect::<rusqlite::Result<_>>()
         .map_err(during("query"))?;
     let mut found = Vec::with_capacity(rows.len());
-    for (id, version, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
-        if !expired(&spec, &doc, ctx.now_ms) && filter.matches(&id, &doc) {
+    for (id, version, meta, doc) in rows {
+        let doc = body::decode(&doc)?;
+        if !expired(&spec, &doc, ctx.now_ms) && filter.matches_with(&id, &doc, &meta) {
             found.push(Versioned {
                 id,
                 version: to_version(version),
                 doc,
+                meta,
             });
         }
     }
-    sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
+    sort_documents_with_meta(&mut found, sort, |item| {
+        (item.id.as_str(), &item.doc, &item.meta)
+    });
     if let Some(after) = after {
         found.retain(|item| {
-            CursorPosition::for_document(&item.id, &item.doc, sort).compare(after, sort)
+            CursorPosition::for_record(&item.id, &item.doc, &item.meta, sort).compare(after, sort)
                 == std::cmp::Ordering::Greater
         });
     }
@@ -440,6 +480,30 @@ pub(crate) fn put(
     doc: &Value,
     precondition: Precondition,
 ) -> Result<Version> {
+    put_with(
+        conn,
+        ctx,
+        collection,
+        id,
+        doc,
+        precondition,
+        WriteOptions::default(),
+    )
+}
+
+/// As [`put`], also recording the declared schema and expiry.
+///
+/// A live document keeps its `created_ms`; one that was never there, was
+/// deleted or has expired is created now. `updated_ms` never runs backwards.
+pub(crate) fn put_with(
+    conn: &Connection,
+    ctx: Ctx<'_>,
+    collection: &str,
+    id: &str,
+    doc: &Value,
+    precondition: Precondition,
+    options: WriteOptions,
+) -> Result<Version> {
     validate_collection(collection)?;
     validate_id(id)?;
     validate_doc(doc)?;
@@ -447,16 +511,12 @@ pub(crate) fn put(
     let previous = stored(conn, ctx, collection, id)?;
     let live = previous
         .as_ref()
-        .filter(|found| !expired(&spec, &found.doc, ctx.now_ms));
-    check(precondition, live)?;
+        .filter(|found| found.is_live(&spec, ctx.now_ms));
+    check(precondition, live.map(|found| found.version))?;
     check_unique(conn, ctx, &spec, id, doc)?;
-    // Versions keep rising across expiry, so a stale CAS on a re-created
-    // document still fails.
-    let last = match &previous {
-        Some(found) => Some(found.version),
-        None => buried_version(conn, ctx, collection, id)?,
-    };
-    let version = match last {
+    // Versions keep rising across expiry and deletion (a deleted row keeps its
+    // version), so a stale CAS on a re-created document still fails.
+    let version = match previous.as_ref().map(|found| found.version) {
         None => Version::FIRST,
         Some(last) => last
             .next()
@@ -465,9 +525,19 @@ pub(crate) fn put(
     };
     let stored_version = i64::try_from(version.0)
         .map_err(|_| StorageError::backend("document version space is exhausted"))?;
+    let now = i64::try_from(ctx.now_ms).unwrap_or(i64::MAX);
+    // A migration may carry a record's original creation time over.
+    let created_ms = options
+        .created_ms
+        .unwrap_or_else(|| live.map_or(now, |found| found.meta.created_ms));
+    let updated_ms = live.map_or(now, |found| now.max(found.meta.updated_ms));
     let sql = format!(
-        "INSERT INTO {} (scope, coll, id, version, doc) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT (scope, coll, id) DO UPDATE SET version = excluded.version, doc = excluded.doc",
+        "INSERT INTO {} (scope, coll, id, version, schema, created_ms, updated_ms, expires_ms, deleted, body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)
+         ON CONFLICT (scope, coll, id) DO UPDATE SET
+             version = excluded.version, schema = excluded.schema,
+             created_ms = excluded.created_ms, updated_ms = excluded.updated_ms,
+             expires_ms = excluded.expires_ms, deleted = 0, body = excluded.body",
         ident(&ctx.tables.docs)
     );
     conn.execute(
@@ -477,57 +547,36 @@ pub(crate) fn put(
             collection,
             id,
             stored_version,
-            serde_json::to_string(doc)?
+            i64::from(options.schema),
+            created_ms,
+            updated_ms,
+            options.expires_ms,
+            body::encode(doc)?
         ],
     )
     .map_err(during("put"))?;
+    fields::write(conn, ctx.tables, &spec, ctx.scope, id, doc)?;
     unindex_text(conn, ctx, collection, Some(id))?;
     index_text(conn, ctx.tables, &spec, ctx.scope, id, doc)?;
     Ok(version)
 }
 
-/// The version a removed document last had, if any.
-fn buried_version(
-    conn: &Connection,
-    ctx: Ctx<'_>,
-    collection: &str,
-    id: &str,
-) -> Result<Option<Version>> {
-    let sql = format!(
-        "SELECT version FROM {} WHERE scope = ?1 AND coll = ?2 AND id = ?3",
-        ident(&ctx.tables.tombstones)
-    );
-    let found: Option<i64> = conn
-        .query_row(&sql, params![ctx.scope, collection, id], |row| row.get(0))
-        .optional()
-        .map_err(during("read tombstone"))?;
-    Ok(found.map(to_version))
-}
-
-/// Delete one document (or, with `id` unset, every document of the
-/// collection in this scope), remembering each one's version so the id never
-/// reuses it.
+/// Mark one document (or, with `id` unset, every document of the collection
+/// in this scope) deleted. The row stays with its version and an empty body,
+/// so the id never reuses a version.
 fn bury(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: Option<&str>) -> Result<()> {
-    let which = if id.is_some() { " AND id = ?3" } else { "" };
-    let remember = format!(
-        "INSERT INTO {tombstones} (scope, coll, id, version)
-         SELECT scope, coll, id, version FROM {docs} WHERE scope = ?1 AND coll = ?2{which}
-         ON CONFLICT (scope, coll, id) DO UPDATE SET version = excluded.version",
-        tombstones = ident(&ctx.tables.tombstones),
-        docs = ident(&ctx.tables.docs),
+    let sql = format!(
+        "UPDATE {} SET deleted = 1, expires_ms = NULL, body = '{{}}'
+         WHERE scope = ?1 AND coll = ?2{}",
+        ident(&ctx.tables.docs),
+        if id.is_some() { " AND id = ?3" } else { "" }
     );
-    let remove = format!(
-        "DELETE FROM {} WHERE scope = ?1 AND coll = ?2{which}",
-        ident(&ctx.tables.docs)
-    );
-    for sql in [remember, remove] {
-        match id {
-            Some(id) => conn.execute(&sql, params![ctx.scope, collection, id]),
-            None => conn.execute(&sql, params![ctx.scope, collection]),
-        }
-        .map_err(during("delete"))?;
+    match id {
+        Some(id) => conn.execute(&sql, params![ctx.scope, collection, id]),
+        None => conn.execute(&sql, params![ctx.scope, collection]),
     }
-    Ok(())
+    .map_err(during("delete"))?;
+    fields::remove(conn, ctx.tables, ctx.scope, collection, id)
 }
 
 /// Remove one document under `precondition`; report whether a live one went.
@@ -539,7 +588,7 @@ pub(crate) fn delete(
     precondition: Precondition,
 ) -> Result<bool> {
     let current = get(conn, ctx, collection, id)?;
-    check(precondition, current.as_ref())?;
+    check(precondition, current.as_ref().map(|found| found.version))?;
     bury(conn, ctx, collection, Some(id))?;
     unindex_text(conn, ctx, collection, Some(id))?;
     Ok(current.is_some())
@@ -566,18 +615,15 @@ pub(crate) fn drop_collection(conn: &Connection, ctx: Ctx<'_>, collection: &str)
     unindex_text(conn, ctx, collection, None)
 }
 
-/// List collections with records (including tombstones) in one scope.
+/// List collections with records (including deleted ones) in one scope.
 pub(crate) fn collections(conn: &Connection, ctx: Ctx<'_>, prefix: &str) -> Result<Vec<String>> {
     let sql = format!(
-        "SELECT coll FROM {docs} WHERE scope = ?1
-         UNION SELECT coll FROM {tombstones} WHERE scope = ?2
-         ORDER BY coll",
-        docs = ident(&ctx.tables.docs),
-        tombstones = ident(&ctx.tables.tombstones),
+        "SELECT DISTINCT coll FROM {} WHERE scope = ?1 ORDER BY coll",
+        ident(&ctx.tables.docs),
     );
     let mut statement = conn.prepare(&sql).map_err(during("list collections"))?;
     let names: Vec<String> = statement
-        .query_map(rusqlite::params![ctx.scope, ctx.scope], |row| row.get(0))
+        .query_map([ctx.scope], |row| row.get(0))
         .map_err(during("list collections"))?
         .collect::<rusqlite::Result<_>>()
         .map_err(during("list collections"))?;
@@ -612,25 +658,25 @@ pub(crate) fn search(
         .collect::<Vec<_>>()
         .join(" OR ");
     let sql = format!(
-        "SELECT f.id, bm25({fts}), d.doc FROM {fts} AS f
+        "SELECT f.id, bm25({fts}), d.body, d.expires_ms FROM {fts} AS f
          JOIN {docs} AS d ON d.scope = f.scope AND d.coll = f.coll AND d.id = f.id
-         WHERE {fts} MATCH ?1 AND f.scope = ?2 AND f.coll = ?3
+         WHERE {fts} MATCH ?1 AND f.scope = ?2 AND f.coll = ?3 AND d.deleted = 0
          ORDER BY bm25({fts}), f.id",
         fts = ident(&ctx.tables.fts),
         docs = ident(&ctx.tables.docs),
     );
     let mut statement = conn.prepare(&sql).map_err(during("search"))?;
-    let rows: Vec<(String, f64, String)> = statement
+    let rows: Vec<(String, f64, SqlValue, Option<i64>)> = statement
         .query_map(params![query, ctx.scope, collection], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(during("search"))?
         .collect::<rusqlite::Result<_>>()
         .map_err(during("search"))?;
     let mut hits = Vec::new();
-    for (id, rank, doc) in rows {
-        let doc: Value = serde_json::from_str(&doc)?;
-        if !expired(&spec, &doc, ctx.now_ms) {
+    for (id, rank, doc, expires_ms) in rows {
+        let doc = body::decode(&doc)?;
+        if !lapsed(&spec, &doc, expires_ms, ctx.now_ms) {
             // bm25 is lower-is-better; the port reports larger-is-better.
             hits.push((id, -rank));
         }

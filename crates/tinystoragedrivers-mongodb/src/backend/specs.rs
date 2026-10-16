@@ -186,9 +186,7 @@ impl Shared {
     /// buries documents their own scope can no longer see (keeping their
     /// versions).
     async fn retire_expired(&self, spec: &CollectionSpec) -> Result<()> {
-        let Some(expired) = expired_filter(spec, self.now()) else {
-            return Ok(());
-        };
+        let expired = expired_filter(spec, self.now());
         let collection = self.raw(&spec.name);
         let rows: Vec<Document> = collection
             .find(visible(translate::filter(&expired).query))
@@ -200,7 +198,7 @@ impl Shared {
         let mut selectors = Vec::new();
         for row in &rows {
             let stored = Stored::decode(row)?;
-            if !stored.deleted && expired.matches(&stored.key, &stored.body) {
+            if !stored.deleted && expired.matches_with(&stored.key, &stored.body, &stored.meta) {
                 selectors.push(doc! {
                     "_id": row.get("_id").cloned().unwrap_or(Bson::Null),
                     VERSION: row.get(VERSION).cloned().unwrap_or(Bson::Null),
@@ -234,7 +232,7 @@ impl Shared {
         let names = self
             .db
             .list_collection_names()
-            .filter(doc! {"name": format!("{}{name}", self.prefix)})
+            .filter(doc! {"name": name})
             .await
             .map_err(errors::failed("inspect existing collection"))?;
         Ok(!names.is_empty())
@@ -349,7 +347,7 @@ impl Shared {
         if self.existing {
             return self.validate_indexes(name, &models).await;
         }
-        let key = format!("{}{name}", self.prefix);
+        let key = name.to_owned();
         if self.specs.is_prepared(&key) {
             return Ok(());
         }
@@ -511,8 +509,7 @@ impl Shared {
             .create_indexes(models)
             .await
             .map_err(errors::failed("build the declared indexes"))?;
-        self.specs
-            .mark_prepared(&format!("{}{}", self.prefix, merged.name));
+        self.specs.mark_prepared(&merged.name);
         // Search fields only accumulate (`CollectionSpec::merge`), so a
         // declaration never goes from searchable to not searchable.
         let Some(model) = text else {

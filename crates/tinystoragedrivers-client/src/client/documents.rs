@@ -5,7 +5,7 @@ use tinystoragedrivers_bus::MAX_BATCH_OPS;
 use tinystoragedrivers_core::{
     Capabilities, Capability, CollectionSpec, Cursor, DocumentStore, DocumentWatch, Filter, Page,
     Precondition, Query, ReadCheck, Result, SearchHit, Sort, StorageError, Version, Versioned,
-    WatchOptions, WriteOp, WriteResult, async_trait,
+    WatchOptions, WriteOp, WriteOptions, WriteResult, async_trait,
 };
 
 use super::Wire;
@@ -120,8 +120,38 @@ impl DocumentStore for BusDocuments {
             id: id.to_owned(),
             doc,
             precondition: via(&precondition)?,
+            schema: 0,
+            expires_ms: None,
         };
         let version: wire::Version = self.call("Put", &request, None).await?;
+        Ok(Version(version.0))
+    }
+
+    /// `created_ms` is a host-only migration option the wire cannot carry, so
+    /// a write that sets it is refused here with `InvalidInput`.
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
+        if options.created_ms.is_some() {
+            return Err(StorageError::invalid_input(
+                "a module cannot set created_ms: it is a host-only migration option",
+            ));
+        }
+        let request = wire::PutDocumentRequest {
+            collection: collection.to_owned(),
+            id: id.to_owned(),
+            doc,
+            precondition: via(&precondition)?,
+            schema: options.schema,
+            expires_ms: options.expires_ms,
+        };
+        let unsupported_as = (!options.is_default()).then_some(Capability::RecordMetadata);
+        let version: wire::Version = self.call("Put", &request, unsupported_as).await?;
         Ok(Version(version.0))
     }
 

@@ -23,12 +23,17 @@
 //! every scalar, and a companion check finds documents whose sort values are
 //! arrays or objects, for which the caller sorts in Rust instead.
 
+use std::cmp::Ordering;
+
 use mongodb::bson::{Bson, Document, doc};
 use serde_json::Value;
-use tinystoragedrivers_core::{Direction, Filter, ID_FIELD, Sort};
+use tinystoragedrivers_core::{
+    CREATED_FIELD, Direction, EXPIRES_FIELD, Filter, ID_FIELD, SCHEMA_FIELD, Sort, UPDATED_FIELD,
+    value,
+};
 
 use crate::convert::exact_bson;
-use crate::naming::{BODY, KEY};
+use crate::naming::{BODY, CREATED, EXPIRES, KEY, SCHEMA, UPDATED};
 
 /// A translated filter and whether it is exact.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +141,9 @@ fn not(inner: &Translated) -> Translated {
 enum Path<'a> {
     /// [`ID_FIELD`]: the `_key` field.
     Id,
+    /// A record-metadata path (`_schema`, `_created_ms`, `_updated_ms`,
+    /// `_expires_ms`): always a scalar at the named top-level field.
+    Meta(&'static str),
     /// Object keys only; guards make Mongo's walk match [`value::lookup`].
     ///
     /// [`value::lookup`]: tinystoragedrivers_core::value::lookup
@@ -151,6 +159,9 @@ fn classify(path: &str) -> Path<'_> {
     if path == ID_FIELD {
         return Path::Id;
     }
+    if let Some(field) = meta_field(path) {
+        return Path::Meta(field);
+    }
     let segments: Vec<&str> = path.split('.').collect();
     if segments.iter().any(|segment| segment.starts_with('$')) {
         return Path::Opaque;
@@ -163,6 +174,18 @@ fn classify(path: &str) -> Path<'_> {
         return Path::Positional(path);
     }
     Path::Plain(segments)
+}
+
+/// The stored field a record-metadata path lives at, or `None` for any other
+/// path.
+fn meta_field(path: &str) -> Option<&'static str> {
+    match path {
+        SCHEMA_FIELD => Some(SCHEMA),
+        CREATED_FIELD => Some(CREATED),
+        UPDATED_FIELD => Some(UPDATED),
+        EXPIRES_FIELD => Some(EXPIRES),
+        _ => None,
+    }
 }
 
 /// The stored field a body path lives at.
@@ -219,6 +242,11 @@ fn leaf(path: &str, kind: Leaf, condition: impl FnOnce(&str) -> Document) -> Tra
                 exact: kind != Leaf::Presence,
             }
         }
+        // Metadata is never an array, so no guard is needed.
+        Path::Meta(field) => Translated {
+            query: condition(field),
+            exact: kind != Leaf::Presence,
+        },
         Path::Positional(path) => Translated::superset(condition(&body_field(path))),
         Path::Opaque | Path::Id => Translated::superset(Document::new()),
     }
@@ -229,8 +257,11 @@ fn present(field: &str) -> Document {
 }
 
 fn exists_true(path: &str) -> Translated {
-    if classify(path) == Path::Id {
-        return Translated::everything();
+    match classify(path) {
+        Path::Id => return Translated::everything(),
+        // Every record carries the other three; only an expiry is optional.
+        Path::Meta(field) if field != EXPIRES => return Translated::everything(),
+        _ => {}
     }
     leaf(path, Leaf::AnyValue, present)
 }
@@ -242,7 +273,7 @@ fn eq(path: &str, value: &Value) -> Translated {
             _ => Translated::nothing(),
         };
     }
-    match (value, exact_bson(value)) {
+    let translated = match (value, exact_bson(value)) {
         (Value::Null, _) => leaf(path, Leaf::Scalar, |field| doc! {field: {"$type": "null"}}),
         (Value::Bool(_) | Value::Number(_) | Value::String(_), Some(bson)) => {
             leaf(path, Leaf::Scalar, |field| doc! {field: {"$eq": bson}})
@@ -251,7 +282,9 @@ fn eq(path: &str, value: &Value) -> Translated {
         // object keys, "contains" for arrays), and an integer beyond i64
         // cannot be stated exactly: only presence is checked server-side.
         _ => leaf(path, Leaf::Presence, present),
-    }
+    };
+    let zero_matches = value::equal(&Value::from(0), value);
+    zero_for_missing(path, zero_matches, translated)
 }
 
 fn range(path: &str, bounds: &[(&str, &Option<Value>)]) -> Translated {
@@ -272,16 +305,62 @@ fn range(path: &str, bounds: &[(&str, &Option<Value>)]) -> Translated {
     }
     let mut condition = Document::new();
     for (op, bound) in &set {
-        match (bound, exact_bson(bound)) {
-            (Value::Bool(_) | Value::Number(_) | Value::String(_), Some(bson)) => {
-                condition.insert(*op, bson);
-            }
+        if let (Value::Bool(_) | Value::Number(_) | Value::String(_), Some(bson)) =
+            (bound, exact_bson(bound))
+        {
+            condition.insert(*op, bson);
+        } else {
             // Null bounds also match missing fields in Mongo; array and object
             // bounds compare differently. Check presence and let Rust decide.
-            _ => return leaf(path, Leaf::Presence, present),
+            let translated = leaf(path, Leaf::Presence, present);
+            return zero_for_missing(path, true, translated);
         }
     }
-    leaf(path, Leaf::Scalar, |field| doc! {field: condition})
+    let zero_matches = set.iter().all(|(op, bound)| zero_within(op, bound));
+    let translated = leaf(path, Leaf::Scalar, |field| doc! {field: condition});
+    zero_for_missing(path, zero_matches, translated)
+}
+
+/// Whether the number 0 passes one range bound the way
+/// [`Filter::matches`] decides it: a bound of another JSON type never matches.
+fn zero_within(op: &str, bound: &Value) -> bool {
+    if !bound.is_number() {
+        return false;
+    }
+    let order = value::compare(&Value::from(0), bound);
+    match op {
+        "$gt" => order == Ordering::Greater,
+        "$gte" => order.is_ge(),
+        "$lt" => order == Ordering::Less,
+        _ => order.is_le(),
+    }
+}
+
+/// A record written before the metadata fields existed lacks `_schema`, `_c`
+/// and `_u`, and [`Stored::decode`](crate::documents) reads each as 0. A
+/// predicate over one of them must therefore also accept a missing field
+/// whenever 0 satisfies it, or a legacy record escapes `_schema < 2` and an
+/// in-place migration finds nothing to migrate. `_x` stays optional.
+///
+/// `translated` is a superset only when it was a presence check, which cannot
+/// say what 0 does: that case widens to everything.
+fn zero_for_missing(path: &str, zero_matches: bool, translated: Translated) -> Translated {
+    let Path::Meta(field) = classify(path) else {
+        return translated;
+    };
+    if field == EXPIRES {
+        return translated;
+    }
+    if !translated.exact {
+        return Translated::superset(Document::new());
+    }
+    if !zero_matches {
+        return translated;
+    }
+    Translated::exact(doc! {"$or": [
+        translated.query,
+        {field: {"$exists": false}},
+    ]})
 }
 
 /// A server-side sort that agrees with
@@ -311,15 +390,23 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
     let mut sort = Document::new();
     let mut unset = Vec::new();
     for (index, key) in sorts.iter().enumerate() {
-        let source = if key.field == ID_FIELD {
-            format!("${KEY}")
+        let source: Bson = if key.field == ID_FIELD {
+            format!("${KEY}").into()
+        } else if let Path::Meta(field) = classify(&key.field) {
+            // A legacy record lacks the three always-present fields and
+            // decodes them as 0; only an absent expiry is "no value".
+            if field == EXPIRES {
+                format!("${field}").into()
+            } else {
+                Bson::Document(doc! {"$ifNull": [format!("${field}"), 0_i64]})
+            }
         } else if !matches!(classify(&key.field), Path::Plain(_)) {
             // `$` segments are operators to Mongo, and a numeric segment is an
             // array position to `value::lookup` but a field name to an
             // aggregation path: sort these in Rust.
             return None;
         } else {
-            format!("${}", body_field(&key.field))
+            format!("${}", body_field(&key.field)).into()
         };
         let value_name = format!("_tsd_k{index}");
         let rank_name = format!("_tsd_r{index}");
@@ -327,7 +414,7 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
         // The core treats missing and explicit null as the same sort value.
         // Normalize Mongo's `missing` aggregation value before both sorting
         // and keyset equality checks so a page boundary keeps tied rows.
-        add_fields.insert(&value_name, doc! {"$ifNull": [source.as_str(), Bson::Null]});
+        add_fields.insert(&value_name, doc! {"$ifNull": [source.clone(), Bson::Null]});
         add_fields.insert(&rank_name, rank(&source));
         complex.push(doc! {"$in": [{"$type": value_ref}, ["array", "object"]]});
         let direction = match key.direction {
@@ -352,13 +439,13 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
 /// null (and missing), bool, number, string, array, object.
 ///
 /// [`value::compare`]: tinystoragedrivers_core::value::compare
-fn rank(source: &str) -> Bson {
-    let kind = doc! {"$type": source};
+fn rank(source: &Bson) -> Bson {
+    let kind = doc! {"$type": source.clone()};
     Bson::Document(doc! {"$switch": {
         "branches": [
             {"case": {"$in": [kind.clone(), ["missing", "null"]]}, "then": 0},
             {"case": {"$eq": [kind.clone(), "bool"]}, "then": 1},
-            {"case": {"$isNumber": source}, "then": 2},
+            {"case": {"$isNumber": source.clone()}, "then": 2},
             {"case": {"$eq": [kind.clone(), "string"]}, "then": 3},
             {"case": {"$eq": [kind, "array"]}, "then": 4},
         ],

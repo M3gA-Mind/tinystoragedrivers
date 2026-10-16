@@ -11,6 +11,7 @@ fn guard(doc: Value) -> Versioned<Value> {
         id: "lease-1".to_owned(),
         version: Version(3),
         doc,
+        meta: crate::Meta::unknown(),
     }
 }
 
@@ -85,24 +86,6 @@ fn validation_rejects_bad_addresses_and_filters() {
     let bad_filter = Fence::new(Scope::local(), "leases", "id", Filter::eq("", 1));
     assert_eq!(
         bad_filter.validate().unwrap_err().kind(),
-        ErrorKind::InvalidInput
-    );
-}
-
-#[test]
-fn guard_database_addresses_validate() {
-    for address in [
-        GuardDatabase::Current,
-        GuardDatabase::Default,
-        GuardDatabase::Named("leases".into()),
-    ] {
-        address.validate().unwrap();
-    }
-    assert_eq!(
-        GuardDatabase::Named("Bad Name".into())
-            .validate()
-            .unwrap_err()
-            .kind(),
         ErrorKind::InvalidInput
     );
 }

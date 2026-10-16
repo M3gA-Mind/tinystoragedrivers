@@ -8,11 +8,12 @@
 //! (`approvals`, `sessions`, `flows`) without inventing collection prefixes.
 
 mod composite;
+mod maintenance;
 mod purge;
 pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
+pub use maintenance::{Checkpoint, MaintenanceBudget, MaintenanceReport};
 pub use purge::{
-    DatabaseAddress, PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus,
-    ScopeGeneration, ScopePurge,
+    PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge,
 };
 
 use std::fmt;
@@ -118,31 +119,6 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         ))
     }
 
-    /// Bind native fenced handles with an explicit guard database address.
-    /// The guard check and every supported mutation share one native lock or
-    /// transaction across the target and guard databases. Existing adapters
-    /// support `Current` through their existing fencing method.
-    ///
-    /// # Errors
-    ///
-    /// `Unsupported(CrossDatabaseFencing)` when explicit default/named guard
-    /// addressing is unavailable; `InvalidInput` for invalid addresses.
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        guard_database: &crate::GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        guard_database.validate()?;
-        match guard_database {
-            crate::GuardDatabase::Current => self.for_scope_fenced(scope, fence),
-            _ => Err(StorageError::unsupported(
-                Capability::CrossDatabaseFencing,
-                "this driver cannot fence writes across databases",
-            )),
-        }
-    }
-
     /// Bind an explicitly issued native data-access generation.
     ///
     /// # Errors
@@ -158,31 +134,21 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         purge::unsupported_generation(scope, generation)
     }
 
-    /// Bind a generation and native guard database together.
+    /// Bind a generation and a fence together.
     ///
     /// # Errors
-    /// Unsupported generation/fencing or invalid native binding.
-    fn for_scope_fenced_in_database_generation(
+    /// Unsupported generation/fencing or an invalid fence.
+    fn for_scope_fenced_generation(
         &self,
         scope: &Scope,
         generation: ScopeGeneration,
         fence: &Fence,
-        guard_database: &crate::GuardDatabase,
     ) -> Result<ScopedStorage> {
         if generation == ScopeGeneration::default() {
-            return self.for_scope_fenced_in_database(scope, fence, guard_database);
+            return self.for_scope_fenced(scope, fence);
         }
         purge::unsupported_generation(scope, generation)
     }
-
-    /// The named database `name` on this backend. The same name always
-    /// addresses the same data.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
-    /// invalid name (see [`validate_database`]), or a backend error.
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>>;
 
     /// Reclaim the lapsed blobs of `scope` (see [`BlobStore::sweep_expired`])
     /// and return how many went.
@@ -197,26 +163,89 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
         self.for_scope(scope)?.blobs().sweep_expired().await
     }
-}
 
-/// Validate a database name: 1 to 64 ASCII lowercase letters, digits, `_` or
-/// `-`, so it is safe as a file stem and a collection prefix.
-///
-/// # Errors
-///
-/// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput).
-pub fn validate_database(name: &str) -> Result<()> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'));
-    if ok {
-        Ok(())
-    } else {
-        Err(StorageError::invalid_input(
-            "database name must be 1 to 64 lowercase ASCII letters, digits, `_` or `-`",
-        ))
+    /// Give back the space the backend no longer needs, within `budget`.
+    ///
+    /// This is the hook a host schedules when it holds only an
+    /// `Arc<dyn StorageBackend>`. It acts on the whole backend, not on one
+    /// scope. Today it only reclaims space; seal and retention policies run
+    /// from the same call in a later release, so read the
+    /// [`MaintenanceReport`] by field rather than assuming it stays one number.
+    ///
+    /// Requires [`Capability::Maintenance`]. A host that only wants the space
+    /// back may treat the refusal as "nothing to do".
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::Maintenance`] (the default), or a backend error.
+    async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
+        let _ = budget;
+        Err(maintenance::unsupported_maintenance())
+    }
+
+    /// Flush the backend's write-ahead log into its main storage.
+    ///
+    /// Requires [`Capability::Maintenance`]. See [`Checkpoint`] for the modes.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::Maintenance`] (the default),
+    /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) when a
+    /// [`Checkpoint::Truncate`] could not finish because a reader or writer
+    /// held the log (retry), or a backend error.
+    async fn checkpoint(&self, mode: Checkpoint) -> Result<()> {
+        let _ = mode;
+        Err(maintenance::unsupported_maintenance())
+    }
+
+    /// The scopes holding any stored record, whose text starts with `prefix`,
+    /// sorted by byte order.
+    ///
+    /// A scope counts when it has a document (a tombstone left by a delete
+    /// included), a stream or a blob. `prefix` is literal text, not a pattern:
+    /// an empty prefix lists every scope, and `"u:ann"` matches `"u:ann"` and
+    /// `"u:ann/agent:x"` but not `"u:bob"`. Because it is literal text, it
+    /// also matches `"u:anna"`: to enumerate a tenant, use
+    /// [`scopes_of_tenant`](Self::scopes_of_tenant), which stops at the scope
+    /// boundary.
+    ///
+    /// Requires [`Capability::ScopeEnumeration`].
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::ScopeEnumeration`] (the default), or a backend error.
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let _ = prefix;
+        Err(maintenance::unsupported_scopes())
+    }
+
+    /// The scopes holding any stored record that belong to `tenant`: the
+    /// tenant's own scope and every principal beneath it (`<tenant>/...`),
+    /// sorted by byte order.
+    ///
+    /// Unlike [`scopes`](Self::scopes), this respects the scope boundary:
+    /// `scopes_of_tenant("u:ann")` lists `"u:ann"` and `"u:ann/agent:x"` but
+    /// never `"u:anna"` or `"u:ann-2"`. A host purging a tenant should
+    /// enumerate with this method, not with a bare prefix.
+    ///
+    /// The default lists the literal prefix with [`scopes`](Self::scopes) and
+    /// drops what sits across the boundary; a driver can override it to avoid
+    /// reading the look-alike scopes.
+    ///
+    /// Requires [`Capability::ScopeEnumeration`].
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::ScopeEnumeration`] (the default), or a backend error.
+    async fn scopes_of_tenant(&self, tenant: &Scope) -> Result<Vec<Scope>> {
+        let family = format!("{}/", tenant.as_str());
+        let mut found = self.scopes(tenant.as_str()).await?;
+        found.retain(|scope| scope == tenant || scope.as_str().starts_with(&family));
+        Ok(found)
     }
 }
 

@@ -2,8 +2,7 @@
 use super::*;
 use serde_json::json;
 use tinystoragedrivers_core::{
-    ErrorKind, Fence, GuardDatabase, Precondition, PurgeMode, PurgeRequest, PurgeStatus, Scope,
-    StorageBackend,
+    ErrorKind, Fence, Precondition, PurgeMode, PurgeRequest, PurgeStatus, Scope, StorageBackend,
 };
 
 #[tokio::test]
@@ -21,9 +20,7 @@ async fn live_generation_rejection_preserves_native_lease_authority() {
         .await
         .unwrap();
     let fence = Fence::epoch(guard_scope, "leases", "active", "epoch", 1);
-    let old = backend
-        .for_scope_fenced_in_database(&owner, &fence, &GuardDatabase::Default)
-        .unwrap();
+    let old = backend.for_scope_fenced(&owner, &fence).unwrap();
     old.documents()
         .put("records", "old", json!({}), Precondition::None)
         .await
@@ -82,7 +79,7 @@ async fn assert_current_generation_and_lease(
 ) {
     // The same actual native lease remains valid after the scope reset.
     let fresh = backend
-        .for_scope_fenced_in_database_generation(owner, generation, fence, &GuardDatabase::Default)
+        .for_scope_fenced_generation(owner, generation, fence)
         .unwrap();
     assert!(
         fresh

@@ -9,7 +9,7 @@ async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let storage = FileStorage::open(dir.path()).unwrap();
     storage.prepare_schema().await.unwrap();
-    let named = storage.database("sessions").unwrap();
+    let named = &storage;
     let scope = Scope::new("alice").unwrap();
     let other = Scope::new("bob").unwrap();
     let spec = CollectionSpec::new("notes").ttl("until");
@@ -27,11 +27,7 @@ async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
         .put("notes", "other", json!({}), Precondition::None)
         .await
         .unwrap();
-    let restricted = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
+    let restricted = storage.existing_schema().unwrap();
     let docs = restricted.for_scope(&scope).unwrap().documents().clone();
     docs.validate_collection_spec(&spec).await.unwrap();
     assert!(docs.ensure_collection(&spec).await.is_err());
@@ -50,19 +46,6 @@ async fn existing_schema_keeps_named_declarations_and_scoped_deletion() {
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test]
-async fn existing_schema_does_not_create_missing_named_database() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = FileStorage::open(dir.path()).unwrap();
-    let before = std::fs::read_dir(dir.path()).unwrap().count();
-    let restricted = storage.existing_schema().unwrap();
-    assert_eq!(
-        restricted.database("missing").unwrap_err().kind(),
-        ErrorKind::NotFound
-    );
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
 }
 
 #[tokio::test]
@@ -120,7 +103,7 @@ async fn existing_schema_requires_persisted_specs_and_refuses_bootstrap() {
 }
 
 #[tokio::test]
-async fn existing_schema_preserves_cross_database_guard_for_every_port() {
+async fn existing_schema_preserves_guard_for_every_port() {
     let dir = tempfile::tempdir().unwrap();
     let storage = FileStorage::open(dir.path()).unwrap();
     let cluster = Scope::new("cluster").unwrap();
@@ -135,8 +118,6 @@ async fn existing_schema_preserves_cross_database_guard_for_every_port() {
         .await
         .unwrap();
     storage
-        .database("sessions")
-        .unwrap()
         .for_scope(&scope)
         .unwrap()
         .documents()
@@ -149,18 +130,8 @@ async fn existing_schema_preserves_cross_database_guard_for_every_port() {
         "alice",
         tinystoragedrivers_core::Filter::eq("epoch", 1),
     );
-    let backend = storage
-        .existing_schema()
-        .unwrap()
-        .database("sessions")
-        .unwrap();
-    let actor = backend
-        .for_scope_fenced_in_database(
-            &scope,
-            &fence,
-            &tinystoragedrivers_core::GuardDatabase::Default,
-        )
-        .unwrap();
+    let backend = storage.existing_schema().unwrap();
+    let actor = backend.for_scope_fenced(&scope, &fence).unwrap();
     actor
         .documents()
         .put("notes", "n", json!({}), Precondition::None)

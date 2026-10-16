@@ -8,7 +8,7 @@ use serde_json::Value;
 /// Streams object name under [`crate::STORAGE_INTERFACE`].
 pub const STREAMS_OBJECT: &str = "Streams";
 /// Finite selector set; servers must reject every other selector.
-pub const STREAMS_SELECTORS: [&str; 8] = [
+pub const STREAMS_SELECTORS: [&str; 10] = [
     "Append",
     "AppendBatch",
     "AppendBatchIfOffset",
@@ -17,6 +17,8 @@ pub const STREAMS_SELECTORS: [&str; 8] = [
     "TruncateBefore",
     "DeleteStream",
     "Streams",
+    "Seal",
+    "Info",
 ];
 
 /// Return whether `selector` belongs to the fixed Streams selector set.
@@ -87,12 +89,40 @@ pub struct StreamItem {
 /// Window response in offset order. A short window is not end-of-stream
 /// evidence when the server clamped it; callers continue from the last offset+1.
 pub type ReadWindowResponse = Vec<StreamItem>;
-/// Request addressing one stream (`Len`, `DeleteStream`).
+/// Request addressing one stream (`Len`, `DeleteStream`, `Seal`, `Info`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamRequest {
     /// Stream name inside the captured grant.
     pub stream: String,
+}
+/// Reply to `Seal`: where the sealed stream's entries lie. Mirrors the native
+/// `SealOutcome`; sealing twice returns equal replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealResponse {
+    /// First retained offset; everything below it was truncated before the seal.
+    pub base: u64,
+    /// The stream's length: the offset an append would have received.
+    pub len: u64,
+    /// Size of the compressed blob holding the entries, in bytes.
+    pub blob_bytes: u64,
+}
+/// Reply to `Info`: the stream's extent and recorded times, or JSON `null` for
+/// a stream that does not exist. Mirrors the native `StreamInfo`. Times are
+/// epoch milliseconds from the host's clock; `null` means unknown or, for
+/// `sealed_ms`, not sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamInfoResponse {
+    /// First retained offset.
+    pub base: u64,
+    /// The stream's length: the offset an append would receive.
+    pub len: u64,
+    /// When the stream was sealed.
+    pub sealed_ms: Option<i64>,
+    /// When a record was last appended.
+    pub last_append_ms: Option<i64>,
 }
 /// Drop records below an offset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

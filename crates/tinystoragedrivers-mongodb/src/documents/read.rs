@@ -12,7 +12,7 @@ use mongodb::options::FindOptions;
 use serde_json::Value;
 use tinystoragedrivers_core::{
     CollectionSpec, CursorPosition, Filter, Result, SearchHit, Sort, StorageError, Version,
-    Versioned, sort_documents, value,
+    Versioned, sort_documents_with_meta, value,
 };
 
 use super::MongoDocuments;
@@ -56,7 +56,9 @@ impl MongoDocuments {
             .map_err(errors::failed("read documents"))?;
         Ok(decode_all(&docs)?
             .into_iter()
-            .filter(|stored| !stored.deleted && effective.matches(&stored.key, &stored.body))
+            .filter(|stored| {
+                !stored.deleted && effective.matches_with(&stored.key, &stored.body, &stored.meta)
+            })
             .collect())
     }
 
@@ -131,10 +133,13 @@ impl MongoDocuments {
             .into_iter()
             .map(Stored::into_versioned)
             .collect();
-        sort_documents(&mut found, sort, |item| (item.id.as_str(), &item.doc));
+        sort_documents_with_meta(&mut found, sort, |item| {
+            (item.id.as_str(), &item.doc, &item.meta)
+        });
         let start = position.as_ref().map_or(0, |cursor| {
             found.partition_point(|item| {
-                CursorPosition::for_document(&item.id, &item.doc, sort).compare(cursor, sort)
+                CursorPosition::for_record(&item.id, &item.doc, &item.meta, sort)
+                    .compare(cursor, sort)
                     != std::cmp::Ordering::Greater
             })
         });
@@ -290,7 +295,7 @@ impl MongoDocuments {
         let mut hits = Vec::new();
         for doc in &docs {
             let stored = Stored::decode(doc)?;
-            if effective.matches(&stored.key, &stored.body) {
+            if effective.matches_with(&stored.key, &stored.body, &stored.meta) {
                 hits.push(SearchHit {
                     id: stored.key,
                     score: doc.get_f64("score").unwrap_or_default(),

@@ -1,8 +1,9 @@
 //! Compose document/stream storage with an independently scoped blob driver.
 
 use crate::{
-    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Fence, Result,
-    Scope, ScopedStorage, StorageBackend, StorageError, async_trait,
+    Blob, BlobMeta, BlobReader, BlobStore, BlobStream, Capabilities, Capability, Checkpoint, Fence,
+    MaintenanceBudget, MaintenanceReport, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError, async_trait,
 };
 use std::{ops::Range, sync::Arc, time::Duration};
 
@@ -16,12 +17,6 @@ pub trait BlobBackend: Send + Sync + std::fmt::Debug {
     ///
     /// Unsupported scope or backend failure.
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>>;
-    /// Independently named blob database.
-    ///
-    /// # Errors
-    ///
-    /// Invalid database name or backend failure.
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>>;
 }
 
 /// Use the blob port of an existing complete backend independently.
@@ -53,9 +48,6 @@ impl BlobBackend for BackendBlobs {
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         Ok(self.0.for_scope(scope)?.blobs().clone())
-    }
-    fn database(&self, name: &str) -> Result<Arc<dyn BlobBackend>> {
-        Ok(Arc::new(Self(self.0.database(name)?)))
     }
 }
 
@@ -95,6 +87,7 @@ impl CompositeStorage {
     }
 }
 
+#[async_trait]
 impl StorageBackend for CompositeStorage {
     fn driver(&self) -> &'static str {
         "composite"
@@ -109,6 +102,9 @@ impl StorageBackend for CompositeStorage {
             .without(Capability::ExistingSchema)
             .without(Capability::ScopePurge)
             .without(Capability::AtomicScopePurge)
+            // Blobs live in an independent store, so the records backend
+            // cannot tell which scopes hold only blobs.
+            .without(Capability::ScopeEnumeration)
             .without(Capability::PresignedUrls)
             .without(Capability::StreamingBlobs)
             .without(Capability::BlobTtl);
@@ -129,24 +125,13 @@ impl StorageBackend for CompositeStorage {
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         self.combine(&self.records.for_scope_fenced(scope, fence)?, true)
     }
-    fn for_scope_fenced_in_database(
-        &self,
-        scope: &Scope,
-        fence: &Fence,
-        database: &crate::GuardDatabase,
-    ) -> Result<ScopedStorage> {
-        self.combine(
-            &self
-                .records
-                .for_scope_fenced_in_database(scope, fence, database)?,
-            true,
-        )
+    /// Maintains the records backend; the blob backend is a separate store a
+    /// host maintains on its own.
+    async fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport> {
+        self.records.maintain(budget).await
     }
-    fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Self::new(
-            self.records.database(name)?,
-            self.blobs.database(name)?,
-        )))
+    async fn checkpoint(&self, mode: Checkpoint) -> Result<()> {
+        self.records.checkpoint(mode).await
     }
 }
 

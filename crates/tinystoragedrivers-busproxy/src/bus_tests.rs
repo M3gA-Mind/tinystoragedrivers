@@ -9,7 +9,7 @@ use tinybus::{BusName, Connection, broker::Broker, transport::memory::MemoryBus}
 use tinystoragedrivers_client::{BusStorage, StorageServer};
 use tinystoragedrivers_core::{
     CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope, ScopedStorage,
-    StorageBackend, WatchNotice, WatchOptions,
+    StorageBackend, WatchNotice, WatchOptions, WriteOptions,
 };
 use tinystoragedrivers_secrets::SecretStore;
 
@@ -178,6 +178,45 @@ async fn blob_lifetimes_cross_the_bus() {
         .await
         .unwrap();
     assert!(blobs.head("kept").await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn record_metadata_and_stream_sealing_cross_the_bus() {
+    let rig = rig().await;
+    let (_module, storage) = rig.module("alpha").await;
+    let docs = storage.documents();
+    docs.put_with(
+        "meta",
+        "a",
+        json!({"x": 1}),
+        Precondition::None,
+        WriteOptions::new().schema(4),
+    )
+    .await
+    .unwrap();
+    let found = docs.get("meta", "a").await.unwrap().unwrap();
+    assert_eq!(found.meta.schema, 4);
+    assert!(found.meta.created_ms > 0);
+    let refused = docs
+        .put_with(
+            "meta",
+            "b",
+            json!({}),
+            Precondition::None,
+            WriteOptions::new().created_ms(1),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::InvalidInput);
+
+    let streams = storage.streams();
+    streams.append("log", json!(1)).await.unwrap();
+    let sealed = streams.seal("log").await.unwrap();
+    assert_eq!((sealed.base, sealed.len), (0, 1));
+    assert_eq!(
+        streams.append("log", json!(2)).await.unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

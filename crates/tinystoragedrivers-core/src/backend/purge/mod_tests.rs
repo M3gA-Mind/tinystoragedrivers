@@ -1,28 +1,10 @@
 //! Native scope purge authority and replay behavior.
 use super::*;
-use crate::{Capabilities, ErrorKind, Fence, GuardDatabase, MemoryStorage, ScopedStorage};
+use crate::{Capabilities, ErrorKind, Fence, MemoryStorage, ScopedStorage, StorageBackend};
+use std::sync::Arc;
 
 #[test]
-fn purge_addresses_and_identities_are_explicit_and_validated() {
-    let root = Arc::new(MemoryStorage::new()) as Arc<dyn StorageBackend>;
-    assert_eq!(
-        DatabaseAddress::Default.resolve(&root).unwrap().driver(),
-        "memory"
-    );
-    assert_eq!(
-        DatabaseAddress::Named("sessions".into())
-            .resolve(&root)
-            .unwrap()
-            .driver(),
-        "memory"
-    );
-    assert_eq!(
-        DatabaseAddress::Named("Bad Name".into())
-            .resolve(&root)
-            .unwrap_err()
-            .kind(),
-        ErrorKind::InvalidInput
-    );
+fn purge_identities_are_explicit_and_validated() {
     for id in ["", "space id", "slash/id", &"x".repeat(129)] {
         assert_eq!(
             PurgeRequest {
@@ -61,9 +43,6 @@ impl StorageBackend for Legacy {
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         MemoryStorage::new().for_scope(scope)
     }
-    fn database(&self, _: &str) -> Result<Arc<dyn StorageBackend>> {
-        Ok(Arc::new(Self))
-    }
 }
 #[test]
 fn unknown_adapters_only_accept_legacy_generation() {
@@ -83,24 +62,14 @@ fn unknown_adapters_only_accept_legacy_generation() {
     let fence = Fence::epoch(Scope::new("guard").unwrap(), "leases", "l", "epoch", 1);
     assert_eq!(
         Legacy
-            .for_scope_fenced_in_database_generation(
-                &scope,
-                ScopeGeneration::default(),
-                &fence,
-                &GuardDatabase::Current
-            )
+            .for_scope_fenced_generation(&scope, ScopeGeneration::default(), &fence)
             .unwrap_err()
             .kind(),
         ErrorKind::Unsupported(Capability::Fencing)
     );
     assert_eq!(
         Legacy
-            .for_scope_fenced_in_database_generation(
-                &scope,
-                ScopeGeneration(1),
-                &fence,
-                &GuardDatabase::Default
-            )
+            .for_scope_fenced_generation(&scope, ScopeGeneration(1), &fence)
             .unwrap_err()
             .kind(),
         ErrorKind::Unsupported(Capability::ScopePurge)

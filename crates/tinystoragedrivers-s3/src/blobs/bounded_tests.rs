@@ -114,7 +114,7 @@ async fn a_500_mib_source_is_uploaded_in_bounded_parts() {
         inner: object_store::memory::InMemory::new(),
         totals: totals.clone(),
     });
-    let blobs = S3Blobs::with_store(recorder, None, "test", &Scope::local(), "media").unwrap();
+    let blobs = S3Blobs::with_store(recorder, None, "test", &Scope::local()).unwrap();
     let len = 500 * 1024 * 1024;
     blobs
         .put_stream(
@@ -138,14 +138,7 @@ async fn listing_pushes_complete_requested_directories_into_the_backend_query() 
         inner: object_store::memory::InMemory::new(),
         totals: totals.clone(),
     });
-    let blobs = S3Blobs::with_store(
-        recorder,
-        None,
-        "root",
-        &Scope::new("alice").unwrap(),
-        "default",
-    )
-    .unwrap();
+    let blobs = S3Blobs::with_store(recorder, None, "root", &Scope::new("alice").unwrap()).unwrap();
     blobs.put("folder/file-one", vec![1], None).await.unwrap();
     blobs.put("folder/file-two", vec![2], None).await.unwrap();
     blobs.put("elsewhere/file", vec![3], None).await.unwrap();

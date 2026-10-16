@@ -26,8 +26,8 @@ choose storage URLs/scopes, or allow a module to create a host grant.
 ## Authority and dispatch
 
 The host authenticates the module caller and binds the call to one principal,
-scope, database, admitted backend, and immutable grant. The request has no
-scope, database, URL, backend, generation, or grant selector. Unknown selectors
+scope, admitted backend, and immutable grant. The request has no
+scope, URL, backend, generation, or grant selector. Unknown selectors
 and unknown request fields fail closed. The host checks caller rights, object
 rights, declared schema and resource limits on every call; a module's claimed
 identity is not authority. Scope is never serialized in a request or inferred
@@ -47,7 +47,7 @@ storage error category.
 `Storage` contains `Documents`, `Streams`, `Blobs`, and `Secrets`. Collection
 names are explicit in Documents operation messages and are checked against the
 captured host grant on every call. They select data within that grant; they do
-not select a scope, database, backend, or schema authority. Each object
+not select a scope, backend, or schema authority. Each object
 has a fixed versioned interface, finite selector list, and typed synchronous
 serde messages. TinyBus request/reply provides bounded control traffic. Bulk
 payloads over 16 MiB use an authenticated TinyBus `Stream`; there is no inline
@@ -100,13 +100,13 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 3` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 4` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
 | --- | --- | --- |
 | `Documents` | 17, see `DOCUMENTS_SELECTORS` | private |
-| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams` | private |
+| `Streams` | `Append`, `AppendBatch`, `AppendBatchIfOffset`, `ReadWindow`, `Len`, `TruncateBefore`, `DeleteStream`, `Streams`, `Seal`, `Info` | private |
 | `Blobs` | `Put`, `PutStream`, `Get`, `GetStream`, `GetRange`, `Head`, `Delete`, `List`, `PresignGet`, `PresignPut`, `Capabilities` | private |
 | `Secrets` | `Get`, `Set`, `Delete`, `List` | confidential (`#[tinybus(confidential)]`) |
 
@@ -139,7 +139,7 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
   Calls go through the `StorageTransport` trait (`call`, `put_blob_stream`,
   `get_blob_stream`, `signals`); a `TinyBus` proxy is one implementation.
 - The caller is bound to one host-chosen scope. `for_scope` accepts only that
-  scope, `database` and the fenced or generation variants are refused, and
+  scope, the fenced and generation variants are refused, and
   host-only capabilities (fencing, scope purge, existing-schema) are never
   reported. `Documents.Capabilities` and `Blobs.Capabilities` tell the client
   what the admitted backend provides; an `Unsupported` refusal is attributed to
@@ -180,6 +180,62 @@ wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
 SQLite database written by an earlier release gains the `expires_at_ms` column
 on the next migrating open; a read-only `existing_schema` open refuses the old
 layout like any other schema drift.
+
+### Record metadata, sealing and host-only operations (version 4)
+
+Uniform schema v2 ([`schema-v2.md`](schema-v2.md) sections 3 and 6) adds four
+things to the ports. The wire carries two of them and deliberately not the
+other two.
+
+Carried (additive; every new field is optional and defaulted):
+
+- `Meta { schema, created_ms, updated_ms, expires_ms? }` is an optional `meta`
+  field on every `Versioned` a host returns: `Get`, `Query` and `Claim`. Its
+  JSON is the native `Meta`'s. `Watch` is content-free and carries none; a
+  module rereads. An absent `meta` (a host that predates version 4, or the
+  legacy `DocumentCollection1` callback) reads as `Meta::unknown()`.
+- `PutDocumentRequest` gains optional `schema` (omitted when `0`) and
+  `expires_ms`: `DocumentStore::put_with`. A plain put serializes exactly as
+  before. The client reports `Unsupported(RecordMetadata)` when the host
+  refuses an options-bearing put. `WriteOptions::created_ms` is a host-only
+  migration option: the request has no such field (a request naming it fails to
+  decode and is refused `InvalidInput`), and `BusDocuments::put_with` refuses it
+  locally with `InvalidInput`. A module can never choose a record's creation
+  time; `created_ms` and `updated_ms` always come from the host driver's clock.
+  Batch `Put` operations carry no options, as the native `WriteOp` has none.
+- `Streams.Seal` takes `StreamRequest { stream }` and replies
+  `SealResponse { base, len, blob_bytes }` (the native `SealOutcome`). Sealing
+  a stream the module may append to is within its grant, so it is exposed;
+  `Conflict` (append to a sealed stream) and `NotFound` cross as usual.
+- `Streams.Info` takes `StreamRequest { stream }` and replies
+  `StreamInfoResponse { base, len, sealed_ms, last_append_ms }` (the native
+  `StreamInfo`), or `null` for a stream that does not exist. A module may read
+  the times of its own streams; they are epoch milliseconds from the host's
+  clock, so a module learns nothing it could not infer from its appends. It
+  rides the `StreamSeal` capability: a host without it answers `Unsupported`.
+- `Documents.Capabilities` now lists `record_metadata` and `stream_seal` when
+  the backend has them.
+
+Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
+keeps `maintenance` and `scope_enumeration` out of every capability list):
+
+- `StorageBackend::maintain` and `checkpoint` run vacuum, WAL checkpoints and
+  the seal and retention policies across the whole database. A module could
+  use them to spend the host's I/O budget or stall other tenants, so the host
+  runs them on its own schedule.
+- `StreamStore::delete_sealed_stream` is the conditional delete retention uses so it never removes a stream recreated after it was inspected. It has no selector: a bus client answers `Unsupported(StreamSeal)`, and a module deletes its own streams with `DeleteStream`.
+- `StorageBackend::scopes` enumerates every tenant. A module is bound to one
+  scope and must not learn that others exist.
+
+Compatibility. A new module on an old host works for everything it did before:
+a default put sends no new field, and a missing `meta` decodes to unknown. An
+options-bearing put or `Seal` fails closed on an old host (`deny_unknown_fields`
+and the finite selector set), never silently dropping the option. An old module
+on a new host decodes only replies without `meta`: the wire types reject
+unknown fields, so a host serving version 4 metadata must be paired with a
+module built against version 4. This is the existing rule that contract
+changes bump `CONTRACT_VERSION`; the constant is informational and no
+handshake compares it.
 
 ## Real TinyBus transport
 

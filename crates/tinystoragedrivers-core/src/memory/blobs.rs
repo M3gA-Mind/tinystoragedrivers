@@ -11,7 +11,9 @@ use super::state::DbState;
 use super::{Clock, MemoryDb};
 use crate::Capabilities;
 use crate::Capability;
-use crate::blob::{Blob, BlobMeta, BlobStore, clamp_range, validate_blob_key};
+use crate::blob::{
+    Blob, BlobMeta, BlobStore, clamp_range, validate_user_blob_key, validate_user_blob_prefix,
+};
 use crate::error::Result;
 use crate::scope::Scope;
 
@@ -62,7 +64,7 @@ impl MemoryBlobs {
         state.check_generation(self.scope.as_str(), self.generation)?;
         match self.fence.as_deref() {
             None => Ok(()),
-            fence => self.db.guard(state, fence, (self.clock)()),
+            fence => MemoryDb::guard(state, fence, (self.clock)()),
         }
     }
 
@@ -78,7 +80,7 @@ impl MemoryBlobs {
         content_type: Option<&str>,
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let meta = BlobMeta {
             key: key.to_owned(),
             len: bytes.len() as u64,
@@ -156,7 +158,7 @@ impl BlobStore for MemoryBlobs {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(self.live(&state, key).map(|(meta, bytes, _)| Blob {
@@ -166,7 +168,7 @@ impl BlobStore for MemoryBlobs {
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         let Some((_, bytes, _)) = self.live(&state, key) else {
@@ -179,14 +181,14 @@ impl BlobStore for MemoryBlobs {
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(self.live(&state, key).map(|(meta, _, _)| meta.clone()))
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
         // Only a blob with a lifetime needs the clock to say it still exists.
@@ -197,6 +199,7 @@ impl BlobStore for MemoryBlobs {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_user_blob_prefix(prefix)?;
         let state = self.db.lock()?;
         state.check_generation(self.scope.as_str(), self.generation)?;
         let now = (self.clock)();
@@ -206,6 +209,7 @@ impl BlobStore for MemoryBlobs {
             .filter(|((scope, key), (_, _, expiry))| {
                 scope == self.scope.as_str()
                     && key.starts_with(prefix)
+                    && !crate::is_reserved_blob_key(key)
                     && expiry.is_none_or(|at| at > now)
             })
             .map(|(_, (meta, _, _))| meta.clone())

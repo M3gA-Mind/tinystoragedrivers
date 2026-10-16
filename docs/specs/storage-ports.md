@@ -96,6 +96,21 @@ Versioned JSON **objects** in named collections.
     alive. Blobs have no expiry of their own: a cache of blobs keeps one
     document per blob in a TTL collection and removes the blob when the
     document expires (`delete_tree` removes a whole prefix).
+  - `RecordMetadata`: every document carries `Versioned::meta`
+    (`Meta { schema, created_ms, updated_ms, expires_ms }`), described in
+    [`schema-v2.md`](schema-v2.md). `put_with(.., WriteOptions { schema,
+    expires_ms })` declares the schema version and expiry; a plain `put`
+    declares neither, so it clears an earlier expiry, and `claim` carries both
+    over. The driver stamps `created_ms` on the first write (an update keeps
+    it; creating the id again after a delete or expiry starts it afresh) and
+    `updated_ms` on every write (never backwards). A record at or past
+    `expires_ms` reads as absent from `get`, `query`, `count`, `claim` and
+    `search`. Filters and sorts address the fields as `_schema`,
+    `_created_ms`, `_updated_ms` and `_expires_ms`, next to `_id`; a reserved
+    path never reads the body. A driver without the capability returns
+    `Meta::unknown()` (all zero, no expiry) and refuses a `put_with` that
+    declares a schema or expiry with `Unsupported(RecordMetadata)`. Batched
+    puts (`WriteOp::Put`) declare no options yet.
   - `Transactions`: `atomic_batch`, all or nothing.
   - `CollectionEnumeration`: `collections(prefix)` lists collection names with
     stored records in this handle's scope. It filters by a literal string prefix
@@ -103,7 +118,7 @@ Versioned JSON **objects** in named collections.
     complete scoped cleanup can discover deleted versions; declared collections
     with no records are omitted. Without the capability, the method returns
     `Unsupported(CollectionEnumeration)`. Enumeration never exposes another
-    scope or named database.
+    scope.
 
   - `FullText`: `search` over the declared `SearchSpec` fields. Hits come
     best first: scores never increase down the list, equal scores order by
@@ -115,8 +130,6 @@ Versioned JSON **objects** in named collections.
     (`conformance/semantics.rs`) pins all of this.
   - Vector search is not a port here; it stays with TinyMemory (see
     [`storage-bus.md`](storage-bus.md)).
-  - CrossDatabaseFencing: native guard addressing in the default or another
-    named database through for_scope_fenced_in_database.
   - `Fencing`: `StorageBackend::for_scope_fenced`, see
     [`write-fencing.md`](write-fencing.md).
 
@@ -125,6 +138,7 @@ Versioned JSON **objects** in named collections.
 Append-only logs of JSON values.
 - Offsets are dense, start at 0, and are never reused.
 - `truncate_before` discards old records but leaves `len` unchanged.
+- `seal` (capability `StreamSeal`) closes a stream to appends and stores its entries as one zstd blob at `_tsd/sealed/<escaped name>` in the same scope. Reads are unchanged; appends and `truncate_before` are `Conflict`; sealing is idempotent; a missing stream is `NotFound`; `delete_stream` removes the blob. See `schema-v2.md` section 6.
 
 Optional ConditionalStreamAppend provides append_batch_if_offset(stream,
 expected_next_offset, values). Compare the persistent next offset and append
@@ -134,7 +148,7 @@ any native fence.
 
 A mismatched offset returns Conflict without appending. Validation errors and
 aborted operations append nothing. Native fence validation participates in the
-same lock/transaction. Scope and named database isolation match other stream
+same lock/transaction. Scope isolation matches other stream
 operations. Unsupported adapters return Unsupported(ConditionalStreamAppend).
 MongoDB advertises the capability only when transactions are available; file
 atomicity remains within its documented process boundary.
@@ -167,8 +181,8 @@ bus client answer them identically.
 - `Scope::local()` is the single-operator scope.
 - A backend that serves only one scope (a desktop SQLite file) rejects other
   scopes in `for_scope`.
-- `database(name)` returns an independent named database. Names are 1–64 bytes
-  of lowercase `[a-z0-9_-]`. The same name always addresses the same data.
+- A backend is one database; there are no named databases (removed in schema
+  v2, see [`schema-v2.md`](schema-v2.md) section 7).
 - `for_scope_fenced(scope, fence)` returns handles whose writes the driver
   checks atomically against a guard document (`Capability::Fencing`,
   `ErrorKind::Fenced`). See [`write-fencing.md`](write-fencing.md).
@@ -204,7 +218,7 @@ should become async.
 
 A document port advertising `ValidatedBatch` implements
 `atomic_batch_checked(read_checks, write_ops)`. A `ReadCheck` names a collection
-and document id in the bound scope and database. Its `ExpectedDocument` is
+and document id in the bound scope. Its `ExpectedDocument` is
 either `Absent` or an exact live `Version`. Expired documents count as absent.
 All checks inspect the pre-write state, followed by the writes in their input
 order, inside one native lock or transaction. Contradictory duplicate checks
@@ -218,7 +232,7 @@ multi-document persistence has a crash-atomic commit contract. Mongo supports
 it on transaction-capable deployments when public transactions are enabled;
 standalone servers do not advertise it.
 
-Mongo uses reserved metadata counters per named database and storage scope.
+Mongo uses reserved metadata counters per storage scope.
 Every document mutation, including claims, deletion, expiry sweeping and writes
 through independently opened handles, increments its scope counter inside the
 same physical transaction. This prevents snapshot write skew for both version
@@ -245,11 +259,9 @@ cross-document serializability.
 
 ## Scoped reset and writer admission
 
-Reset targets an explicit host-owned manifest of root-relative
-`DatabaseAddress::Default` and `DatabaseAddress::Named(name)` addresses.
-Every first-party `database(name)` is root-relative. A receipt from one
-address says nothing about the other addresses; a host reports a full reset
-only after every owned address and external owner stage completes.
+Reset targets one scope of the connected backend. A receipt from one backend
+says nothing about another; a host reports a full reset only after every owned
+backend and external owner stage completes.
 
 `ScopedStorage::purge(PurgeRequest { operation_id, mode })` is optional.
 Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
@@ -278,7 +290,7 @@ one deferred read transaction. Retired handles cannot read replacement data. Old
 `Fenced` after reset, even if the operation would otherwise change nothing.
 Hosts persist the returned generation in authoritative profile state before
 reopening through `for_scope_generation` or
-`for_scope_fenced_in_database_generation`. Generations come from trusted
+`for_scope_fenced_generation`. Generations come from trusted
 native receipts and profile admission, never model arguments or document
 metadata. A matching receipt retry does not erase data written in the new
 generation. Reusing an older operation identity after a later reset cannot
@@ -286,7 +298,7 @@ revive the old generation.
 
 A fenced purge checks and holds the native guard through the operation. The
 guard's scope must differ from the erased scope, including when the guard is
-in the default or another named database. A stale guard changes nothing.
+in another scope. A stale guard changes nothing.
 Memory and SQLite support this natively. File, Mongo GridFS, S3 and composite
 storage do not currently advertise atomic all-port purge; they must not turn
 an unsupported native guarantee into an unfenced best-effort success.
@@ -331,7 +343,7 @@ default/named namespace. Blob planning saves one durable manifest row per file.
 Each blob's chunks are erased before its file and manifest row. A stage failure
 keeps the receipt Pending; retrying the same identity resumes without losing
 ownership of orphan chunks. Complete is persisted only after no scoped files
-or manifest rows remain. It covers this one addressed database, and is not a
+or manifest rows remain. It covers this one backend, and is not a
 cross-address, cross-port atomicity claim.
 
 All Mongo payload and admission reads select the primary. Port reads validate
@@ -347,8 +359,7 @@ after a reset uses sweep_expired_generation with the issued generation.
 `StorageBackend::driver` remains its diagnostic label (`composite` for a
 composition). `document_driver` identifies the originating native document and
 stream driver, defaulting to `driver` for ordinary backends. Compositions and
-transparent backend wrappers forward it recursively, including named database
-views. It performs no opening or I/O. Hosts must use the record identity when
+transparent backend wrappers forward it recursively. It performs no opening or I/O. Hosts must use the record identity when
 applying their own coordination/recovery rules rather than classifying a wrapper
 or independent blob driver. The identity grants no capability or actor authority;
 native capabilities and admission still govern operations.

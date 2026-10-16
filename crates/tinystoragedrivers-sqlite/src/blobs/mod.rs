@@ -8,7 +8,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, params};
 use tinystoragedrivers_core::{
     Blob, BlobMeta, BlobStore, Capabilities, Capability, Clock, Result, Scope, async_trait,
-    clamp_range, validate_blob_key,
+    clamp_range, is_reserved_blob_key, validate_user_blob_key, validate_user_blob_prefix,
 };
 
 use crate::connection::Db;
@@ -126,14 +126,15 @@ impl SqliteBlobs {
         content_type: Option<&str>,
         ttl: Option<Duration>,
     ) -> Result<BlobMeta> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let sql = format!(
-            "INSERT INTO {} (scope, key, content_type, bytes, expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, bytes = excluded.bytes, expires_at_ms = excluded.expires_at_ms",
+            "INSERT INTO {} (scope, key, content_type, size, sha256, bytes, expires_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (scope, key) DO UPDATE SET content_type = excluded.content_type, size = excluded.size,
+                 sha256 = excluded.sha256, bytes = excluded.bytes, expires_ms = excluded.expires_ms",
             self.table()
         );
         let sweep = format!(
-            "DELETE FROM {} WHERE scope = ?1 AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?2",
+            "DELETE FROM {} WHERE scope = ?1 AND expires_ms IS NOT NULL AND expires_ms <= ?2",
             self.table()
         );
         let described = BlobMeta {
@@ -155,7 +156,15 @@ impl SqliteBlobs {
             }
             conn.execute(
                 &sql,
-                params![scope.as_str(), row.key, row.content_type, bytes, expires_at],
+                params![
+                    scope.as_str(),
+                    row.key,
+                    row.content_type,
+                    i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                    digest(&bytes),
+                    bytes,
+                    expires_at
+                ],
             )
             .map_err(during("put blob"))
         })
@@ -164,8 +173,15 @@ impl SqliteBlobs {
     }
 }
 
+/// The SHA-256 of a blob's bytes, as the raw 32-byte digest the `sha256`
+/// column stores.
+pub(crate) fn digest(bytes: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).to_vec()
+}
+
 /// Visible rows: no lifetime, or one still in the future.
-const LIVE: &str = "(expires_at_ms IS NULL OR expires_at_ms > ?";
+const LIVE: &str = "(expires_ms IS NULL OR expires_ms > ?";
 
 fn meta(key: String, len: i64, content_type: Option<String>) -> BlobMeta {
     BlobMeta {
@@ -179,7 +195,7 @@ fn meta(key: String, len: i64, content_type: Option<String>) -> BlobMeta {
 impl BlobStore for SqliteBlobs {
     async fn sweep_expired(&self) -> Result<u64> {
         let sweep = format!(
-            "DELETE FROM {} WHERE scope = ?1 AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?2",
+            "DELETE FROM {} WHERE scope = ?1 AND expires_ms IS NOT NULL AND expires_ms <= ?2",
             self.table()
         );
         let (scope, now) = (self.scope.clone(), self.now_ms());
@@ -211,7 +227,7 @@ impl BlobStore for SqliteBlobs {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let sql = format!(
             "SELECT content_type, bytes FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
@@ -237,7 +253,7 @@ impl BlobStore for SqliteBlobs {
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         // One statement reads and clamps (`substr` stops at the end of the
         // blob), so a concurrent replace cannot mix two versions of it.
         clamp_range(&range, 0)?;
@@ -261,7 +277,7 @@ impl BlobStore for SqliteBlobs {
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let sql = format!(
             "SELECT content_type, length(bytes) FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
@@ -280,7 +296,7 @@ impl BlobStore for SqliteBlobs {
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        validate_blob_key(key)?;
+        validate_user_blob_key(key)?;
         let sql = format!(
             "DELETE FROM {} WHERE scope = ?1 AND key = ?2 AND {LIVE}3)",
             self.table()
@@ -300,6 +316,7 @@ impl BlobStore for SqliteBlobs {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_user_blob_prefix(prefix)?;
         let sql = format!(
             "SELECT key, length(bytes), content_type FROM {} WHERE scope = ?1 AND {LIVE}2) ORDER BY key",
             self.table()
@@ -316,7 +333,7 @@ impl BlobStore for SqliteBlobs {
                 .map_err(during("list blobs"))?;
             Ok(rows
                 .into_iter()
-                .filter(|(key, _, _)| key.starts_with(&prefix))
+                .filter(|(key, _, _)| key.starts_with(&prefix) && !is_reserved_blob_key(key))
                 .map(|(key, len, content_type)| meta(key, len, content_type))
                 .collect())
         })
