@@ -84,6 +84,7 @@ segment   = 1*( ALPHA / DIGIT / "-" / "_" / "." / "@" )   ; at most 96 bytes
 - **`principal` narrows a record to one agent or one module inside the tenant.** No principal means the record is shared across the tenant.
 - **`cluster` is the only scope with no tenant.** It holds the profile registry and process-placement leases on shared backends.
 - **Hashing.** A segment that is too long or holds characters outside the set is replaced by `~` plus the first 26 characters of the lowercase base32 SHA-256 of the raw segment. Only the segment is hashed, never the whole scope, so a hashed agent still sits under its tenant and its fence.
+- **Providers take a tenant.** A store that scopes per agent (for example tinyagents' `DriverSessionStores`) is constructed with the tenant `Scope` and derives `tenant.agent(id)` itself; it never uses a raw agent id as a scope.
 - **API.** `Scope::tenant(id)`, `Scope::local()`, `Scope::cluster()`, `scope.agent(id)`, `scope.module(id)`, `scope.tenant_scope()` and `Scope::parse(text) -> Result<Parsed>`. `Scope::new` continues to accept any valid v1 string, so v1 data stays readable during migration. It is deprecated for new writes.
 - **Tenant purge.** A tenant purge covers the tenant scope and every principal under it. `StorageBackend::scopes(prefix)` (capability `ScopeEnumeration`) lists them, and the host drives the purge (see [`scope-purge.md`](scope-purge.md)).
 
@@ -328,8 +329,9 @@ The table maps every v1 name to its v2 name. Each owner implements the step for 
 | stream `run_events:<sha>` | `ledger.events/<run>` | Agent | |
 | `session_history_{sessions,messages,tool_calls,fts}` | `history.{sessions,messages,tool_calls,search}` | Agent | µs becomes ms |
 | `session_history_counters` | `tsd.counters` | Agent | |
-| `conversation_threads_v1`, `conversation_appends_v1`, streams `conversation_messages_v1:<sha>:<inc>` | `conversations.threads`, `.appends`, streams `conversations.messages/<thread>/<inc>` | Tenant | |
+| `conversation_threads_v1`, `conversation_appends_v1`, streams `conversation_messages_v1:<sha>:<inc>` | `conversations.threads`, `.appends`, streams `conversations.messages/<thread>/<inc>` | Tenant | an append intent's `record` (a JSON string today) becomes an object |
 | `<prefix>_{checkpoints,threads,writes,leases}` | `graph.{checkpoints,threads,writes}` plus `tsd.leases` | Agent | prefix becomes a `ns` field |
+| `WorkflowRun.lease_owner` / `lease_expires_at` (embedded in `run_ledger_workflow_runs`) | `tsd.leases` key `Key::of(["ledger", "workflow", run_id])` | Agent | lease fields removed from the record |
 | `orchestration_tasks`, `orchestration_task_history`, `orchestration_completions` | `tasks.records`, `tasks.history`, `tasks.completions` | Agent | `updatedAtMs` moves to metadata |
 | `harness_store`, `harness_namespaced_store`, `harness_response_cache`, `graph_task_cache` | `tsd.kv` (owner `harness` or `graph`) | Agent | |
 
