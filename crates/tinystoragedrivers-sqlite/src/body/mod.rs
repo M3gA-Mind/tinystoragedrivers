@@ -41,8 +41,16 @@ pub(crate) fn encode(doc: &Value) -> Result<SqlValue> {
     Ok(SqlValue::Blob(blob))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bodies decoded on this thread, for tests of how many rows a query reads.
+    pub(crate) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The document held by a `docs.body` value.
 pub(crate) fn decode(stored: &SqlValue) -> Result<Value> {
+    #[cfg(test)]
+    DECODED.with(|count| count.set(count.get() + 1));
     match stored {
         SqlValue::Text(text) => Ok(serde_json::from_str(text)?),
         SqlValue::Blob(bytes) => match bytes.split_first() {

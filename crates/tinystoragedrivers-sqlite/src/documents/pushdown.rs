@@ -16,20 +16,22 @@
 use std::collections::BTreeSet;
 
 use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    CREATED_FIELD, CollectionSpec, CursorPosition, Direction, EXPIRES_FIELD, Filter, ID_FIELD,
-    SCHEMA_FIELD, Sort, UPDATED_FIELD,
+    CREATED_FIELD, CollectionSpec, EXPIRES_FIELD, Filter, ID_FIELD, Result, SCHEMA_FIELD,
+    UPDATED_FIELD,
 };
 
 use super::ops::Ctx;
+use crate::error::during;
 use crate::fields;
 use crate::sql::{ident, literal};
 
 /// Which body fields of one collection in one scope SQL can see, and where.
 #[derive(Debug, Clone)]
 pub(crate) struct Projection {
-    paths: BTreeSet<String>,
+    pub(super) paths: BTreeSet<String>,
     fields_table: String,
     docs_table: String,
     scope: String,
@@ -49,7 +51,7 @@ impl Projection {
 
     /// The `doc_fields` rows of `field` in this collection and scope, as a
     /// `FROM … WHERE` over alias `f` that still needs a closing condition.
-    fn rows(&self, field: &str) -> Option<String> {
+    pub(super) fn rows(&self, field: &str) -> Option<String> {
         self.paths.contains(field).then(|| {
             format!(
                 "FROM {} AS f WHERE f.scope = {} AND f.coll = {} AND f.path = {}",
@@ -70,13 +72,36 @@ impl Projection {
         ))
     }
 
-    /// The `kind` or `value` of `field` on the current row of `docs`.
-    fn of_row(&self, field: &str, column: &str) -> Option<String> {
+    /// A `LEFT JOIN` that exposes the projected value of `field` as
+    /// `s{index}.k` (kind) and `s{index}.v` (value) on each document row; a
+    /// document without the path joins to nothing.
+    pub(super) fn join(&self, index: usize, field: &str) -> Option<String> {
         Some(format!(
-            "(SELECT f.{column} {} AND f.id = {}.id)",
+            "LEFT JOIN (SELECT f.id AS sid, f.kind AS k, f.value AS v {}) AS s{index} ON s{index}.sid = {}.id",
             self.rows(field)?,
             self.docs_table
         ))
+    }
+
+    /// Whether `field` holds a number SQLite may have rounded: a `u64` above
+    /// `i64::MAX` is stored as a float, and two such values can tie in SQL
+    /// where the port tells them apart. A sort over the path then stays in
+    /// Rust. The range is the one a `u64` rounds into; text sorts above every
+    /// number, so the upper bound also keeps strings out of the index scan.
+    pub(super) fn has_rounded_numbers(&self, conn: &Connection, field: &str) -> Result<bool> {
+        let Some(rows) = self.rows(field) else {
+            return Ok(false);
+        };
+        conn.query_row(
+            &format!(
+                "SELECT 1 {rows} AND f.value >= 9223372036854775808.0 AND f.value <= 18446744073709551616.0 LIMIT 1"
+            ),
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(during("query"))
     }
 }
 
@@ -98,7 +123,7 @@ fn pushable(value: &Value) -> Option<SqlValue> {
 
 /// The column that holds a reserved metadata path (`_created_ms` and the
 /// rest), `None` for any other path.
-fn meta_column(field: &str) -> Option<&'static str> {
+pub(super) fn meta_column(field: &str) -> Option<&'static str> {
     match field {
         SCHEMA_FIELD => Some("schema"),
         CREATED_FIELD => Some("created_ms"),
@@ -122,6 +147,71 @@ fn on_field(field: &str, test: &str, projection: &Projection) -> Option<String> 
     } else {
         projection.ids_where(field, test)
     }
+}
+
+/// The `kind` rank and SQL value of a range bound, and whether the comparison
+/// must be inclusive to stay a superset. Only numbers, strings and booleans
+/// are pushed: SQLite orders each of them as the port does (numbers exactly,
+/// text bytewise under the default `BINARY` collation, `false` before `true`),
+/// and the `kind` test makes a bound of another JSON type match nothing, as in
+/// the filter. A number the column cannot hold exactly (a `u64` above
+/// `i64::MAX` is stored as a rounded float) is compared inclusively, because
+/// rounding is monotone and so can only make a strict comparison tie.
+fn range_bound(value: &Value) -> Option<(i64, SqlValue, bool)> {
+    let lossy = match value {
+        Value::Number(number) => {
+            number.as_i64().is_none() && number.as_f64().is_some_and(|n| n.abs() >= LOSSY_FROM)
+        }
+        Value::String(_) | Value::Bool(_) => false,
+        _ => return None,
+    };
+    Some((fields::rank(value), fields::sql_value(value), lossy))
+}
+
+/// Numbers from here up may be stored rounded (2^62).
+const LOSSY_FROM: f64 = 4.611_686_018_427_388e18;
+
+/// A superset condition for a range over a projected field or the id.
+fn range(
+    field: &str,
+    bounds: [(&str, &Option<Value>); 4],
+    projection: &Projection,
+) -> Option<Clause> {
+    let mut terms = Vec::new();
+    let mut params = Vec::new();
+    for (operator, bound) in bounds {
+        let Some(bound) = bound else { continue };
+        if field == ID_FIELD {
+            if let Value::String(text) = bound {
+                terms.push(format!("id {operator} ?"));
+                params.push(SqlValue::Text(text.clone()));
+            }
+            continue;
+        }
+        let Some((kind, sql, lossy)) = range_bound(bound) else {
+            continue;
+        };
+        let operator = match (lossy, operator) {
+            (true, ">") => ">=",
+            (true, "<") => "<=",
+            _ => operator,
+        };
+        terms.push(format!("f.kind = {kind} AND f.value {operator} ?"));
+        params.push(sql);
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    let sql = if field == ID_FIELD {
+        terms.join(" AND ")
+    } else {
+        format!(
+            "id IN (SELECT f.id {} AND {})",
+            projection.rows(field)?,
+            terms.join(" AND ")
+        )
+    };
+    Some(Clause { sql, params })
 }
 
 /// A superset condition for `filter`, or `None` when nothing can be pushed.
@@ -166,6 +256,17 @@ pub(crate) fn clause(filter: &Filter, projection: &Projection) -> Option<Clause>
                 params,
             })
         }
+        Filter::Range {
+            field,
+            gt,
+            gte,
+            lt,
+            lte,
+        } => range(
+            field,
+            [(">", gt), (">=", gte), ("<", lt), ("<=", lte)],
+            projection,
+        ),
         Filter::Eq { field, value } => {
             let bound = pushable(value)?;
             if field == ID_FIELD && !value.is_string() {
@@ -207,120 +308,6 @@ pub(crate) fn clause(filter: &Filter, projection: &Projection) -> Option<Clause>
         }
         _ => None,
     }
-}
-
-/// A SQL superset predicate that seeks strictly after a keyset position.
-///
-/// Numeric comparisons may include a value that rounds to the same SQLite
-/// number as the cursor; the caller rechecks the exact JSON order in Rust.
-/// Arrays and objects are left to the Rust fallback because SQLite's JSON
-/// comparison does not implement the port's structural ordering.
-pub(crate) fn after(
-    position: &CursorPosition,
-    sorts: &[Sort],
-    projection: &Projection,
-) -> Option<Clause> {
-    let mut alternatives = Vec::with_capacity(sorts.len() + 1);
-    for current in 0..sorts.len() {
-        let mut terms = Vec::with_capacity(current + 1);
-        let mut params = Vec::new();
-        for index in 0..current {
-            let key = sorts.get(index)?;
-            let value = position.values.get(index)?;
-            if matches!(value, Value::Array(_) | Value::Object(_)) {
-                return None;
-            }
-            let (rank_expression, expression) = expressions(&key.field, projection)?;
-            terms.push(format!("({rank_expression} = ? AND {expression} IS ?)"));
-            params.push(SqlValue::Integer(rank(value)));
-            params.push(sql_value(value)?);
-        }
-        let key = sorts.get(current)?;
-        let value = position.values.get(current)?;
-        if matches!(value, Value::Array(_) | Value::Object(_)) {
-            return None;
-        }
-        let (rank_expression, value_expression) = expressions(&key.field, projection)?;
-        let cursor_rank = rank(value);
-        let direction = match key.direction {
-            Direction::Asc => ">",
-            Direction::Desc => "<",
-        };
-        let advance = if cursor_rank == 0 {
-            format!("{rank_expression} {direction} ?")
-        } else {
-            let inclusive = match key.direction {
-                Direction::Asc => ">=",
-                Direction::Desc => "<=",
-            };
-            format!(
-                "({rank_expression} {direction} ? OR ({rank_expression} = ? AND {value_expression} {inclusive} ?))"
-            )
-        };
-        terms.push(advance);
-        params.push(SqlValue::Integer(cursor_rank));
-        if cursor_rank != 0 {
-            params.push(SqlValue::Integer(cursor_rank));
-            params.push(sql_value(value)?);
-        }
-        alternatives.push((format!("({})", terms.join(" AND ")), params));
-    }
-
-    let mut terms = Vec::with_capacity(sorts.len() + 1);
-    let mut params = Vec::new();
-    for (index, key) in sorts.iter().enumerate() {
-        let value = position.values.get(index)?;
-        if matches!(value, Value::Array(_) | Value::Object(_)) {
-            return None;
-        }
-        let (rank_expression, value_expression) = expressions(&key.field, projection)?;
-        terms.push(format!(
-            "({rank_expression} = ? AND {value_expression} IS ?)",
-        ));
-        params.push(SqlValue::Integer(rank(value)));
-        params.push(sql_value(value)?);
-    }
-    terms.push("id > ?".to_owned());
-    params.push(SqlValue::Text(position.id.clone()));
-    alternatives.push((format!("({})", terms.join(" AND ")), params));
-
-    Some(Clause {
-        sql: alternatives
-            .iter()
-            .map(|(sql, _)| sql.as_str())
-            .collect::<Vec<_>>()
-            .join(" OR "),
-        params: alternatives
-            .into_iter()
-            .flat_map(|(_, params)| params)
-            .collect(),
-    })
-}
-
-fn expressions(field: &str, projection: &Projection) -> Option<(String, String)> {
-    if field == ID_FIELD {
-        return Some(("3".to_owned(), "id".to_owned()));
-    }
-    if let Some(column) = meta_column(field) {
-        // Metadata is a number when present; only `expires_ms` can be absent.
-        let rank = if field == EXPIRES_FIELD {
-            "CASE WHEN expires_ms IS NULL THEN 0 ELSE 2 END".to_owned()
-        } else {
-            "2".to_owned()
-        };
-        return Some((rank, column.to_owned()));
-    }
-    // A path with no row has no value and ranks with null.
-    let rank = format!("COALESCE({}, 0)", projection.of_row(field, "kind")?);
-    Some((rank, projection.of_row(field, "value")?))
-}
-
-fn sql_value(value: &Value) -> Option<SqlValue> {
-    (!matches!(value, Value::Array(_) | Value::Object(_))).then(|| fields::sql_value(value))
-}
-
-fn rank(value: &Value) -> i64 {
-    fields::rank(value)
 }
 
 #[cfg(test)]

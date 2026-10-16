@@ -13,7 +13,7 @@ use tinystoragedrivers_core::{
     validate_id, value,
 };
 
-use super::pushdown;
+use super::{ordered, pushdown};
 use crate::body;
 use crate::error::during;
 use crate::fields;
@@ -268,16 +268,16 @@ pub(crate) fn lapsed(
 }
 
 /// A stored row: live, expired or deleted.
-struct Stored {
-    version: Version,
-    meta: Meta,
+pub(super) struct Stored {
+    pub(super) version: Version,
+    pub(super) meta: Meta,
     deleted: bool,
-    doc: Value,
+    pub(super) doc: Value,
 }
 
 impl Stored {
     /// Whether a reader sees this row.
-    fn is_live(&self, spec: &CollectionSpec, now_ms: u64) -> bool {
+    pub(super) fn is_live(&self, spec: &CollectionSpec, now_ms: u64) -> bool {
         !self.deleted && !lapsed(spec, &self.doc, self.meta.expires_ms, now_ms)
     }
 }
@@ -294,7 +294,12 @@ fn meta_at(row: &Row<'_>, first: usize) -> rusqlite::Result<Meta> {
 }
 
 /// The stored row, live, expired or deleted.
-fn stored(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: &str) -> Result<Option<Stored>> {
+pub(super) fn stored(
+    conn: &Connection,
+    ctx: Ctx<'_>,
+    collection: &str,
+    id: &str,
+) -> Result<Option<Stored>> {
     let sql = format!(
         "SELECT version, schema, created_ms, updated_ms, expires_ms, deleted, body FROM {}
          WHERE scope = ?1 AND coll = ?2 AND id = ?3",
@@ -359,10 +364,11 @@ pub(crate) fn matching(
     filter: &Filter,
     sort: &[Sort],
 ) -> Result<Vec<Versioned<Value>>> {
-    matching_after(conn, ctx, collection, filter, sort, None)
+    matching_after(conn, ctx, collection, filter, sort, None, None)
 }
 
-/// Live documents strictly after an optional cursor in `sort` order.
+/// Live documents strictly after an optional cursor in `sort` order; with a
+/// `limit`, at least the first `limit` of them (SQL may stop there).
 pub(crate) fn matching_after(
     conn: &Connection,
     ctx: Ctx<'_>,
@@ -370,10 +376,17 @@ pub(crate) fn matching_after(
     filter: &Filter,
     sort: &[Sort],
     after: Option<&CursorPosition>,
+    limit: Option<usize>,
 ) -> Result<Vec<Versioned<Value>>> {
     validate_collection(collection)?;
     filter.validate()?;
     let spec = load_spec(conn, ctx.tables, collection)?;
+    if let Some(limit) = limit
+        && let Some(found) =
+            ordered::matching_ordered(conn, ctx, &spec, filter, sort, after, limit)?
+    {
+        return Ok(found);
+    }
     let mut sql = format!(
         "SELECT id, version, schema, created_ms, updated_ms, expires_ms, body FROM {}
          WHERE scope = ? AND coll = {} AND deleted = 0 AND (expires_ms IS NULL OR expires_ms > ?)",
@@ -386,12 +399,6 @@ pub(crate) fn matching_after(
     ];
     let projection = pushdown::Projection::new(ctx, &spec, collection);
     if let Some(clause) = pushdown::clause(filter, &projection) {
-        sql.push_str(" AND (");
-        sql.push_str(&clause.sql);
-        sql.push(')');
-        params.extend(clause.params);
-    }
-    if let Some(clause) = after.and_then(|position| pushdown::after(position, sort, &projection)) {
         sql.push_str(" AND (");
         sql.push_str(&clause.sql);
         sql.push(')');

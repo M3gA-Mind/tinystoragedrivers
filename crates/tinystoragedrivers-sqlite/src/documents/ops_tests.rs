@@ -1,7 +1,7 @@
 //! Document operations directly on a connection.
 
 use serde_json::json;
-use tinystoragedrivers_core::{ErrorKind, IndexSpec};
+use tinystoragedrivers_core::{ErrorKind, Filter, IndexSpec, Sort};
 
 use super::*;
 
@@ -343,4 +343,71 @@ fn late_unique_indexes_are_checked_per_scope() {
     .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert_eq!(load_spec(&conn, &tables, "w").unwrap().indexes.len(), 0);
+}
+
+fn decoded() -> usize {
+    crate::body::DECODED.with(std::cell::Cell::get)
+}
+
+fn thousands(conn: &Connection, tables: &Tables) {
+    let spec = CollectionSpec::new("c").index(IndexSpec::new("by_n", ["n"]));
+    declare(conn, tables, &spec, 0).unwrap();
+    conn.execute_batch("BEGIN").unwrap();
+    for n in 0..5000_u32 {
+        put(
+            conn,
+            ctx(tables),
+            "c",
+            &format!("d{n:05}"),
+            &json!({"n": (n * 7919) % 5000, "pad": "x".repeat(8)}),
+            Precondition::None,
+        )
+        .unwrap();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+}
+
+#[test]
+fn a_ranged_sorted_limited_query_decodes_only_the_page() {
+    let (conn, tables) = setup();
+    thousands(&conn, &tables);
+    let filter = Filter::gte("n", 1000).and(Filter::lt("n", 4000));
+    let sort = [Sort::desc("n")];
+    let before = decoded();
+    let page = matching_after(&conn, ctx(&tables), "c", &filter, &sort, None, Some(11)).unwrap();
+    let read = decoded() - before;
+    assert_eq!(page.len(), 11);
+    assert_eq!(page.first().unwrap().doc["n"], 3999);
+    assert!(read <= 11, "decoded {read} bodies for an 11-row page");
+
+    // The same page, sorted in Rust over every candidate, reads them all.
+    let before = decoded();
+    let all = matching_after(&conn, ctx(&tables), "c", &filter, &sort, None, None).unwrap();
+    assert_eq!(all.len(), 3000);
+    assert!(decoded() - before >= 3000);
+    assert_eq!(
+        page.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        all.iter().take(11).map(|item| &item.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_limited_page_continues_past_rows_the_recheck_rejects() {
+    let (conn, tables) = setup();
+    thousands(&conn, &tables);
+    // `pad` is not projected, so SQL cannot narrow by it and rejects nothing
+    // itself; the Rust check does. Every match is still found, in order.
+    let filter = Filter::gte("n", 100).and(Filter::eq("n", 777).or(Filter::eq("n", 4000)));
+    let page = matching_after(
+        &conn,
+        ctx(&tables),
+        "c",
+        &filter,
+        &[Sort::asc("n")],
+        None,
+        Some(5),
+    )
+    .unwrap();
+    let found: Vec<_> = page.iter().map(|item| item.doc["n"].clone()).collect();
+    assert_eq!(found, [json!(777), json!(4000)]);
 }

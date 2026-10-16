@@ -15,6 +15,8 @@
 //! which makes preconditions, unique indexes, claims and batches atomic.
 
 pub(crate) mod ops;
+mod order;
+mod ordered;
 mod pushdown;
 
 use std::fmt;
@@ -295,6 +297,7 @@ impl DocumentStore for SqliteDocuments {
                 &query.filter,
                 &query.sort,
                 position.as_ref(),
+                query.limit.map(|limit| limit.saturating_add(1)),
             )?;
             let end = query
                 .limit
@@ -369,9 +372,10 @@ impl DocumentStore for SqliteDocuments {
             patch.clone(),
         );
         self.with(Access::Write, move |conn, ctx| {
-            let Some(first) = ops::matching(conn, ctx, &collection, &filter, &sort)?
-                .into_iter()
-                .next()
+            let Some(first) =
+                ops::matching_after(conn, ctx, &collection, &filter, &sort, None, Some(1))?
+                    .into_iter()
+                    .next()
             else {
                 return Ok(None);
             };

@@ -3,7 +3,6 @@
 use serde_json::json;
 
 use rusqlite::types::Value as SqlValue;
-use tinystoragedrivers_core::{CursorPosition, Meta, Sort};
 
 use super::*;
 
@@ -27,10 +26,6 @@ fn projection() -> Projection {
 
 fn clause(filter: &Filter) -> Option<Clause> {
     super::clause(filter, &projection())
-}
-
-fn after(position: &CursorPosition, sorts: &[Sort]) -> Option<Clause> {
-    super::after(position, sorts, &projection())
 }
 
 const STATE_IDS: &str = "id IN (SELECT f.id FROM \"doc_fields\" AS f WHERE f.scope = 'local' AND f.coll = 'jobs' AND f.path = 'state' AND f.value";
@@ -90,57 +85,15 @@ fn leaves_everything_else_to_rust() {
             field: "x".into(),
             values: Vec::new(),
         },
-        Filter::gt("rank", 1),
         Filter::eq("a", "x").or(Filter::eq("state", "y")),
         Filter::eq("a", "x").negate(),
         Filter::gt("n", 1).and(Filter::lt("n", 3)),
+        Filter::gt("rank", Value::Null),
+        Filter::gt("rank", json!([1])),
+        Filter::gt(ID_FIELD, 1),
     ] {
         assert_eq!(clause(&filter), None, "{filter:?}");
     }
-}
-
-#[test]
-fn seeks_by_nullable_mixed_direction_sort_and_id() {
-    let position = CursorPosition {
-        id: "last".into(),
-        values: vec![json!(2), json!("queued")],
-    };
-    let pushed = after(&position, &[Sort::asc("rank"), Sort::desc("state")]).unwrap();
-    assert!(pushed.sql.contains("f.path = 'rank'"), "{}", pushed.sql);
-    assert!(pushed.sql.contains("f.path = 'state'"));
-    assert!(pushed.sql.contains("SELECT f.kind"));
-    assert!(pushed.sql.contains("f.id = \"docs\".id"));
-    assert!(pushed.sql.contains(") >= ?"));
-    assert!(pushed.sql.contains(") <= ?"));
-    assert!(pushed.sql.ends_with("id > ?)"));
-    assert_eq!(pushed.params.last(), Some(&SqlValue::Text("last".into())));
-
-    let null = CursorPosition {
-        id: "n".into(),
-        values: vec![Value::Null],
-    };
-    let nullable = after(&null, &[Sort::asc("rank")]).unwrap();
-    assert!(!nullable.sql.contains(") >= ?"));
-}
-
-#[test]
-fn leaves_structural_sort_values_to_reference_ordering() {
-    for value in [json!([]), json!({"key": 1})] {
-        let position = CursorPosition {
-            id: "last".into(),
-            values: vec![value],
-        };
-        assert_eq!(after(&position, &[Sort::asc("rank")]), None);
-    }
-}
-
-#[test]
-fn a_sort_on_an_unprojected_path_is_not_seeked_in_sql() {
-    let position = CursorPosition {
-        id: "last".into(),
-        values: vec![json!(1)],
-    };
-    assert_eq!(after(&position, &[Sort::asc("undeclared")]), None);
 }
 
 #[test]
@@ -163,11 +116,74 @@ fn reserved_metadata_paths_push_down_to_their_columns() {
     );
 }
 
+const RANK_ROWS: &str = "id IN (SELECT f.id FROM \"doc_fields\" AS f WHERE f.scope = 'local' AND f.coll = 'jobs' AND f.path = 'rank' AND";
+
 #[test]
-fn a_metadata_sort_seeks_through_its_column() {
-    let sorts = [Sort::asc("_expires_ms")];
-    let position = CursorPosition::for_record("a", &json!({}), &Meta::unknown(), &sorts);
-    let pushed = after(&position, &sorts).unwrap();
-    assert!(pushed.sql.contains("expires_ms IS NULL"), "{}", pushed.sql);
-    assert!(!pushed.sql.contains("doc_fields"), "{}", pushed.sql);
+fn a_range_on_a_projected_field_tests_kind_and_value() {
+    let number = clause(&Filter::gt("rank", 2)).unwrap();
+    assert_eq!(
+        number.sql,
+        format!("{RANK_ROWS} f.kind = 2 AND f.value > ?)")
+    );
+    assert_eq!(number.params, vec![SqlValue::Integer(2)]);
+    let text = clause(&Filter::gte("rank", "b").and(Filter::lt("rank", "d"))).unwrap();
+    assert_eq!(
+        text.params,
+        vec![SqlValue::Text("b".into()), SqlValue::Text("d".into())]
+    );
+    let flag = clause(&Filter::lte("done", true)).unwrap();
+    assert!(
+        flag.sql.contains("f.kind = 1 AND f.value <= ?"),
+        "{}",
+        flag.sql
+    );
+}
+
+#[test]
+fn both_bounds_of_a_range_share_one_lookup() {
+    let both = Filter::Range {
+        field: "rank".into(),
+        gt: Some(json!(1)),
+        gte: None,
+        lt: Some(json!(9.5)),
+        lte: None,
+    };
+    let pushed = clause(&both).unwrap();
+    assert_eq!(
+        pushed.sql,
+        format!("{RANK_ROWS} f.kind = 2 AND f.value > ? AND f.kind = 2 AND f.value < ?)")
+    );
+    assert_eq!(
+        pushed.params,
+        vec![SqlValue::Integer(1), SqlValue::Real(9.5)]
+    );
+    let clash = Filter::Range {
+        field: "rank".into(),
+        gt: Some(json!(1)),
+        gte: None,
+        lt: Some(json!("z")),
+        lte: None,
+    };
+    assert!(
+        clause(&clash)
+            .unwrap()
+            .sql
+            .contains("f.kind = 2 AND f.value > ? AND f.kind = 3")
+    );
+}
+
+#[test]
+fn a_bound_that_may_be_rounded_is_compared_inclusively() {
+    let big = clause(&Filter::gt("rank", u64::MAX - 1)).unwrap();
+    assert!(big.sql.contains("f.value >= ?"), "{}", big.sql);
+    let float = clause(&Filter::lt("rank", 1e19)).unwrap();
+    assert!(float.sql.contains("f.value <= ?"), "{}", float.sql);
+    let small = clause(&Filter::gt("rank", 1.5)).unwrap();
+    assert!(small.sql.contains("f.value > ?"), "{}", small.sql);
+}
+
+#[test]
+fn a_range_on_the_id_compares_bytes_of_string_bounds() {
+    let pushed = clause(&Filter::gte(ID_FIELD, "b").and(Filter::lt(ID_FIELD, "d"))).unwrap();
+    assert_eq!(pushed.sql, "(id >= ?) AND (id < ?)");
 }
