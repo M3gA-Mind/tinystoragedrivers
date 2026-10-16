@@ -266,3 +266,7 @@ impl MongoStreams {
         Ok(SealOutcome::new(base, len, meta.len))
     }
 }
+
+#[cfg(test)]
+#[path = "seal_tests.rs"]
+mod tests;

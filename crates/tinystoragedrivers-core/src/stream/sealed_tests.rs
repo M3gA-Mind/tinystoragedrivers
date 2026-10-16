@@ -177,7 +177,7 @@ fn the_version_refusal_names_the_version() {
 #[test]
 fn a_window_that_starts_past_the_end_is_empty_even_with_a_huge_limit() {
     let log = SealedLog::new(0, vec![json!(1), json!(2)]);
-    assert!(log.window(2, usize::MAX).is_empty());
+    assert_eq!(log.window(2, usize::MAX), Vec::<StreamEntry>::new());
     assert_eq!(log.window(1, usize::MAX).len(), 1);
 }
 
