@@ -208,6 +208,7 @@ impl SqliteStorage {
                     Arc::clone(&self.tables),
                     scope.clone(),
                     fencing.cloned(),
+                    Arc::clone(&self.clock),
                 )
                 .with_generation(generation),
             ),

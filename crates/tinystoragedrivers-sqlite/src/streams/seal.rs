@@ -183,6 +183,7 @@ impl SqliteStreams {
     pub(super) async fn seal_mark(&self, stream: &str, written: SealOutcome) -> Result<()> {
         validate_stream(stream)?;
         let stream = stream.to_owned();
+        let now_ms = self.now_ms();
         self.with(true, move |conn, tables, scope| {
             let head = head(conn, tables, scope, &stream)?
                 .ok_or_else(|| StorageError::conflict("stream was deleted while sealing"))?;
@@ -193,10 +194,10 @@ impl SqliteStreams {
                 return Err(StorageError::conflict("sealed blob changed while sealing"));
             }
             let update = format!(
-                "UPDATE {} SET sealed = 1 WHERE scope = ?1 AND name = ?2",
+                "UPDATE {} SET sealed = 1, sealed_ms = ?3 WHERE scope = ?1 AND name = ?2",
                 ident(&tables.stream_heads)
             );
-            conn.execute(&update, params![scope, stream])
+            conn.execute(&update, params![scope, stream, now_ms])
                 .map_err(during("seal stream"))?;
             Ok(())
         })

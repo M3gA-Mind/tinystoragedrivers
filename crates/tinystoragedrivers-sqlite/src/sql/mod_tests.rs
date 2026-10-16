@@ -57,3 +57,33 @@ fn a_file_without_the_layout_marker_does_not_validate() {
         .unwrap();
     assert!(tables.validate(&conn).is_err());
 }
+
+#[test]
+fn stream_heads_gain_their_time_columns_on_an_older_layout_two_file() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = Tables::new("");
+    tables.ensure(&conn).unwrap();
+    // A layout-2 file written before heads recorded times.
+    conn.execute_batch(
+        "DROP TABLE stream_heads;
+         CREATE TABLE \"stream_heads\" (
+             scope TEXT NOT NULL, name TEXT NOT NULL, base INTEGER NOT NULL,
+             len INTEGER NOT NULL, sealed INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (scope, name)
+         ) WITHOUT ROWID;
+         INSERT INTO stream_heads (scope, name, base, len) VALUES ('s', 'old', 0, 3)",
+    )
+    .unwrap();
+
+    tables.ensure(&conn).unwrap();
+    tables.ensure(&conn).unwrap();
+
+    let row: (Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT sealed_ms, last_append_ms FROM stream_heads WHERE name = 'old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (None, None), "old heads have unknown times");
+}
