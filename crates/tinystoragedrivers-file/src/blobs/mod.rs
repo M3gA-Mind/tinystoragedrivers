@@ -147,17 +147,20 @@ impl FileBlobs {
                 fence.as_ref().map(|fence| Arc::clone(&fence.db)),
                 move |db| {
                     guard(db, fence.as_deref())?;
-                    let dir = Self::dir(db, &scope);
-                    let stem = file_stem(&key);
-                    let paths = Paths {
-                        data: dir.join(&stem),
-                        meta: dir.join(format!("{stem}{META_SUFFIX}")),
-                        now: db.now(),
-                    };
-                    work(&paths, &key)
+                    work(&Self::paths(db, &scope, &key), &key)
                 },
             )
             .await
+    }
+
+    fn paths(db: &Db, scope: &Scope, key: &str) -> Paths {
+        let dir = Self::dir(db, scope);
+        let stem = file_stem(key);
+        Paths {
+            data: dir.join(&stem),
+            meta: dir.join(format!("{stem}{META_SUFFIX}")),
+            now: db.now(),
+        }
     }
 }
 
@@ -207,6 +210,96 @@ fn collision() -> StorageError {
     StorageError::backend("file storage name hash collision; refusing to touch another blob")
 }
 
+/// Write the blob at `paths`: the bytes, then the sidecar that makes it exist.
+fn store_in(
+    paths: &Paths,
+    key: &str,
+    bytes: &[u8],
+    content_type: Option<String>,
+    ttl: Option<Duration>,
+) -> Result<BlobMeta> {
+    let expires_at_ms = ttl.map(|ttl| {
+        paths
+            .now
+            .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+    });
+    if let Some(existing) = read_json::<Sidecar>(&paths.meta)?
+        && existing.key != key
+    {
+        return Err(collision());
+    }
+    write_atomic(&paths.data, bytes)?;
+    let sidecar = Sidecar {
+        key: key.to_owned(),
+        content_type,
+        expires_at_ms,
+    };
+    write_json(&paths.meta, &sidecar)?;
+    Ok(BlobMeta {
+        key: sidecar.key,
+        len: bytes.len() as u64,
+        content_type: sidecar.content_type,
+    })
+}
+
+/// Remove the blob at `paths`, reporting whether a live one existed.
+fn delete_in(paths: &Paths, key: &str) -> Result<bool> {
+    // A lapsed blob is not there to delete, but its files go too.
+    let lapsed = matches!(
+        read_json::<Sidecar>(&paths.meta)?,
+        Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now)
+    );
+    if !lapsed && head(paths, key)?.is_none() {
+        return Ok(false);
+    }
+    remove_optional(&paths.meta)?;
+    remove_optional(&paths.data)?;
+    Ok(!lapsed)
+}
+
+/// The blob operations the stream sealing steps run under the database lock
+/// they already hold. They skip the fence check: the stream write that calls
+/// them has made it.
+impl FileBlobs {
+    /// Store `bytes` as blob `key` of `scope`.
+    pub(crate) fn put_locked(
+        db: &Db,
+        scope: &Scope,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<()> {
+        validate_blob_key(key)?;
+        store_in(
+            &Self::paths(db, scope, key),
+            key,
+            bytes,
+            Some(content_type.to_owned()),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// The bytes of blob `key` of `scope`, `None` when absent.
+    pub(crate) fn get_locked(db: &Db, scope: &Scope, key: &str) -> Result<Option<Vec<u8>>> {
+        let paths = Self::paths(db, scope, key);
+        if head(&paths, key)?.is_none() {
+            return Ok(None);
+        }
+        read_optional(&paths.data)
+    }
+
+    /// The size of blob `key` of `scope`, `None` when absent.
+    pub(crate) fn len_locked(db: &Db, scope: &Scope, key: &str) -> Result<Option<u64>> {
+        Ok(head(&Self::paths(db, scope, key), key)?.map(|meta| meta.len))
+    }
+
+    /// Remove blob `key` of `scope`.
+    pub(crate) fn delete_locked(db: &Db, scope: &Scope, key: &str) -> Result<bool> {
+        delete_in(&Self::paths(db, scope, key), key)
+    }
+}
+
 impl FileBlobs {
     async fn store(
         &self,
@@ -217,28 +310,7 @@ impl FileBlobs {
     ) -> Result<BlobMeta> {
         let content_type = content_type.map(str::to_owned);
         self.write(key, move |paths, key| {
-            let expires_at_ms = ttl.map(|ttl| {
-                paths
-                    .now
-                    .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
-            });
-            if let Some(existing) = read_json::<Sidecar>(&paths.meta)?
-                && existing.key != key
-            {
-                return Err(collision());
-            }
-            write_atomic(&paths.data, &bytes)?;
-            let sidecar = Sidecar {
-                key: key.to_owned(),
-                content_type,
-                expires_at_ms,
-            };
-            write_json(&paths.meta, &sidecar)?;
-            Ok(BlobMeta {
-                key: sidecar.key,
-                len: bytes.len() as u64,
-                content_type: sidecar.content_type,
-            })
+            store_in(paths, key, &bytes, content_type, ttl)
         })
         .await
     }
@@ -309,20 +381,7 @@ impl BlobStore for FileBlobs {
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        self.write(key, |paths, key| {
-            // A lapsed blob is not there to delete, but its files go too.
-            let lapsed = matches!(
-                read_json::<Sidecar>(&paths.meta)?,
-                Some(sidecar) if sidecar.key == key && sidecar.expired(paths.now)
-            );
-            if !lapsed && head(paths, key)?.is_none() {
-                return Ok(false);
-            }
-            remove_optional(&paths.meta)?;
-            remove_optional(&paths.data)?;
-            Ok(!lapsed)
-        })
-        .await
+        self.write(key, delete_in).await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {

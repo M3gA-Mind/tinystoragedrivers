@@ -157,6 +157,7 @@ fn length_prefers_the_larger_of_base_and_the_last_line() {
     let meta = StreamMeta {
         name: "s".into(),
         base: 5,
+        sealed_len: None,
     };
     assert_eq!(length(&meta, None).unwrap(), 5);
     assert_eq!(
@@ -277,4 +278,226 @@ async fn conditional_offset_survives_reopen_and_full_truncation() {
         2
     );
     assert_eq!(streams.len("s").await.unwrap(), 3);
+}
+
+mod sealing {
+    //! Crash points of the sealing protocol: blob, then meta, then data. The
+    //! steps are separate operations, so stopping after one leaves the state
+    //! a crash there would.
+
+    use tinystoragedrivers_core::{BlobStore, SealOutcome, SealedLog, sealed_blob_key};
+
+    use super::*;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        storage: FileStorage,
+        streams: FileStreams,
+        blobs: Arc<dyn BlobStore>,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileStorage::open(dir.path()).unwrap();
+        let streams = FileStreams::new(Arc::clone(&storage.db), Scope::local(), None);
+        let blobs = Arc::clone(storage.for_scope(&Scope::local()).unwrap().blobs());
+        Fixture {
+            _dir: dir,
+            storage,
+            streams,
+            blobs,
+        }
+    }
+
+    impl Fixture {
+        async fn fill(&self, name: &str, count: u64) -> Vec<StreamEntry> {
+            let values = (0..count).map(|i| json!({"i": i})).collect();
+            self.streams.append_batch(name, values).await.unwrap();
+            self.streams.read_window(name, 0, usize::MAX).await.unwrap()
+        }
+
+        fn data_exists(&self, name: &str) -> bool {
+            files(&self.storage, name).0.exists()
+        }
+
+        async fn has_blob(&self, name: &str) -> bool {
+            self.blobs
+                .head(&sealed_blob_key(name).unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crash_after_the_blob_write_leaves_the_stream_readable_and_unsealed() {
+        let f = fixture();
+        let before = f.fill("j", 20).await;
+        let written = f.streams.seal_write_blob("j").await.unwrap();
+        assert!(f.has_blob("j").await);
+
+        assert_eq!(
+            f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
+            before
+        );
+        assert_eq!(f.streams.len("j").await.unwrap(), 20);
+        assert_eq!(f.streams.append("j", json!("more")).await.unwrap(), 20);
+
+        let outcome = f.streams.seal("j").await.unwrap();
+        assert_eq!((outcome.base, outcome.len), (0, 21));
+        assert_ne!(outcome, written, "the stale blob was replaced");
+        assert_eq!(
+            f.streams
+                .read_window("j", 0, usize::MAX)
+                .await
+                .unwrap()
+                .len(),
+            21
+        );
+        assert!(!f.data_exists("j"));
+    }
+
+    #[tokio::test]
+    async fn a_crash_after_the_blob_write_resumes_to_the_same_outcome() {
+        let f = fixture();
+        let before = f.fill("j", 20).await;
+        let written = f.streams.seal_write_blob("j").await.unwrap();
+        assert_eq!(f.streams.seal("j").await.unwrap(), written);
+        assert_eq!(
+            f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
+            before
+        );
+        assert!(!f.data_exists("j"));
+    }
+
+    #[tokio::test]
+    async fn a_crash_after_the_head_flip_reads_from_the_blob_and_resealing_drops_the_data() {
+        let f = fixture();
+        let before = f.fill("j", 20).await;
+        let written = f.streams.seal_write_blob("j").await.unwrap();
+        f.streams.seal_mark("j", written).await.unwrap();
+        assert!(f.data_exists("j"), "the data file is still there");
+
+        // Prove the reads do not come from the data file: replace it.
+        std::fs::write(
+            files(&f.storage, "j").0,
+            b"{\"offset\":0,\"value\":\"stale\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
+            before
+        );
+        assert_eq!(f.streams.len("j").await.unwrap(), 20);
+        assert_eq!(
+            f.streams.append("j", json!(1)).await.unwrap_err().kind(),
+            ErrorKind::Conflict
+        );
+
+        assert_eq!(f.streams.seal("j").await.unwrap(), written);
+        assert!(!f.data_exists("j"));
+        assert_eq!(
+            f.streams.read_window("j", 0, usize::MAX).await.unwrap(),
+            before
+        );
+        assert_eq!(f.streams.len("j").await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn marking_refuses_a_blob_the_stream_has_outgrown_or_lost() {
+        let f = fixture();
+        f.fill("j", 5).await;
+        let written = f.streams.seal_write_blob("j").await.unwrap();
+        f.streams.append("j", json!("late")).await.unwrap();
+        let grown = f.streams.seal_mark("j", written).await.unwrap_err();
+        assert_eq!(grown.kind(), ErrorKind::Conflict);
+
+        let rewritten = f.streams.seal_write_blob("j").await.unwrap();
+        f.streams.truncate_before("j", 2).await.unwrap();
+        let cut = f.streams.seal_mark("j", rewritten).await.unwrap_err();
+        assert_eq!(cut.kind(), ErrorKind::Conflict);
+
+        let again = f.streams.seal_write_blob("j").await.unwrap();
+        f.blobs
+            .delete(&sealed_blob_key("j").unwrap())
+            .await
+            .unwrap();
+        let lost = f.streams.seal_mark("j", again).await.unwrap_err();
+        assert_eq!(lost.kind(), ErrorKind::Conflict, "no blob, no seal");
+        assert_eq!(f.streams.append("j", json!(0)).await.unwrap(), 6);
+    }
+
+    #[tokio::test]
+    async fn the_sealed_blob_holds_the_entries_in_the_shared_format() {
+        let f = fixture();
+        let before = f.fill("a/b", 3).await;
+        let outcome = f.streams.seal("a/b").await.unwrap();
+        let blob = f.blobs.get("_tsd/sealed/a%2Fb").await.unwrap().unwrap();
+        assert_eq!(blob.meta.len, outcome.blob_bytes);
+        assert_eq!(
+            SealedLog::decode(&blob.bytes).unwrap().window(0, 10),
+            before
+        );
+        assert_eq!(outcome, SealOutcome::new(0, 3, blob.meta.len));
+    }
+
+    #[tokio::test]
+    async fn a_sealed_stream_whose_blob_is_gone_reports_a_backend_error() {
+        let f = fixture();
+        f.fill("j", 3).await;
+        f.streams.seal("j").await.unwrap();
+        f.blobs
+            .delete(&sealed_blob_key("j").unwrap())
+            .await
+            .unwrap();
+        for error in [
+            f.streams.read_window("j", 0, 10).await.unwrap_err(),
+            f.streams.seal("j").await.unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), ErrorKind::Backend);
+        }
+        assert!(f.streams.delete_stream("j").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_stream_removes_its_blob_even_after_a_crashed_seal() {
+        let f = fixture();
+        f.fill("j", 3).await;
+        f.streams.seal_write_blob("j").await.unwrap();
+        assert!(f.streams.delete_stream("j").await.unwrap());
+        assert!(!f.has_blob("j").await);
+
+        f.fill("k", 3).await;
+        f.streams.seal("k").await.unwrap();
+        assert!(f.streams.delete_stream("k").await.unwrap());
+        assert!(!f.has_blob("k").await);
+        assert!(!files(&f.storage, "k").1.exists());
+    }
+
+    #[tokio::test]
+    async fn a_data_file_that_disagrees_with_its_meta_is_not_sealed() {
+        let f = fixture();
+        f.fill("j", 3).await;
+        std::fs::write(
+            files(&f.storage, "j").0,
+            b"{\"offset\":0,\"value\":0}\n{\"offset\":2,\"value\":2}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.streams.seal("j").await.unwrap_err().kind(),
+            ErrorKind::Backend
+        );
+        assert!(!f.has_blob("j").await, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_meta_file_from_before_sealing_reads_as_unsealed() {
+        let f = fixture();
+        f.fill("j", 2).await;
+        std::fs::write(files(&f.storage, "j").1, br#"{"name":"j","base":0}"#).unwrap();
+        assert_eq!(f.streams.append("j", json!(2)).await.unwrap(), 2);
+        assert_eq!(f.streams.seal("j").await.unwrap().len, 3);
+        let meta = std::fs::read_to_string(files(&f.storage, "j").1).unwrap();
+        assert!(meta.contains("sealed_len"), "{meta}");
+    }
 }

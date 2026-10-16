@@ -105,17 +105,25 @@ impl MemoryStreams {
     }
 
     /// Step 2: mark the stream sealed, provided it is still the stream the
-    /// blob was written from.
+    /// blob was written from and the blob is still there.
     pub(super) fn seal_mark(&self, stream: &str, written: SealOutcome) -> Result<()> {
         validate_stream(stream)?;
+        let blob_key = self.blob_key(stream)?;
         let mut state = self.db.lock()?;
         self.guard(&state)?;
+        let blob_len = state
+            .blobs
+            .get(&blob_key)
+            .map(|(_, bytes, _)| bytes.len() as u64);
         let stored = state
             .streams
             .get_mut(&self.key(stream))
             .ok_or_else(|| StorageError::conflict("stream was deleted while sealing"))?;
         if stored.base != written.base || stored.len() != written.len {
             return Err(StorageError::conflict("stream changed while sealing"));
+        }
+        if blob_len != Some(written.blob_bytes) {
+            return Err(StorageError::conflict("sealed blob changed while sealing"));
         }
         stored.sealed_len = Some(written.len);
         Ok(())

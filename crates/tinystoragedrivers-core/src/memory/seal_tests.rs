@@ -204,3 +204,19 @@ async fn sealing_one_scope_leaves_a_same_named_stream_in_another_alone() {
     assert_eq!(read[0].value, json!("b"));
     assert_eq!(a.streams().read_window("j", 0, 10).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn marking_refuses_a_stream_that_was_deleted_and_recreated_meanwhile() {
+    let (storage, streams) = handle();
+    fill(&streams, "j", 3).await;
+    let written = streams.seal_write_blob("j").unwrap();
+    streams.delete_stream("j").await.unwrap();
+    fill(&streams, "j", 3).await;
+    assert_eq!(
+        streams.seal_mark("j", written).unwrap_err().kind(),
+        ErrorKind::Conflict,
+        "the recreated stream has the old length but not the old blob"
+    );
+    assert!(!blob_exists(&storage, "j"));
+    assert_eq!(streams.append("j", json!(1)).await.unwrap(), 3);
+}

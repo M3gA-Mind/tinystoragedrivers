@@ -13,6 +13,12 @@
 //!   then rewrites the file without the dropped lines. A crash between the two
 //!   leaves lines below `base`, which readers skip.
 //!
+//! A sealed stream (see [`StreamStore::seal`]) keeps its entries as one
+//! compressed blob in the scope's blob store and records `sealed_len`, its
+//! length at the seal, in the meta file; that field is what makes it sealed.
+//! The data file is then leftover that sealing removes. [`seal`] holds the
+//! protocol.
+//!
 //! A stream exists once its meta file does: from its first non-empty append
 //! until [`delete_stream`](StreamStore::delete_stream), even when truncated
 //! empty, like the memory driver's.
@@ -28,7 +34,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
 use crate::documents::guard;
@@ -44,6 +50,8 @@ fn parent_of(path: &std::path::Path) -> &std::path::Path {
     path.parent().unwrap_or_else(|| std::path::Path::new("."))
 }
 
+mod seal;
+
 const META_SUFFIX: &str = ".meta.json";
 
 /// A stream's sidecar.
@@ -51,6 +59,9 @@ const META_SUFFIX: &str = ".meta.json";
 struct StreamMeta {
     name: String,
     base: u64,
+    /// The stream's length when it was sealed; present exactly when sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sealed_len: Option<u64>,
 }
 
 /// One line of a stream file.
@@ -99,10 +110,20 @@ impl FileStreams {
         T: Send + 'static,
         F: FnOnce(&Paths) -> Result<T> + Send + 'static,
     {
+        self.with_db(name, move |_, _, paths| work(paths)).await
+    }
+
+    /// [`Self::with`] for work that also needs the database and scope, such
+    /// as reading the sealed blob.
+    async fn with_db<T, F>(&self, name: &str, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Db, &Scope, &Paths) -> Result<T> + Send + 'static,
+    {
         validate_stream(name)?;
         let (scope, name) = (self.scope.clone(), name.to_owned());
         self.db
-            .run(move |db| work(&Self::paths(db, &scope, &name)))
+            .run(move |db| work(db, &scope, &Self::paths(db, &scope, &name)))
             .await
     }
 
@@ -113,6 +134,15 @@ impl FileStreams {
         T: Send + 'static,
         F: FnOnce(&Paths) -> Result<T> + Send + 'static,
     {
+        self.write_db(name, move |_, _, paths| work(paths)).await
+    }
+
+    /// [`Self::write`] for work that also needs the database and scope.
+    async fn write_db<T, F>(&self, name: &str, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Db, &Scope, &Paths) -> Result<T> + Send + 'static,
+    {
         validate_stream(name)?;
         let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
         self.db
@@ -120,7 +150,7 @@ impl FileStreams {
                 fence.as_ref().map(|fence| Arc::clone(&fence.db)),
                 move |db| {
                     guard(db, fence.as_deref())?;
-                    work(&Self::paths(db, &scope, &name))
+                    work(db, &scope, &Self::paths(db, &scope, &name))
                 },
             )
             .await
@@ -192,6 +222,9 @@ fn length(meta: &StreamMeta, last_line: Option<&[u8]>) -> Result<u64> {
 
 /// The length of an existing stream.
 fn stream_len(paths: &Paths, meta: &StreamMeta) -> Result<u64> {
+    if let Some(len) = meta.sealed_len {
+        return Ok(len);
+    }
     match open_read(&paths.data) {
         Ok(mut file) => {
             let (_, last) = tail(&mut file)?;
@@ -242,6 +275,9 @@ impl FileStreams {
         let name = stream.to_owned();
         self.write(stream, move |paths| {
             let existing = read_meta(paths, &name)?;
+            if existing.as_ref().is_some_and(|meta| meta.sealed_len.is_some()) {
+                return Err(StorageError::conflict("stream is sealed"));
+            }
             let current = existing.as_ref().map_or(Ok(0), |meta| stream_len(paths, meta))?;
             if expected.is_some_and(|offset| offset != current) {
                 return Err(StorageError::conflict("stream next offset changed"));
@@ -250,7 +286,11 @@ impl FileStreams {
                 return existing.map_or(Ok(0), |meta| stream_len(paths, &meta));
             }
             let created = existing.is_none();
-            let meta = existing.unwrap_or(StreamMeta { name, base: 0 });
+            let meta = existing.unwrap_or(StreamMeta {
+                name,
+                base: 0,
+                sealed_len: None,
+            });
             let mut file = open_append(&paths.data)?;
             // A data file without a meta file is an orphan a failed delete
             // left; a new stream starts empty rather than inheriting it.
@@ -327,10 +367,13 @@ impl StreamStore for FileStreams {
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         let name = stream.to_owned();
-        self.with(stream, move |paths| {
+        self.with_db(stream, move |db, scope, paths| {
             let Some(meta) = read_meta(paths, &name)? else {
                 return Ok(Vec::new());
             };
+            if meta.sealed_len.is_some() {
+                return Ok(seal::read_sealed(db, scope, &name)?.window(from, limit));
+            }
             read_lines(paths, from.max(meta.base), limit)
         })
         .await
@@ -350,6 +393,9 @@ impl StreamStore for FileStreams {
             let Some(mut meta) = read_meta(paths, &name)? else {
                 return Ok(0);
             };
+            if meta.sealed_len.is_some() {
+                return Err(StorageError::conflict("stream is sealed"));
+            }
             let len = stream_len(paths, &meta)?;
             let cut = offset.clamp(meta.base, len);
             let removed = cut - meta.base;
@@ -392,17 +438,25 @@ impl StreamStore for FileStreams {
 
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
         let name = stream.to_owned();
-        self.write(stream, move |paths| {
-            if read_meta(paths, &name)?.is_none() {
-                return Ok(false);
+        self.write_db(stream, move |db, scope, paths| {
+            let existed = read_meta(paths, &name)?.is_some();
+            if existed {
+                // The meta file decides existence; remove it first so a crash
+                // leaves at worst an orphaned, invisible data file.
+                remove_optional(&paths.meta)?;
+                remove_optional(&paths.data)?;
             }
-            // The meta file decides existence; remove it first so a crash
-            // leaves at worst an orphaned, invisible data file.
-            remove_optional(&paths.meta)?;
-            remove_optional(&paths.data)?;
-            Ok(true)
+            // The blob goes last, so a crash never leaves a sealed stream
+            // without its entries. It goes even when the stream is not there,
+            // to clear one a crashed seal left.
+            seal::delete_blob(db, scope, &name)?;
+            Ok(existed)
         })
         .await
+    }
+
+    async fn seal(&self, stream: &str) -> Result<SealOutcome> {
+        self.seal_stream(stream).await
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
