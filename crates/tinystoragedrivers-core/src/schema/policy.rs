@@ -62,7 +62,7 @@ enum Action {
 /// time means "unknown": no action.
 fn due(policy: &SealPolicy, info: &StreamInfo, now_ms: i64) -> Option<Action> {
     if let Some(sealed) = info.sealed_ms {
-        let retain = policy.retain_ms?;
+        let retain = i64::try_from(policy.retain_ms?).unwrap_or(i64::MAX);
         (sealed.saturating_add(retain) < now_ms).then_some(Action::Delete(sealed))
     } else {
         let SealWhen::Idle(idle_ms) = policy.when else {

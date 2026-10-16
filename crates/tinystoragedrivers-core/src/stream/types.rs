@@ -107,9 +107,11 @@ pub struct SealPolicy {
     /// When to seal.
     pub when: SealWhen,
     /// Delete the stream (`delete_stream`) this many milliseconds after it
-    /// was sealed. `None` keeps it until the owner deletes it.
+    /// was sealed. `None` keeps it until the owner deletes it. Unsigned like
+    /// [`SealWhen::Idle`]: a negative duration cannot be stated, so a sealed
+    /// stream is never due for deletion before the instant it was sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retain_ms: Option<i64>,
+    pub retain_ms: Option<u64>,
 }
 
 impl SealPolicy {
@@ -124,7 +126,7 @@ impl SealPolicy {
 
     /// The same policy, deleting a stream `retain_ms` after it was sealed.
     #[must_use]
-    pub const fn retaining_ms(mut self, retain_ms: i64) -> Self {
+    pub const fn retaining_ms(mut self, retain_ms: u64) -> Self {
         self.retain_ms = Some(retain_ms);
         self
     }

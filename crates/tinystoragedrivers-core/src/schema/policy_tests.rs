@@ -515,3 +515,39 @@ async fn retention_never_deletes_a_stream_recreated_after_inspection() {
     assert!(!rig.sealed("shop.log/a").await);
     assert_eq!((report.deleted, report.conflicts), (0, 1));
 }
+
+#[tokio::test]
+async fn zero_retention_waits_until_after_the_sealing_instant() {
+    let rig = rig();
+    let registry = registry(SealPolicy::new(SealWhen::OnFinish).retaining_ms(0));
+    rig.append("shop.log/a").await;
+    rig.at(2_000);
+    rig.storage.streams().seal("shop.log/a").await.unwrap();
+
+    let same_instant = registry
+        .maintain(&rig.storage, 2_000, MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert_eq!(same_instant.deleted, 0);
+    assert!(rig.exists("shop.log/a").await);
+    let later = registry
+        .maintain(&rig.storage, 2_001, MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert_eq!(later.deleted, 1);
+}
+
+#[tokio::test]
+async fn an_enormous_retention_never_comes_due() {
+    let rig = rig();
+    let registry = registry(SealPolicy::new(SealWhen::OnFinish).retaining_ms(u64::MAX));
+    rig.append("shop.log/a").await;
+    rig.at(2_000);
+    rig.storage.streams().seal("shop.log/a").await.unwrap();
+    let report = registry
+        .maintain(&rig.storage, i64::MAX - 1, MaintenanceBudget::unlimited())
+        .await
+        .unwrap();
+    assert_eq!(report.deleted, 0);
+    assert!(rig.exists("shop.log/a").await);
+}

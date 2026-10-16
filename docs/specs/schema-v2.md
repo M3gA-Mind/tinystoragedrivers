@@ -205,7 +205,7 @@ Two shared helpers are not collections:
   - `Idle(ms)`: tsd seals streams untouched for that long, during maintenance
   - `Never`
 
-  It also states a retention period: `delete_stream` after the stream has been sealed for N ms.
+  It also states a retention period: `delete_stream` after the stream has been sealed for N ms. `retain_ms` is unsigned (`u64`, like `Idle`): a negative period cannot be stated, in code or on the wire (deserializing one fails), so a sealed stream is never due for deletion before the instant it was sealed. A period beyond `i64::MAX` never comes due.
 - **Applying policy.** `Registry::maintain(&ScopedStorage, now_ms, MaintenanceBudget) -> PolicyReport` applies every `Item::Stream` policy to one scope. For each declared base name it lists `<base>` and `<base>/...` with `streams(base)` (the `<base>` prefix alone would also match `<base>x`, so the family is filtered) and reads `info` for each:
   - not sealed, `Idle(ms)`, and `now_ms - last_append_ms > ms`: `seal`. A stream appended to after inspection is still sealed: idleness was the trigger and `seal` keeps every entry;
   - sealed, `retain_ms` set, and `sealed_ms + retain_ms < now_ms`: `delete_sealed_stream(name, sealed_ms)` with the inspected `sealed_ms` (which removes the blob too); `false` means the stream is no longer the one inspected and counts as a conflict;
