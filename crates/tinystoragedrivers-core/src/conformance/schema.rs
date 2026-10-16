@@ -32,6 +32,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     }
     schema_round_trips(storage).await;
     created_survives_updates(storage).await;
+    supplied_created_is_kept_or_refused(storage).await;
     recreation_starts_a_new_creation_time(storage).await;
     metadata_filters_and_sorts(storage).await;
     expiry_hides_records(storage).await;
@@ -151,6 +152,52 @@ async fn created_survives_updates(storage: &ScopedStorage) {
         "an update advances updated_ms ({} then {})",
         first.updated_ms,
         second.updated_ms
+    );
+}
+
+/// The migration-only `created_ms` option is kept, and later updates keep it.
+/// A handle may refuse it (`InvalidInput`), as a module's bus handle does, but
+/// it must never accept the write and drop the time.
+async fn supplied_created_is_kept_or_refused(storage: &ScopedStorage) {
+    let docs = storage.documents();
+    let coll = unique("meta_supplied_created");
+    let written = docs
+        .put_with(
+            &coll,
+            "a",
+            json!({"n": 1}),
+            Precondition::Absent,
+            WriteOptions::new().schema(2).created_ms(40),
+        )
+        .await;
+    if let Err(error) = &written {
+        assert_eq!(
+            error.kind(),
+            ErrorKind::InvalidInput,
+            "a refused created_ms is InvalidInput, got {error}"
+        );
+        assert!(
+            ok(docs.get(&coll, "a").await, "get").is_none(),
+            "a refused write stores nothing"
+        );
+        return;
+    }
+    let first = meta_of(storage, &coll, "a").await;
+    assert_eq!(first.created_ms, 40, "a supplied created_ms is stored");
+    assert!(
+        first.updated_ms > 40,
+        "updated_ms still comes from the clock"
+    );
+    assert_eq!(first.schema, 2);
+    ok(
+        docs.put(&coll, "a", json!({"n": 2}), Precondition::None)
+            .await,
+        "update",
+    );
+    assert_eq!(
+        meta_of(storage, &coll, "a").await.created_ms,
+        40,
+        "an update keeps the supplied created_ms"
     );
 }
 

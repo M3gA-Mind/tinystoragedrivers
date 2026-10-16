@@ -387,6 +387,7 @@ impl DocumentStore for SqliteDocuments {
                 WriteOptions {
                     schema: first.meta.schema,
                     expires_ms: first.meta.expires_ms,
+                    created_ms: None,
                 },
             )?;
             let meta =

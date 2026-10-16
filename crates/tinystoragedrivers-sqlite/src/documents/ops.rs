@@ -514,7 +514,10 @@ pub(crate) fn put_with(
     let stored_version = i64::try_from(version.0)
         .map_err(|_| StorageError::backend("document version space is exhausted"))?;
     let now = i64::try_from(ctx.now_ms).unwrap_or(i64::MAX);
-    let created_ms = live.map_or(now, |found| found.meta.created_ms);
+    // A migration may carry a record's original creation time over.
+    let created_ms = options
+        .created_ms
+        .unwrap_or_else(|| live.map_or(now, |found| found.meta.created_ms));
     let updated_ms = live.map_or(now, |found| now.max(found.meta.updated_ms));
     let sql = format!(
         "INSERT INTO {} (scope, coll, id, version, schema, created_ms, updated_ms, expires_ms, deleted, body)
