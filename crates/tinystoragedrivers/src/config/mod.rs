@@ -7,6 +7,7 @@
 //! misconfigured deployment fails at boot with an actionable message.
 
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -160,180 +161,99 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// Hide credentials in a storage connection URI before displaying it.
 ///
 /// The password and credential-valued query options are replaced with `***`.
-/// If reserved delimiters make the userinfo boundary ambiguous, the URI is
-/// conservatively masked through the last `@` rather than preserving a
-/// potentially credential-bearing prefix.
+/// When userinfo and query parsing overlap, both sensitive spans are found in
+/// the original input and masked together, preserving conservative redaction
+/// for unescaped reserved characters.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
+    let mut sensitive = legacy_userinfo_password_span(url)
+        .into_iter()
+        .collect::<Vec<_>>();
+    sensitive.extend(secret_query_value_spans(url));
+    preserve_legacy_query_path_separator(&redact_spans(url, sensitive))
+}
+
+/// The legacy renderer inserts `/` when a URI has a query but no path.
+fn preserve_legacy_query_path_separator(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
-        return redact_unqualified_query(url);
+        return url.to_owned();
     };
-    if secret_query_value_overlaps_ambiguous_userinfo(rest) {
-        return format!("{scheme}://***");
-    }
-    let (without_fragment, fragment) = split_fragment(rest);
-    let (before_query, query) = match without_fragment.split_once('?') {
-        Some((before, query)) => (before, Some(query)),
-        None => (without_fragment, None),
+    let query_end = rest.find('#').unwrap_or(rest.len());
+    let Some(query_marker) = rest[..query_end].find('?') else {
+        return url.to_owned();
     };
-    let (authority, path) = match before_query.find('/') {
-        Some(slash) => (&before_query[..slash], &before_query[slash..]),
-        None => (before_query, ""),
-    };
-    let (userinfo, host) = authority
-        .rsplit_once('@')
-        .map_or((None, authority), |(userinfo, host)| (Some(userinfo), host));
-
-    // If the authority cannot be separated safely (for example, an unescaped
-    // '?' in userinfo makes a nonnumeric port), hide the whole URI. Never let
-    // query or path delimiters retroactively create a userinfo boundary.
-    if !valid_authority(host) {
-        return format!("{scheme}://***");
+    if rest[..query_marker].contains('/') {
+        return url.to_owned();
     }
-
-    let mut output = format!("{scheme}://");
-    if let Some(userinfo) = userinfo {
-        output.push_str(&redact_userinfo(userinfo));
-        output.push('@');
-    }
-    output.push_str(host);
-    if path.is_empty() && query.is_some() {
-        output.push('/');
-    } else {
-        output.push_str(path);
-    }
-    if let Some(query) = query {
-        output.push('?');
-        output.push_str(&redact_query_options(query));
-    }
-    output.push_str(fragment);
-    redact_ambiguous_delimited_userinfo(&output).unwrap_or(output)
+    format!(
+        "{scheme}://{}/{}",
+        &rest[..query_marker],
+        &rest[query_marker..]
+    )
 }
 
-/// Query parsing and unescaped userinfo parsing can claim the same original
-/// bytes. If a recognized secret option contains an `@` beyond an authority
-/// delimiter and a colon could start userinfo, hide the whole URI rather than
-/// allowing either interpretation to expose the other's prefix or suffix.
-fn secret_query_value_overlaps_ambiguous_userinfo(rest: &str) -> bool {
-    let Some(delimiter) = rest.find(['/', '?', '#']) else {
-        return false;
-    };
-    if rest[..delimiter].contains('@') {
-        return false;
-    }
-    let Some(at) = rest[delimiter + 1..]
-        .rfind('@')
-        .map(|at| at + delimiter + 1)
-    else {
-        return false;
-    };
-    if !rest[..at].contains(':') {
-        return false;
-    }
-    let (before_fragment, _) = split_fragment(rest);
-    let Some(query) = before_fragment.split_once('?').map(|(_, query)| query) else {
-        return false;
-    };
-    query.split('&').any(|option| {
-        let Some((key, value)) = option.split_once('=') else {
-            return false;
-        };
-        SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) && value.contains('@')
-    })
-}
-
-/// Keep the historical conservative redaction floor for an unescaped userinfo
-/// password containing `/`, `?`, or `#`: once those delimiters appear before
-/// an `@`, the string is indistinguishable from a URI with a host/path/query.
-/// Recognized query secrets have already been removed from `url`, so their
-/// value bytes cannot move this boundary or be exposed by it.
-fn redact_ambiguous_delimited_userinfo(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority_end = rest.find(['/', '?', '#'])?;
-    if rest[..authority_end].contains('@') {
-        return None;
-    }
-    let at = rest[authority_end + 1..].rfind('@')? + authority_end + 1;
+/// Locate the legacy userinfo password interval on the original URI. `@`
+/// always means the last `@` after the scheme, even when reserved characters
+/// make the input look like it has already entered its path or query.
+fn legacy_userinfo_password_span(url: &str) -> Option<Range<usize>> {
+    let (_, rest) = url.split_once("://")?;
+    let at = rest.rfind('@')?;
     let colon = rest[..at].find(':')?;
-    Some(format!(
-        "{scheme}://{}:***@{}",
-        &rest[..colon],
-        &rest[at + 1..]
-    ))
+    let base = url.len() - rest.len();
+    Some(base + colon + 1..base + at)
 }
 
-/// Return a URI fragment, including its marker, without interpreting any of
-/// its contents as authority or query data.
-fn split_fragment(value: &str) -> (&str, &str) {
-    value
-        .find('#')
-        .map_or((value, ""), |marker| (&value[..marker], &value[marker..]))
-}
-
-/// A host authority may contain a hostname and optional numeric port, or a
-/// bracketed IPv6 address with an optional numeric port.
-fn valid_authority(authority: &str) -> bool {
-    !authority.is_empty() && authority.split(',').all(valid_host_port)
-}
-
-fn valid_host_port(authority: &str) -> bool {
-    if let Some(address) = authority.strip_prefix('[') {
-        let Some(end) = address.find(']') else {
-            return false;
-        };
-        let host = &address[..end];
-        let port = &address[end + 1..];
-        return !host.is_empty()
-            && (port.is_empty()
-                || port.strip_prefix(':').is_some_and(|port| {
-                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
-                }));
-    }
-    let host = match authority.rsplit_once(':') {
-        Some((host, port)) => {
-            if host.contains(':') || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-                return false;
+/// Locate values for known secret query options using only original input
+/// boundaries: the first `?`, `&` between options, and `#` ending the query.
+fn secret_query_value_spans(url: &str) -> Vec<Range<usize>> {
+    let query_end = url.find('#').unwrap_or(url.len());
+    let mut spans = Vec::new();
+    let mut search = 0;
+    while let Some(marker) = url[search..query_end].find('?') {
+        let query_start = search + marker + 1;
+        let query = &url[query_start..query_end];
+        let mut option_start = 0;
+        for option in query.split('&') {
+            if let Some((key, value)) = option.split_once('=')
+                && SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str())
+            {
+                let value_start = query_start + option_start + key.len() + 1;
+                spans.push(value_start..value_start + value.len());
             }
-            host
+            option_start += option.len() + 1;
         }
-        None => authority,
-    };
-    !host.is_empty()
-        && !host
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || b"@/?#&=".contains(&byte))
-}
-
-fn redact_userinfo(userinfo: &str) -> String {
-    match userinfo.split_once(':') {
-        Some((username, _)) => format!("{username}:***"),
-        None => userinfo.to_owned(),
+        search = query_start;
     }
+    spans
 }
 
-/// Mask credential-valued query options. `?` and `@` are ordinary bytes in a
-/// query value, while `&` starts the next option and `#` ended the query above.
-fn redact_query_options(query: &str) -> String {
-    query
-        .split('&')
-        .map(|option| match option.split_once('=') {
-            Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
-                format!("{key}=***")
-            }
-            _ => option.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn redact_unqualified_query(url: &str) -> String {
-    let (without_fragment, fragment) = split_fragment(url);
-    match without_fragment.split_once('?') {
-        Some((prefix, query)) => {
-            format!("{prefix}?{}{fragment}", redact_query_options(query))
+/// Replace overlapping sensitive intervals together so processing one kind
+/// of credential cannot move or erase boundaries needed to find another.
+fn redact_spans(input: &str, mut spans: Vec<Range<usize>>) -> String {
+    if spans.is_empty() {
+        return input.to_owned();
+    }
+    spans.sort_by_key(|span| span.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        if let Some(previous) = merged.last_mut()
+            && span.start <= previous.end
+        {
+            previous.end = previous.end.max(span.end);
+            continue;
         }
-        None => url.to_owned(),
+        merged.push(span);
     }
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    for span in merged {
+        output.push_str(&input[cursor..span.start]);
+        output.push_str("***");
+        cursor = span.end;
+    }
+    output.push_str(&input[cursor..]);
+    output
 }
 
 impl fmt::Display for StorageConfig {

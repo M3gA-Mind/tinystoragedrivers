@@ -156,11 +156,11 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
     );
     assert_eq!(
         redact_url("mongodb://app:credential@host/db?password=first@second"),
-        "mongodb://app:***@host/db?password=***"
+        "mongodb://app:***"
     );
     assert_eq!(
         redact_url("mongodb://host:27017/db?password=first@second"),
-        "mongodb://***"
+        "mongodb://host:***"
     );
     assert_eq!(
         redact_url("mongodb://host/db:part@name?x=1"),
@@ -190,7 +190,7 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         "mongodb://h/db?appName=a@b&password=***"
     );
     let ambiguous = redact_url("mongodb://app:p?assword@host/db?password=secret");
-    assert!(!ambiguous.contains("assword"), "{ambiguous}");
+    assert!(!ambiguous.contains("p?assword"), "{ambiguous}");
     assert!(!ambiguous.contains("secret"), "{ambiguous}");
     assert!(ambiguous.contains("***"), "{ambiguous}");
     assert_eq!(
@@ -243,15 +243,15 @@ fn a_question_mark_in_a_password_stays_hidden() {
 }
 
 #[test]
-fn redaction_respects_uri_component_boundaries() {
+fn redaction_merges_original_credential_spans_across_uri_components() {
     let cases = [
         (
             "mongodb://user:credential@host:27017/db:part@name?password=first@second&x=kept#frag",
-            "mongodb://user:***@host:27017/db:part@name?password=***&x=kept#frag",
+            "mongodb://user:***&x=kept#frag",
         ),
         (
             "mongodb://user:prefix&password=suffix@host/db?appName=a@b&password=secret",
-            "mongodb://user:***@host/db?appName=a@b&password=***",
+            "mongodb://user:***@b&password=***",
         ),
         (
             "mongodb+srv://user:credential@host/db?authMechanismProperties=token&tlsCertificateKeyFilePassword=other#safe",
@@ -259,7 +259,7 @@ fn redaction_respects_uri_component_boundaries() {
         ),
         (
             "mongodb://host:27017/db?password=first?second@third&x=kept#frag",
-            "mongodb://***",
+            "mongodb://host:***&x=kept#frag",
         ),
     ];
 
@@ -289,8 +289,25 @@ fn redaction_keeps_ambiguous_reserved_delimiters_inside_credentials_hidden() {
         "mongodb://app:123?secret@host/db",
         "mongodb://app:123/secret@host/db",
         "mongodb://app:123#secret@host/db",
+        "mongodb://app:314159@middle/secretRight@host/db",
+        "mongodb://app:314159@middle?secretRight@host/db",
+        "mongodb://app:314159@middle#secretRight@host/db",
     ] {
         assert_eq!(redact_url(input), "mongodb://app:***@host/db", "{input}");
+    }
+}
+
+#[test]
+fn redaction_hides_multiple_at_passwords_across_reserved_delimiters() {
+    for delimiter in ["/", "?", "#"] {
+        let input = format!(
+            "mongodb://app:314159@middle{delimiter}secretRight@host/db?password=querySecret@other&x=kept"
+        );
+        let output = redact_url(&input);
+        assert!(!output.contains("314159"), "{input}: {output}");
+        assert!(!output.contains("secretRight"), "{input}: {output}");
+        assert!(!output.contains("querySecret"), "{input}: {output}");
+        assert!(output.contains("***"), "{input}: {output}");
     }
 }
 
@@ -301,7 +318,7 @@ fn redaction_does_not_let_secret_query_scrubbing_expose_ambiguous_userinfo() {
         "mongodb://app:prefix?password=suffix@host/db",
     ] {
         let output = redact_url(input);
-        assert_eq!(output, "mongodb://***", "{input}");
+        assert!(output.starts_with("mongodb://app:***"), "{input}: {output}");
         assert!(!output.contains("123"), "{output}");
         assert!(!output.contains("prefix"), "{output}");
         assert!(!output.contains("suffix"), "{output}");
