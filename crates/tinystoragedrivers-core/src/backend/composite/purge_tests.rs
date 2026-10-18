@@ -20,6 +20,25 @@ impl ScopePurge for InvalidZeroGenerationReceipt {
     }
 }
 
+#[derive(Debug)]
+struct MismatchedOperationReceipt;
+
+#[async_trait]
+impl ScopePurge for MismatchedOperationReceipt {
+    async fn purge(&self, _request: &PurgeRequest) -> Result<PurgeReceipt> {
+        Err(StorageError::backend("unexpected native purge call"))
+    }
+
+    async fn status(&self, _operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        Ok(Some(PurgeReceipt {
+            operation_id: "another-operation".into(),
+            generation: ScopeGeneration(1),
+            status: PurgeStatus::Complete,
+            stage: crate::PurgeStage::Complete,
+        }))
+    }
+}
+
 #[tokio::test]
 async fn malformed_coordinator_record_fails_closed_before_scope_erasure() {
     let records = Arc::new(MemoryStorage::new());
@@ -175,6 +194,122 @@ async fn completed_history_replay_after_a_later_generation_preserves_replacement
             .bytes,
         [9],
         "replaying historical completion must not erase later-generation data"
+    );
+}
+
+#[tokio::test]
+async fn current_completion_replays_when_its_history_index_is_missing() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage));
+    let scope = Scope::new("u:current-purge-replay").unwrap();
+    let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
+    let scoped = records.for_scope(&scope).unwrap();
+    let composite = CompositePurge {
+        records: scoped,
+        blobs: blobs.clone(),
+        scope: scope.clone(),
+        generation: ScopeGeneration(0),
+        coordinator: coordinator.clone(),
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let request = PurgeRequest {
+        operation_id: "current-completion-replay".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let receipt = composite.purge(&request).await.unwrap();
+    let replacement = blobs
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    replacement.put("replacement", vec![8], None).await.unwrap();
+
+    let history_id = coordinator_operation_id(&scope, &request.operation_id).unwrap();
+    let history = coordinator
+        .documents()
+        .get(COMPOSITE_PURGE_COLLECTION, &history_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        coordinator
+            .documents()
+            .delete(COMPOSITE_PURGE_COLLECTION, &history_id, history.unchanged(),)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(composite.purge(&request).await.unwrap(), receipt);
+    assert_eq!(
+        replacement.get("replacement").await.unwrap().unwrap().bytes,
+        [8],
+        "the current complete receipt remains authoritative if its history row is absent"
+    );
+}
+
+#[tokio::test]
+async fn mismatched_native_status_cannot_authorize_blob_deletion() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage.clone()));
+    let scope = Scope::new("u:mismatched-native-receipt").unwrap();
+    let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
+    let legacy = blobs.for_scope(&scope).unwrap();
+    legacy.put("preserve", vec![3], None).await.unwrap();
+    let scoped = records
+        .for_scope(&scope)
+        .unwrap()
+        .with_purge(Arc::new(MismatchedOperationReceipt));
+    let composite = CompositePurge {
+        records: scoped,
+        blobs,
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator,
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let error = composite
+        .purge(&PurgeRequest {
+            operation_id: "requested-operation".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert_eq!(legacy.get("preserve").await.unwrap().unwrap().bytes, [3]);
+}
+
+#[tokio::test]
+async fn exhausted_generation_space_refuses_purge_without_mutation() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage));
+    let scope = Scope::new("u:exhausted-generation").unwrap();
+    let generation = ScopeGeneration(u64::MAX);
+    let scoped = records.for_scope_generation(&scope, generation).unwrap();
+    let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
+    let current_blobs = blobs.for_scope_generation(&scope, generation).unwrap();
+    current_blobs.put("preserve", vec![6], None).await.unwrap();
+    let composite = CompositePurge {
+        records: scoped,
+        blobs,
+        scope,
+        generation,
+        coordinator,
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let error = composite
+        .purge(&PurgeRequest {
+            operation_id: "generation-overflow".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert_eq!(
+        current_blobs.get("preserve").await.unwrap().unwrap().bytes,
+        [6]
     );
 }
 
