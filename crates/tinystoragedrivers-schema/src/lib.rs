@@ -10,7 +10,7 @@
 //! before storage initialization. They are wire contracts only: adapters supply
 //! trusted peer context and confidential, monitor-excluded transport. Core's
 //! optional `migration-delivery` feature implements assembly and lifecycle;
-//! neither crate supplies a TinyBus adapter.
+//! neither crate supplies a `TinyBus` adapter.
 //!
 //! ```
 //! use tinystoragedrivers_schema::{Owner, SchemaDeclaration};

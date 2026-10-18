@@ -58,21 +58,22 @@ pub(super) fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+struct Buffer(Vec<u8>);
+impl std::io::Write for Buffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .try_reserve(bytes.len())
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Fallible incremental JSON serialization, with no advertised-length reserve.
 pub(super) fn encode(value: &impl serde::Serialize) -> Result<Vec<u8>, ()> {
-    struct Buffer(Vec<u8>);
-    impl std::io::Write for Buffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .try_reserve(bytes.len())
-                .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
-            self.0.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
     let mut buffer = Buffer(Vec::new());
     serde_json::to_writer(&mut buffer, value).map_err(|_| ())?;
     Ok(buffer.0)
@@ -83,3 +84,7 @@ impl std::fmt::Debug for PeerIdentity {
         f.write_str("PeerIdentity(..)")
     }
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

@@ -237,3 +237,7 @@ impl<'de> Deserialize<'de> for Owner {
         Self::new(&name).map_err(serde::de::Error::custom)
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
