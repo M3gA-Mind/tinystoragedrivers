@@ -101,6 +101,7 @@ Each driver gets its own crate (`tinystoragedrivers-sqlite`,
 `-mongodb`, `-file`, `-secrets`) and must pass
 `tinystoragedrivers_core::conformance::run`. The suite runs the same checks
 against every driver:
+- declared process-sharing and cross-process CAS capabilities
 - precondition conflicts
 - unique-index violations
 - paging
@@ -109,6 +110,10 @@ against every driver:
 - blob ranges
 - scope isolation
 - scope isolation
+
+`run` checks the built-in document-driver identities. External drivers should
+use `conformance::run_with_process_capabilities` and explicitly supply their
+expected `shared_across_processes` and `cross_process_cas` declarations.
 
 ## Develop
 

@@ -174,6 +174,14 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         redact_url("mongodb://app:p?assword@host/db?password=secret"),
         "mongodb://app:***@host/db?password=***"
     );
+    assert_eq!(
+        redact_url("mongodb://h/db?password=first?second@host"),
+        "mongodb://h/db?password=***"
+    );
+    assert_eq!(
+        redact_url("mongodb://h/db?password=first?second&authMechanismProperties=token&x=1#frag"),
+        "mongodb://h/db?password=***&authMechanismProperties=***&x=1#frag"
+    );
 }
 
 #[cfg(feature = "sqlite")]

@@ -72,30 +72,57 @@ pub async fn run_ports(storage: &ScopedStorage) {
 /// # Panics
 ///
 /// On the first check the driver fails, naming it. That is the suite's
-/// purpose: it is called from a driver's tests.
+/// purpose: it is called from a driver's tests. Also panics if
+/// [`StorageBackend::document_driver`] is not a registered native driver;
+/// external drivers should call [`run_with_process_capabilities`] instead.
 pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
-    // These expectations cover the built-in native drivers. External drivers
-    // can use the generic conformance suite without registering their identity
-    // here, and should assert their own concurrency capabilities in their tests.
-    if let Some(expected) = match backend.document_driver() {
+    // These expectations cover every built-in native record driver. A new
+    // driver must choose its guarantees explicitly instead of silently
+    // skipping the declaration checks.
+    let expected = match backend.document_driver() {
         "memory" | "file" => Some((false, false)),
         "sqlite" | "mongodb" => Some((true, true)),
         _ => None,
-    } {
-        let capabilities = backend.capabilities();
-        assert_eq!(
-            capabilities.contains(Capability::SharedAcrossProcesses),
-            expected.0,
-            "{} shared_across_processes capability declaration",
-            backend.document_driver()
-        );
-        assert_eq!(
-            capabilities.contains(Capability::CrossProcessCas),
-            expected.1,
-            "{} cross_process_cas capability declaration",
-            backend.document_driver()
-        );
     }
+    .unwrap_or_else(|| {
+        panic!(
+            "unregistered document driver {:?}; call run_with_process_capabilities with its expected declarations",
+            backend.document_driver()
+        )
+    });
+    run_with_process_capabilities(backend, single_scope, expected.0, expected.1).await;
+}
+
+/// Run the behavioral suite with explicit process capability expectations.
+///
+/// Built-in drivers should use [`run`], which binds expectations to their
+/// registered native driver identity. External drivers should use this entry
+/// point and state both declarations so they cannot accidentally bypass the
+/// capability conformance checks.
+///
+/// # Panics
+///
+/// Panics when the backend capability flags do not match the supplied
+/// expectations or when any behavioral check fails.
+pub async fn run_with_process_capabilities(
+    backend: &dyn StorageBackend,
+    single_scope: bool,
+    shared_across_processes: bool,
+    cross_process_cas: bool,
+) {
+    let capabilities = backend.capabilities();
+    assert_eq!(
+        capabilities.contains(Capability::SharedAcrossProcesses),
+        shared_across_processes,
+        "{} shared_across_processes capability declaration",
+        backend.document_driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::CrossProcessCas),
+        cross_process_cas,
+        "{} cross_process_cas capability declaration",
+        backend.document_driver()
+    );
     let local = backend
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");

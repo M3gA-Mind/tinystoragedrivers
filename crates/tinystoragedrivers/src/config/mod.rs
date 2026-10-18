@@ -212,49 +212,44 @@ pub fn redact_url(url: &str) -> String {
     }
     if let Some(query) = parts.query {
         out.push('?');
-        let options: Vec<String> = query
-            .split('&')
-            .map(|option| match option.split_once('=') {
-                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
-                    format!("{key}=***")
-                }
-                _ => option.to_owned(),
-            })
-            .collect();
-        out.push_str(&options.join("&"));
+        out.push_str(query);
     }
     out
 }
 
-/// Mask secret query options before parsing userinfo: an `@` in a query value
-/// must never hide a later credential option from the parser.
+/// Mask secret options before parsing userinfo. A secret value extends through
+/// the next `&` or fragment boundary; `?` and `@` are ordinary value bytes.
 fn redact_secret_options(url: &str) -> String {
     let mut output = String::with_capacity(url.len());
-    let mut remaining = url;
-    loop {
-        let Some(question) = remaining.find('?') else {
-            output.push_str(remaining);
-            return output;
-        };
-        let (prefix, query) = remaining.split_at(question + 1);
-        output.push_str(&prefix[..prefix.len() - 1]);
-        output.push('?');
-        let next_query = query.find('?').unwrap_or(query.len());
-        let (options, suffix) = query.split_at(next_query);
-        for (index, option) in options.split('&').enumerate() {
-            if index > 0 {
-                output.push('&');
-            }
-            match option.split_once('=') {
-                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
-                    output.push_str(key);
-                    output.push_str("=***");
-                }
-                _ => output.push_str(option),
+    let mut cursor = 0;
+    while let Some(relative) = url[cursor..].find(['?', '&']) {
+        let delimiter = cursor + relative;
+        if url[cursor..delimiter].contains('#') {
+            break;
+        }
+        output.push_str(&url[cursor..=delimiter]);
+        let option_start = delimiter + 1;
+        let option_boundary = url[option_start..]
+            .find(['?', '&', '#'])
+            .map_or(url.len(), |index| option_start + index);
+        let equals = url[option_start..option_boundary]
+            .find('=')
+            .map(|index| option_start + index);
+        if let Some(equals) = equals {
+            let key = &url[option_start..equals];
+            if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) {
+                output.push_str(key);
+                output.push_str("=***");
+                cursor = url[equals + 1..]
+                    .find(['&', '#'])
+                    .map_or(url.len(), |index| equals + 1 + index);
+                continue;
             }
         }
-        remaining = suffix;
+        cursor = option_start;
     }
+    output.push_str(&url[cursor..]);
+    output
 }
 
 impl fmt::Display for StorageConfig {

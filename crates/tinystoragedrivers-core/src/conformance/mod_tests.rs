@@ -69,6 +69,59 @@ async fn conformance_rejects_a_driver_missing_process_capability_declarations() 
     );
 }
 
+#[derive(Debug)]
+struct UnregisteredDriver(MemoryStorage);
+
+#[async_trait::async_trait]
+impl StorageBackend for UnregisteredDriver {
+    fn driver(&self) -> &'static str {
+        "memory"
+    }
+    fn document_driver(&self) -> &'static str {
+        "new_backend"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0.capabilities().without(crate::Capability::Fencing)
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        if scope != &Scope::local() {
+            return Err(StorageError::invalid_input("operator-only test backend"));
+        }
+        self.0.for_scope(scope)
+    }
+}
+
+#[tokio::test]
+async fn external_driver_can_supply_explicit_process_capability_expectations() {
+    run_with_process_capabilities(
+        &UnregisteredDriver(MemoryStorage::new()),
+        true,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn conformance_rejects_an_unregistered_driver_identity() {
+    let failure = tokio::spawn(async {
+        run(&UnregisteredDriver(MemoryStorage::new()), false).await;
+    })
+    .await;
+    let panic = failure
+        .expect_err("new driver identities must be rejected")
+        .into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("unregistered document driver"),
+        "expected an unregistered identity error, got {message:?}"
+    );
+}
+
 /// A driver with no optional capabilities, built by narrowing the memory
 /// driver, so the suite's "without the capability" branches run.
 mod baseline {
