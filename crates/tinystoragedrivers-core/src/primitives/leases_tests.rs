@@ -584,6 +584,37 @@ async fn a_same_holder_call_that_loses_the_swap_is_refused_not_re_taken() {
     assert_eq!(stored.epoch, 1, "the winner's grant stands");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_swap_is_a_race_even_when_the_winner_wrote_an_identical_body() {
+    use std::sync::atomic::AtomicBool;
+
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let rival = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    granted(rival.acquire_with(request("a", None)).await.unwrap());
+    let injected = Arc::new(AtomicBool::new(false));
+    let handle = tokio::runtime::Handle::current();
+    let leases = Leases::new(storage.documents())
+        .with_retry(RetryPolicy::immediate())
+        .with_clock({
+            let (rival, injected) = (rival.clone(), Arc::clone(&injected));
+            Arc::new(move || {
+                // After the first attempt read the live epoch-1 record, the
+                // running instance re-enters it with the very same body.
+                if !injected.swap(true, Ordering::SeqCst) {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(rival.acquire_with(request("a", Some(1))))
+                    })
+                    .unwrap();
+                }
+                1_000
+            })
+        });
+    match leases.acquire_with(request("a", None)).await.unwrap() {
+        Acquisition::Held(record) => assert_eq!(record.epoch, 1),
+        other @ Acquisition::Granted { .. } => panic!("must not evict the winner: {other:?}"),
+    }
+}
+
 #[test]
 fn the_body_wire_format_is_pinned() {
     let full = Body {

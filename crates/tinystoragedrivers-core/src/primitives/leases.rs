@@ -93,8 +93,11 @@ pub struct Acquire<'a> {
     pub endpoint: Option<&'a str>,
     /// The epoch this very holder instance already holds for the key, if
     /// any. A live record of the same `holder` string is a re-entrant
-    /// acquire (same epoch) only when its epoch equals this; otherwise it is
-    /// a leftover of a dead earlier incarnation and is taken over at once.
+    /// acquire (same epoch) only when its epoch equals this. With `None` it
+    /// is a leftover of a dead earlier incarnation and is taken over at once
+    /// (unclean). With a `Some` that no longer matches, the caller is a
+    /// stale actor and gets [`Acquisition::Held`]: it must not evict the
+    /// live replacement.
     pub held_epoch: Option<u64>,
 }
 
@@ -396,23 +399,18 @@ impl Leases {
         let id = id(owner, key)?;
         let mut unclean = false;
         let mut seen: Option<Body> = None;
-        // The record as the first attempt read it. A retry that finds the
-        // record changed means another acquirer won the swap, so it is
-        // judged as a competitor's write, never as a dead incarnation.
-        let mut first: Option<Option<Body>> = None;
+        // `Repo::update` calls the closure again only after losing the swap,
+        // so any call after the first means another writer got in: judge the
+        // record as that competitor's write, never as a dead incarnation.
+        let mut attempts = 0_u32;
         let stored = self
             .repo
             .update(&id, |current| {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 unclean = false;
                 seen = None;
-                let raced = match &first {
-                    None => {
-                        first = Some(current.clone());
-                        false
-                    }
-                    Some(initial) => *initial != current,
-                };
+                let raced = attempts > 0;
+                attempts += 1;
                 let (epoch, was_unclean) = match &current {
                     None => (1, false),
                     Some(found) => {
