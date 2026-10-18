@@ -6,7 +6,7 @@ use std::io::Write;
 fn buffer_appends_complete_writes_and_flush_preserves_bytes() {
     let mut buffer = Buffer(Vec::new());
     buffer.flush().unwrap();
-    assert!(buffer.0.is_empty());
+    assert_eq!(buffer.0.len(), 0);
     assert_eq!(buffer.write(b"first").unwrap(), 5);
     assert_eq!(buffer.write(b"").unwrap(), 0);
     assert_eq!(buffer.write(b"\0second").unwrap(), 7);

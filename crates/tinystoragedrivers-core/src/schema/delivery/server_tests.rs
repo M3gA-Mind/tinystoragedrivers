@@ -631,7 +631,7 @@ async fn injected_allocation_failure_preserves_buffer_offset_and_retryability() 
     );
     let mut buffer = Vec::new();
     assert_eq!(server.state.reserve(&mut buffer, usize::MAX), Err(()));
-    assert!(buffer.is_empty());
+    assert_eq!(buffer.len(), 0);
 }
 
 #[tokio::test]

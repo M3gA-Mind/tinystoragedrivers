@@ -114,13 +114,14 @@ async fn existing_empty_stream_and_blob_still_require_executor() {
             .put("old/a", vec![], Some("text/plain"))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             storage
                 .streams()
                 .read_window("legacy/a", 0, 10)
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            0
         );
         let before = snapshot(&storage).await;
         assert_eq!(
@@ -690,14 +691,15 @@ async fn external_page_failure_keeps_cursor_and_resumes_legacy_cleanup() {
             .written,
         3
     );
-    assert!(
+    assert_eq!(
         storage
             .documents()
             .query("old_orders", &crate::Query::default())
             .await
             .unwrap()
             .items
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(
         storage
@@ -823,24 +825,18 @@ async fn explicit_empty_external_outputs_follow_existing_drop_policy() {
         .await
         .unwrap();
     assert!(report.ran.iter().all(|r| r.written == 0));
-    assert!(
+    assert_eq!(
         storage
             .documents()
             .query("shop.orders", &crate::Query::default())
             .await
             .unwrap()
             .items
-            .is_empty()
+            .len(),
+        0
     );
-    assert!(
-        storage
-            .streams()
-            .streams("legacy")
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(storage.blobs().list("old/").await.unwrap().is_empty());
+    assert_eq!(storage.streams().streams("legacy").await.unwrap().len(), 0);
+    assert_eq!(storage.blobs().list("old/").await.unwrap().len(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]

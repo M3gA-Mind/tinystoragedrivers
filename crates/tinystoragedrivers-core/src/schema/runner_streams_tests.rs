@@ -556,5 +556,5 @@ async fn external_expanding_stream_resumes_by_emitted_offset() {
     );
     assert_eq!(read_all(&storage, "harness.journal/a").await.len(), 10);
     assert!(is_sealed(&storage, "harness.journal/a").await);
-    assert!(storage.streams().streams(LEGACY).await.unwrap().is_empty());
+    assert_eq!(storage.streams().streams(LEGACY).await.unwrap().len(), 0);
 }

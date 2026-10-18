@@ -62,13 +62,14 @@ async fn late_delivery_failure_writes_no_target_and_original_source_retries_like
             .await
             .is_err()
     );
-    assert!(
+    assert_eq!(
         storage
             .streams()
             .streams("owner.target/")
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        0
     );
     assert_eq!(storage.streams().len("legacy/a").await.unwrap(), 520);
     assert!(
@@ -93,14 +94,7 @@ async fn late_delivery_failure_writes_no_target_and_original_source_retries_like
     reopened
         .check_ready_in(storage.scope(), "owner.target")
         .unwrap();
-    assert!(
-        storage
-            .streams()
-            .streams("legacy/")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(storage.streams().streams("legacy/").await.unwrap().len(), 0);
     assert!(
         storage
             .streams()

@@ -217,16 +217,17 @@ async fn resume_and_check(config: &StorageConfig, options: &MigrateOptions) -> R
                 .bytes,
             [0, 255]
         );
-        assert!(
+        assert_eq!(
             storage
                 .documents()
                 .query("old_orders", &Query::default())
                 .await?
                 .items
-                .is_empty()
+                .len(),
+            0
         );
-        assert!(storage.streams().streams("legacy/").await?.is_empty());
-        assert!(storage.blobs().list("old/").await?.is_empty());
+        assert_eq!(storage.streams().streams("legacy/").await?.len(), 0);
+        assert_eq!(storage.blobs().list("old/").await?.len(), 0);
     }
     Ok(())
 }
