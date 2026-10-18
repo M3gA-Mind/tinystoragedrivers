@@ -41,6 +41,13 @@ runtime, bounded to one second. Idle TTL covers lost replies, lost cancellation,
 and runtime shutdown. Ambiguous sequences always fail; the durable runner retries
 the original operation. This layer neither writes data nor advances checkpoints.
 
+The client maps an Execute `TransformFailed` reply to static `InvalidInput`
+(`migration transform failed`). Transport failures, resource failures, invalid
+replies and ambiguous protocol sequences become static `Unavailable`
+(`migration delivery unavailable`). Owner error details never cross the wire;
+the server replaces returned transform errors and panics with `TransformFailed`.
+These failures leave the durable migration pending with its source retained.
+
 Blob delivery sends only operation/version/source and retains the original byte
 vector and content type locally. Identity streams return their original entries
 without sending them. Only explicitly independent entry mappings use groups of

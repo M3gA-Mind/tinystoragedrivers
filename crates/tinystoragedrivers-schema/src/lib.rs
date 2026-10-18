@@ -5,6 +5,13 @@
 //! engine, storage driver, key hashing, clock, or transport. Runtime users can
 //! retain the core crate's closure-based `Schema` and `Step` API.
 //!
+//! [`MigrationExchangeRequest`] and [`MigrationExchangeReply`] describe the
+//! confidential fragmented exchange for stateless owner transforms, including
+//! before storage initialization. They are wire contracts only: adapters supply
+//! trusted peer context and confidential, monitor-excluded transport. Core's
+//! optional `migration-delivery` feature implements assembly and lifecycle;
+//! neither crate supplies a TinyBus adapter.
+//!
 //! ```
 //! use tinystoragedrivers_schema::{Owner, SchemaDeclaration};
 //! let schema = SchemaDeclaration {
