@@ -99,7 +99,9 @@ pub use filter::{
 };
 pub use key::Key;
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
-pub use primitives::{Counters, Kv, Lease, Leases, Repo, RetryPolicy};
+pub use primitives::{
+    Acquire, Acquisition, Counters, Kv, Lease, LeaseRecord, Leases, Repo, RetryPolicy,
+};
 pub use schema::{
     Expiry, Item, MIGRATIONS_COLLECTION, MigrateOptions, MigrationReport, Migrations, Owner,
     Progress, Registry, Schema, ScopeClass, SourceRecord, Step, StepFn, StepReport, TargetRecord,
