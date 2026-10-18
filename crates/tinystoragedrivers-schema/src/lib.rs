@@ -45,3 +45,6 @@ pub use transform::{
     StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
     TransformError, TransformErrorKind, TransformKind, TransformResult,
 };
+
+mod callback;
+pub use callback::{ScopedStorageProfile, ScopedStorageRoute};

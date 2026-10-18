@@ -9,6 +9,7 @@ description = "The real TinyBus transport for the storage bus: a module-side Sto
 publish = false
 
 [dependencies]
+tinystoragedrivers-schema.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

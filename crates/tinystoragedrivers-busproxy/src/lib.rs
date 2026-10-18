@@ -71,3 +71,6 @@ mod bus_tests;
 #[cfg(test)]
 #[path = "watching_fake.rs"]
 mod watching_fake;
+
+mod scoped;
+pub use scoped::connect_scoped_storage;

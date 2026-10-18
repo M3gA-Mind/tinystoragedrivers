@@ -17,6 +17,12 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(documents: Arc<dyn DocumentStore>) -> Self {
+        Self::with_server(documents, None).await
+    }
+    async fn with_server(
+        documents: Arc<dyn DocumentStore>,
+        server: Option<Arc<tinystoragedrivers_client::StorageServer>>,
+    ) -> Self {
         let artifact = PathBuf::from(
             std::env::var_os("TSD_DOCUMENT_MODULE").expect("run scripts/test-document-callback.sh"),
         );
@@ -34,10 +40,12 @@ impl Fixture {
         let broker = Broker::new();
         let broker_task = broker.spawn(bus.clone());
         let host = ModuleHost::new(broker);
-        let binding = host
-            .prepare_host_callbacks(vec![endpoint("/documents").unwrap()])
-            .await
-            .unwrap();
+        let mut endpoints = vec![endpoint("/documents").unwrap()];
+        if server.is_some() {
+            endpoints
+                .extend(tinystoragedrivers_tinybus::scoped_storage_endpoints("/storage").unwrap());
+        }
+        let binding = host.prepare_host_callbacks(endpoints).await.unwrap();
         serve_collection(
             &binding,
             "/documents".parse().unwrap(),
@@ -46,6 +54,15 @@ impl Fixture {
         )
         .await
         .unwrap();
+        if let Some(server) = server {
+            tinystoragedrivers_tinybus::serve_scoped_storage(
+                &binding,
+                "/storage".parse().unwrap(),
+                server,
+            )
+            .await
+            .unwrap();
+        }
         host.load_file_with_host_callbacks(staged, json!({}), &binding)
             .await
             .unwrap();
@@ -283,3 +300,357 @@ async fn inline_business_json_with_stream_shaped_data_roundtrips_as_documents() 
         document
     );
 }
+
+fn route(fixture: &Fixture) -> tinystoragedrivers_schema::ScopedStorageRoute {
+    tinystoragedrivers_schema::ScopedStorageRoute {
+        version: 1,
+        destination: fixture.binding.unique_name().to_string(),
+        object_root: "/storage".into(),
+        profile: tinystoragedrivers_schema::ScopedStorageProfile::DocumentsStreamsSecretsV1,
+    }
+}
+async fn scoped_call(
+    fixture: &Fixture,
+    object: &str,
+    selector: &str,
+    request: serde_json::Value,
+) -> tinybus::Result<serde_json::Value> {
+    fixture
+        .proxy()
+        .call_confidential("ScopedCall", (route(fixture), object, selector, request))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_native_ports_preserve_metadata_cache_secrets_env_and_audit() {
+    use tinystoragedrivers_client::StorageServer;
+    use tinystoragedrivers_core::{Capability, CollectionSpec};
+    use tinystoragedrivers_secrets::{DocumentSecrets, SecretStore, StaticKey};
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&Scope::new("alice").unwrap()).unwrap();
+    storage
+        .documents()
+        .ensure_collection(&CollectionSpec::new("secrets"))
+        .await
+        .unwrap();
+    let secrets = Arc::new(DocumentSecrets::new(
+        &storage,
+        Arc::new(StaticKey::new(tinystoragedrivers_secrets::Zeroizing::new(
+            [7; 32],
+        ))),
+    ));
+    let server = Arc::new(StorageServer::new(storage.clone()).with_secrets(secrets.clone()));
+    let fixture = Fixture::with_server(storage.documents().clone(), Some(server)).await;
+    let mut monitor = fixture
+        .attacker
+        .add_match(tinybus::MatchRule::new())
+        .await
+        .unwrap();
+    let result: serde_json::Value = fixture
+        .proxy()
+        .call_confidential("NativeRoundtrip", (route(&fixture),))
+        .await
+        .unwrap();
+    assert_eq!(result["schema"], 7);
+    assert_eq!(result["after"], true);
+    assert_eq!(result["before"], false);
+    assert_eq!(result["env"], true);
+    assert_eq!(result["removed"], true);
+    assert_eq!(result["len"], 1);
+    assert_eq!(result["audit"][0]["value"]["event"], "private-audit");
+    assert_eq!(
+        secrets.get("cache_key").await.unwrap().unwrap().as_slice(),
+        b"private-cache-key"
+    );
+    assert!(secrets.get("env/DEMO").await.unwrap().is_none());
+    assert_eq!(
+        storage
+            .documents()
+            .get("cache", "key")
+            .await
+            .unwrap()
+            .unwrap()
+            .meta
+            .schema,
+        7
+    );
+    let second: serde_json::Value = fixture
+        .proxy()
+        .call_confidential("NativeRoundtrip", (route(&fixture),))
+        .await
+        .unwrap();
+    assert_eq!(second["before"], true);
+    assert!(monitor.try_recv().is_err());
+    assert!(
+        fixture
+            .proxy()
+            .call_confidential::<serde_json::Value>(
+                "ScopedPlainCall",
+                (
+                    route(&fixture),
+                    "Secrets",
+                    "Get",
+                    json!({"name":"cache_key"})
+                )
+            )
+            .await
+            .is_err()
+    );
+    let capabilities = scoped_call(
+        &fixture,
+        "Documents",
+        "Capabilities",
+        serde_json::Value::Null,
+    )
+    .await
+    .unwrap();
+    for cap in ["watch", "streaming_blobs", "presigned_urls", "blob_ttl"] {
+        assert!(
+            !capabilities["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(cap))
+        );
+    }
+    assert!(backend.capabilities().contains(Capability::RecordMetadata));
+    assert!(scoped_call(&fixture, "Documents", "Put", json!({"collection":"cache","document_id":"key","document_json":"{}","precondition":{"kind":"absent"},"schema":7})).await.unwrap_err().to_string().contains("conflict"));
+    for field in ["scope", "backend", "generation", "url", "fence"] {
+        let mut request = json!({"collection":"cache","document_id":"key"});
+        request[field] = json!("private-sentinel");
+        let error = scoped_call(&fixture, "Documents", "Get", request)
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains("private-sentinel"));
+    }
+    assert!(
+        scoped_call(
+            &fixture,
+            "Documents",
+            "EnsureCollection",
+            json!({"spec":{"name":""}})
+        )
+        .await
+        .is_err()
+    );
+    for (object, selector) in [
+        ("Documents", "WatchOpen"),
+        ("Documents", "WatchClose"),
+        ("Blobs", "Capabilities"),
+    ] {
+        assert!(
+            scoped_call(&fixture, object, selector, json!({}))
+                .await
+                .is_err()
+        );
+    }
+    let outsider = fixture
+        .attacker
+        .proxy(
+            fixture.binding.unique_name().as_str(),
+            "/storage/Secrets",
+            tinystoragedrivers_bus::STORAGE_INTERFACE,
+        )
+        .unwrap();
+    assert!(
+        outsider
+            .call::<serde_json::Value>("Get", (json!({"name":"cache_key"}),))
+            .await
+            .is_err()
+    );
+    assert!(
+        outsider
+            .call_confidential::<serde_json::Value>("Get", (json!({"name":"cache_key"}),))
+            .await
+            .is_err()
+    );
+    let wrong_path = fixture
+        .binding
+        .proxy(
+            fixture.binding.guard().module_peer().unwrap().as_str(),
+            "/proof",
+            "ai.tinyhumans.storage.DocumentProof1",
+        )
+        .unwrap();
+    let mut forged = route(&fixture);
+    forged.object_root = "/wrong".into();
+    assert!(
+        wrong_path
+            .call_confidential::<serde_json::Value>("NativeRoundtrip", (forged,))
+            .await
+            .is_err()
+    );
+    let mut forged = route(&fixture);
+    forged.destination = fixture.attacker.unique_name().unwrap().to_string();
+    assert!(
+        wrong_path
+            .call_confidential::<serde_json::Value>("NativeRoundtrip", (forged,))
+            .await
+            .is_err()
+    );
+    fixture.binding.revoke();
+    fixture.binding.guard().drained().await;
+    assert!(
+        fixture
+            .proxy()
+            .call_confidential::<serde_json::Value>("NativeRoundtrip", (route(&fixture),))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_native_fence_generation_expiry_and_replacement_remain_authoritative() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tinystoragedrivers_client::StorageServer;
+    use tinystoragedrivers_core::{CollectionSpec, PurgeMode, PurgeRequest};
+    use tinystoragedrivers_secrets::{DocumentSecrets, StaticKey, Zeroizing};
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = now.clone();
+    let backend = MemoryStorage::with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let owner = Scope::new("alice").unwrap();
+    let guard_scope = Scope::new("guard").unwrap();
+    let guard = backend.for_scope(&guard_scope).unwrap();
+    guard
+        .documents()
+        .put("leases", "active", json!({"epoch":1}), Precondition::None)
+        .await
+        .unwrap();
+    let fence = Fence::epoch(guard_scope, "leases", "active", "epoch", 1);
+    let storage = backend.for_scope_fenced(&owner, &fence).unwrap();
+    storage
+        .documents()
+        .ensure_collection(&CollectionSpec::new("secrets"))
+        .await
+        .unwrap();
+    let secrets = Arc::new(DocumentSecrets::new(
+        &storage,
+        Arc::new(StaticKey::new(Zeroizing::new([7; 32]))),
+    ));
+    let fixture = Fixture::with_server(
+        storage.documents().clone(),
+        Some(Arc::new(
+            StorageServer::new(storage.clone()).with_secrets(secrets),
+        )),
+    )
+    .await;
+    scoped_call(&fixture, "Documents", "Put", json!({"collection":"cache","document_id":"expires","document_json":"{}","precondition":{"kind":"none"},"schema":9,"expires_ms":1010})).await.unwrap();
+    let before = scoped_call(
+        &fixture,
+        "Documents",
+        "Get",
+        json!({"collection":"cache","document_id":"expires"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(before["meta"]["schema"], 9);
+    assert_eq!(before["meta"]["created_ms"], 1000);
+    now.store(1010, Ordering::SeqCst);
+    assert!(
+        scoped_call(
+            &fixture,
+            "Documents",
+            "Get",
+            json!({"collection":"cache","document_id":"expires"})
+        )
+        .await
+        .unwrap()
+        .is_null()
+    );
+    guard
+        .documents()
+        .put("leases", "active", json!({"epoch":2}), Precondition::None)
+        .await
+        .unwrap();
+    for (object, selector, request) in [
+        (
+            "Documents",
+            "Put",
+            json!({"collection":"cache","document_id":"late","document_json":"{}","precondition":{"kind":"none"}}),
+        ),
+        (
+            "Streams",
+            "Append",
+            json!({"stream":"audit","record_json":"{}"}),
+        ),
+        ("Secrets", "Set", json!({"name":"late","value":[1,2,3]})),
+    ] {
+        let error = scoped_call(&fixture, object, selector, request)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fenced"), "{error}");
+    }
+    guard
+        .documents()
+        .put("leases", "active", json!({"epoch":1}), Precondition::None)
+        .await
+        .unwrap();
+    let receipt = storage
+        .purge(&PurgeRequest {
+            operation_id: "reset".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    let error = scoped_call(
+        &fixture,
+        "Documents",
+        "Get",
+        json!({"collection":"cache","document_id":"late"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("scope_generation_rejected"));
+    let fresh = backend
+        .for_scope_fenced_generation(&owner, receipt.generation, &fence)
+        .unwrap();
+    let replacement = Fixture::with_server(
+        fresh.documents().clone(),
+        Some(Arc::new(StorageServer::new(fresh.clone()))),
+    )
+    .await;
+    assert!(
+        scoped_call(
+            &replacement,
+            "Documents",
+            "Get",
+            json!({"collection":"cache","document_id":"late"})
+        )
+        .await
+        .unwrap()
+        .is_null()
+    );
+    // A valid old module cannot target a newly admitted exact-instance binding.
+    assert!(
+        fixture
+            .proxy()
+            .call_confidential::<serde_json::Value>(
+                "ScopedCall",
+                (
+                    route(&replacement),
+                    "Documents",
+                    "Get",
+                    json!({"collection":"cache","document_id":"late"})
+                )
+            )
+            .await
+            .is_err()
+    );
+    fixture.binding.revoke();
+    fixture.binding.guard().drained().await;
+    assert!(
+        scoped_call(&replacement, "Secrets", "Get", json!({"name":"missing"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        fresh
+            .documents()
+            .get("cache", "late")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[path = "scoped_lifecycle_tests.rs"]
+mod scoped_lifecycle_tests;
