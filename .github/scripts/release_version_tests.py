@@ -58,6 +58,12 @@ class ReleaseLocks(unittest.TestCase):
             command.append("--locked")
         return self.run_command(*command)
 
+    def release_files(self):
+        paths = [Path("Cargo.toml"), *[
+            manifest.with_name("Cargo.lock") for manifest in self.manifests]]
+        return {path: (self.root / path).read_bytes() if (self.root / path).exists() else None
+                for path in paths}
+
     def test_major_bump_updates_validates_and_stages_every_workspace_lock(self):
         self.write("unrelated.txt", "leave this unstaged\n")
         self.run_command(sys.executable, str(HELPER), "2.0.0", "facade")
@@ -75,14 +81,18 @@ class ReleaseLocks(unittest.TestCase):
         self.write("proof-workspaces/future-proof/Cargo.toml", '[workspace]\n[package]\n'
                    'name = "broken"\nversion = "0.0.0"\n[dependencies]\n'
                    'missing = { path = "../../missing" }\n')
+        before = self.release_files()
         result = self.run_command(sys.executable, str(HELPER), "2.0.0", "facade", check=False)
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.release_files(), before)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
 
     def test_wrong_release_package_stops_before_staging(self):
+        before = self.release_files()
         result = self.run_command(sys.executable, str(HELPER), "2.0.0", "absent", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("version bump did not take", result.stderr)
+        self.assertEqual(self.release_files(), before)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
 
     def test_failed_locked_proof_validation_stops_before_staging(self):
@@ -97,10 +107,51 @@ class ReleaseLocks(unittest.TestCase):
                    "    Path('proof-workspaces/first/Cargo.lock').unlink()\n"
                    f"os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])\n")
         (self.root / "bin/cargo").chmod(0o755)
+        before = self.release_files()
         result = self.run_command(sys.executable, str(HELPER), "2.0.0", "facade", check=False,
                                   env={"PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"]})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--locked", result.stderr)
+        self.assertEqual(self.release_files(), before)
+        self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
+
+    def test_late_failure_restores_existing_bytes_and_removes_new_proof_lock(self):
+        # Preserve local edits too, including valid comments Cargo rewrites.
+        affected = [Path("Cargo.toml"), *[
+            manifest.with_name("Cargo.lock") for manifest in self.manifests]]
+        new_lock = Path("proof-workspaces/future-proof/Cargo.lock")
+        (self.root / new_lock).unlink()
+        for path in affected:
+            if (self.root / path).exists():
+                with (self.root / path).open("ab") as handle:
+                    handle.write(b"\n# Preserve this preexisting local comment.\n")
+        self.write("unrelated.txt", "preserve this local file\n")
+        before = {path: (self.root / path).read_bytes() for path in affected
+                  if (self.root / path).exists()}
+        unrelated = (self.root / "unrelated.txt").read_bytes()
+        cargo = shutil.which("cargo")
+        self.assertIsNotNone(cargo)
+        self.write("bin/cargo", f"#!{sys.executable}\n"
+                   "import os, sys\nfrom pathlib import Path\n"
+                   "if 'metadata' in sys.argv and '--all-features' in sys.argv "
+                   "and 'proof-workspaces/first/Cargo.toml' in sys.argv:\n"
+                   f"    locks = {[str(path) for path in affected[1:]]!r}\n"
+                   "    assert all('version = \"2.0.0\"' in Path(p).read_text() for p in locks)\n"
+                   "    Path('all-locks-updated').write_text('verified')\n"
+                   "    Path('proof-workspaces/first/Cargo.lock').unlink()\n"
+                   f"os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])\n")
+        (self.root / "bin/cargo").chmod(0o755)
+        result = self.run_command(sys.executable, str(HELPER), "2.0.0", "facade", check=False,
+                                  env={"PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--locked", result.stderr)
+        self.assertTrue((self.root / "all-locks-updated").exists())
+        for path, contents in before.items():
+            with self.subTest(path=path):
+                self.assertTrue((self.root / path).exists())
+                self.assertEqual((self.root / path).read_bytes(), contents)
+        self.assertFalse((self.root / new_lock).exists())
+        self.assertEqual((self.root / "unrelated.txt").read_bytes(), unrelated)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
 
 
