@@ -181,6 +181,7 @@ impl S3Storage {
     }
 }
 
+#[async_trait]
 impl BlobBackend for S3Storage {
     fn capabilities(&self) -> Capabilities {
         let caps = Capabilities::none()
@@ -191,6 +192,8 @@ impl BlobBackend for S3Storage {
         } else {
             caps
         }
+        .with(Capability::ScopePurge)
+        .with(Capability::ScopeEnumeration)
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         Ok(Arc::new(S3Blobs::with_store(
@@ -199,6 +202,52 @@ impl BlobBackend for S3Storage {
             &self.prefix,
             scope,
         )?))
+    }
+    async fn purge_scope(&self, scope: &Scope) -> Result<()> {
+        S3Blobs::with_store(self.store.clone(), self.signer.clone(), &self.prefix, scope)?
+            .purge_all()
+            .await
+    }
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        let root = format!(
+            "{}scopes/",
+            if self.prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", self.prefix)
+            }
+        );
+        let path = Path::parse(root.trim_end_matches('/'))
+            .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+        let mut objects = self.store.list(Some(&path));
+        let mut found = std::collections::BTreeSet::new();
+        while let Some(object) = objects.try_next().await.map_err(map_error)? {
+            let Some(rest) = object.location.as_ref().strip_prefix(&root) else {
+                continue;
+            };
+            let Some((encoded, _)) = rest.split_once('/') else {
+                continue;
+            };
+            if encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            let bytes = (0..encoded.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16))
+                .collect::<std::result::Result<Vec<_>, _>>();
+            let Ok(bytes) = bytes else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(bytes) else {
+                continue;
+            };
+            if text.starts_with(prefix)
+                && let Ok(scope) = Scope::new(text)
+            {
+                found.insert(scope);
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 }
 
@@ -262,6 +311,19 @@ impl S3Blobs {
             prefix,
             clock: system_clock,
         })
+    }
+
+    async fn purge_all(&self) -> Result<()> {
+        let root = Path::parse(self.prefix.trim_end_matches('/'))
+            .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+        let mut objects = self.store.list(Some(&root));
+        while let Some(object) = objects.try_next().await.map_err(map_error)? {
+            self.store
+                .delete(&object.location)
+                .await
+                .map_err(map_error)?;
+        }
+        Ok(())
     }
 
     /// Read blob lifetimes against `clock` (milliseconds since the Unix

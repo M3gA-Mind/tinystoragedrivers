@@ -2,7 +2,9 @@
 //! Set `TSD_S3_URL` plus `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` to a local test bucket.
 
 use std::sync::Arc;
-use tinystoragedrivers_core::{BlobBackend, CompositeStorage, MemoryStorage, Scope};
+use tinystoragedrivers_core::{
+    BlobBackend, CompositeStorage, MemoryStorage, PurgeMode, PurgeRequest, Scope, StorageBackend,
+};
 use tinystoragedrivers_s3::{S3Config, S3Storage};
 use tokio::io::AsyncReadExt;
 
@@ -20,6 +22,58 @@ async fn live_minio_blob_and_isolation_conformance() {
     };
     let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), Arc::new(blobs));
     tinystoragedrivers_core::conformance::run(&backend, false).await;
+}
+
+#[tokio::test]
+async fn live_minio_composite_purge_deletes_across_pages_and_keeps_sibling_scope() {
+    let Some(blobs) = driver().unwrap() else {
+        return;
+    };
+    let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), Arc::new(blobs));
+    let target = Scope::new("live-purge-target").unwrap();
+    let sibling = Scope::new("live-purge-sibling").unwrap();
+    let target_blobs = backend.for_scope(&target).unwrap();
+    let sibling_blobs = backend.for_scope(&sibling).unwrap();
+    for index in 0..1_005 {
+        target_blobs
+            .blobs()
+            .put(&format!("key-{index:04}"), vec![1], None)
+            .await
+            .unwrap();
+    }
+    sibling_blobs
+        .blobs()
+        .put("keep", vec![2], None)
+        .await
+        .unwrap();
+    let receipt = target_blobs
+        .purge(&PurgeRequest {
+            operation_id: "minio-purge".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .for_scope_generation(&target, receipt.generation)
+            .unwrap()
+            .blobs()
+            .list("")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        backend
+            .for_scope(&sibling)
+            .unwrap()
+            .blobs()
+            .list("")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

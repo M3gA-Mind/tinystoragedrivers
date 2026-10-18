@@ -62,6 +62,70 @@ async fn tenant_path_characters_cannot_alias_another_scope() {
 }
 
 #[tokio::test]
+async fn backend_enumerates_and_purges_only_the_requested_scope() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    let target = Scope::new("u:purge-target").unwrap();
+    let sibling = Scope::new("u:purge-sibling").unwrap();
+    backend
+        .for_scope(&target)
+        .unwrap()
+        .put("one", vec![1], None)
+        .await
+        .unwrap();
+    backend
+        .for_scope(&target)
+        .unwrap()
+        .put("two", vec![2], None)
+        .await
+        .unwrap();
+    backend
+        .for_scope(&sibling)
+        .unwrap()
+        .put("one", vec![3], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.scopes("u:purge-").await.unwrap(),
+        [sibling.clone(), target.clone()]
+    );
+    backend.purge_scope(&target).await.unwrap();
+    assert!(
+        backend
+            .for_scope(&target)
+            .unwrap()
+            .list("")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        backend
+            .for_scope(&sibling)
+            .unwrap()
+            .list("")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn scope_enumeration_ignores_malformed_utf8_hex_segments() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    objects
+        .put(
+            &object_store::path::Path::from("test/scopes/a-é-a/blob"),
+            bytes::Bytes::from_static(b"x").into(),
+        )
+        .await
+        .unwrap();
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    assert!(backend.scopes("").await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn multipart_roundtrip_and_length_mismatch_preserve_previous_object() {
     let store = handle(Arc::new(object_store::memory::InMemory::new()), "alice");
     let data = vec![42; PART_SIZE * 2 + 123];

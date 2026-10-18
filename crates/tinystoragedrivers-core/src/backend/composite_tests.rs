@@ -1,6 +1,31 @@
 //! Composite scope, database and fencing contracts.
 use super::*;
 use crate::MemoryStorage;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Debug)]
+struct FailPurgeOnce {
+    inner: BackendBlobs,
+    fail: AtomicBool,
+}
+#[async_trait]
+impl BlobBackend for FailPurgeOnce {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
+        self.inner.for_scope(scope)
+    }
+    async fn purge_scope(&self, scope: &Scope) -> Result<()> {
+        if self.fail.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::backend("injected blob purge failure"));
+        }
+        self.inner.purge_scope(scope).await
+    }
+    async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {
+        self.inner.scopes(prefix).await
+    }
+}
 
 #[tokio::test]
 async fn independent_ports_pass_conformance_with_safe_fencing() {
@@ -133,9 +158,12 @@ async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
         .await
         .unwrap();
     bound.blobs().put("retained", vec![1], None).await.unwrap();
-    for cap in [Capability::ScopePurge, Capability::AtomicScopePurge] {
-        assert!(!backend.capabilities().contains(cap));
-    }
+    assert!(backend.capabilities().contains(Capability::ScopePurge));
+    assert!(
+        !backend
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
     let error = bound
         .purge(&PurgeRequest {
             operation_id: "reset".into(),
@@ -143,13 +171,20 @@ async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
         })
         .await
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unsupported(Capability::ScopePurge));
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::AtomicScopePurge)
+    );
     assert_eq!(
         backend
             .for_scope_generation(&scope, ScopeGeneration(1))
+            .unwrap()
+            .streams()
+            .len("retained")
+            .await
             .unwrap_err()
             .kind(),
-        ErrorKind::Unsupported(Capability::ScopePurge)
+        crate::ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
         records
@@ -170,6 +205,137 @@ async fn composite_refuses_purge_and_generation_before_erasing_either_port() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn composite_scope_purge_erases_both_ports_and_preserves_siblings() {
+    use crate::{PurgeMode, PurgeRequest, PurgeStatus};
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let backend = CompositeStorage::new(
+        records.clone(),
+        Arc::new(BackendBlobs::new(blob_storage.clone())),
+    );
+    assert!(backend.capabilities().contains(Capability::ScopePurge));
+    assert!(
+        !backend
+            .capabilities()
+            .contains(Capability::AtomicScopePurge)
+    );
+    let target = Scope::new("u:purge-target").unwrap();
+    let sibling = Scope::new("u:purge-sibling").unwrap();
+    for (store, scope) in [(&records, &target), (&records, &sibling)] {
+        store
+            .for_scope(scope)
+            .unwrap()
+            .streams()
+            .append("s", serde_json::json!(1))
+            .await
+            .unwrap();
+    }
+    for scope in [&target, &sibling] {
+        blob_storage
+            .for_scope(scope)
+            .unwrap()
+            .blobs()
+            .put("b", vec![1], None)
+            .await
+            .unwrap();
+    }
+    let bound = backend.for_scope(&target).unwrap();
+    let receipt = bound
+        .purge(&PurgeRequest {
+            operation_id: "reset-1".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.status, PurgeStatus::Complete);
+    assert_eq!(
+        bound.blobs().get("b").await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        backend
+            .for_scope_generation(&target, receipt.generation)
+            .unwrap()
+            .streams()
+            .len("s")
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        blob_storage
+            .for_scope(&target)
+            .unwrap()
+            .blobs()
+            .get("b")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        records
+            .for_scope(&sibling)
+            .unwrap()
+            .streams()
+            .len("s")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        blob_storage
+            .for_scope(&sibling)
+            .unwrap()
+            .blobs()
+            .get("b")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn composite_purge_records_pending_external_stage_and_replay_preserves_new_generation() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(FailPurgeOnce {
+        inner: BackendBlobs::new(blob_storage.clone()),
+        fail: AtomicBool::new(true),
+    });
+    let backend = CompositeStorage::new(records, blobs);
+    let scope = Scope::new("u:retry-composite").unwrap();
+    let old = backend.for_scope(&scope).unwrap();
+    old.blobs().put("before", vec![1], None).await.unwrap();
+    let request = PurgeRequest {
+        operation_id: "retry-composite".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    assert!(old.purge(&request).await.is_err());
+    let pending = old.purge_status("retry-composite").await.unwrap().unwrap();
+    assert_eq!(pending.status, PurgeStatus::Pending);
+    assert_eq!(pending.stage, crate::PurgeStage::Blobs);
+    let completed = old.purge(&request).await.unwrap();
+    assert_eq!(completed.status, PurgeStatus::Complete);
+    let current = backend
+        .for_scope_generation(&scope, completed.generation)
+        .unwrap();
+    current.blobs().put("after", vec![2], None).await.unwrap();
+    assert_eq!(
+        current.blobs().get("after").await.unwrap().unwrap().bytes,
+        [2]
+    );
+    assert_eq!(
+        old.blobs().get("after").await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(current.purge(&request).await.unwrap(), completed);
+    assert_eq!(
+        current.blobs().get("after").await.unwrap().unwrap().bytes,
+        [2]
     );
 }
 
