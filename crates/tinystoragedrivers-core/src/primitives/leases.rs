@@ -24,12 +24,95 @@ use crate::key::Key;
 use crate::memory::{Clock, system_clock};
 use crate::scope::Scope;
 
-/// The stored body: `{holder, epoch, expires_ms}`.
+/// The stored body: `{holder, epoch, expires_ms}` plus the optional
+/// `endpoint` and `released` fields, both absent from records that never
+/// used them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Body {
     holder: String,
     epoch: u64,
     expires_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    released: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde skip predicate")]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The stored state of one lease, live or not, as [`Leases::inspect`] reads
+/// it. [`Lease`] is a holder's proof; this is an observer's view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRecord {
+    /// Who holds (or last held) the lease.
+    pub holder: String,
+    /// Where the holder can be reached, when it said so at acquisition.
+    pub endpoint: Option<String>,
+    /// The fencing epoch of the holder's tenure.
+    pub epoch: u64,
+    /// Unix epoch milliseconds at which the lease lapses.
+    pub expires_ms: i64,
+    /// The holder let go cleanly. A released record is never live; a record
+    /// that is merely past `expires_ms` was abandoned (crash, partition).
+    pub released: bool,
+}
+
+impl LeaseRecord {
+    /// Whether the record still excludes other holders at `now_ms`.
+    #[must_use]
+    pub fn is_live(&self, now_ms: i64) -> bool {
+        !self.released && now_ms < self.expires_ms
+    }
+
+    fn from_body(body: Body) -> Self {
+        Self {
+            holder: body.holder,
+            endpoint: body.endpoint,
+            epoch: body.epoch,
+            expires_ms: body.expires_ms,
+            released: body.released,
+        }
+    }
+}
+
+/// What [`Leases::acquire_with`] asks for.
+#[derive(Debug, Clone, Copy)]
+pub struct Acquire<'a> {
+    /// The lease namespace.
+    pub owner: &'a str,
+    /// The leased key within `owner`.
+    pub key: &'a str,
+    /// The acquiring holder.
+    pub holder: &'a str,
+    /// How long the lease lasts from now, in milliseconds.
+    pub ttl_ms: i64,
+    /// Where the holder can be reached, recorded on the lease.
+    pub endpoint: Option<&'a str>,
+    /// The epoch this very holder instance already holds for the key, if
+    /// any. A live record of the same `holder` string is a re-entrant
+    /// acquire (same epoch) only when its epoch equals this; otherwise it is
+    /// a leftover of a dead earlier incarnation and is taken over at once.
+    pub held_epoch: Option<u64>,
+}
+
+/// The outcome of [`Leases::acquire_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Acquisition {
+    /// The lease is the caller's.
+    Granted {
+        /// The lease just written.
+        lease: Lease,
+        /// The acquisition replaced a record nobody released and that the
+        /// caller did not itself hold: the previous holder's work may be
+        /// half done. `false` for a fresh key, a released record and a
+        /// re-entrant acquire.
+        previous_unclean: bool,
+    },
+    /// Another holder's lease is live.
+    Held(LeaseRecord),
 }
 
 /// A lease as its holder sees it.
@@ -43,6 +126,8 @@ pub struct Lease {
     pub epoch: u64,
     /// Unix epoch milliseconds at which the lease lapses.
     pub expires_ms: i64,
+    /// Where the holder said it can be reached (see [`Acquire::endpoint`]).
+    pub endpoint: Option<String>,
 }
 
 impl Lease {
@@ -68,6 +153,7 @@ impl Lease {
             holder: body.holder,
             epoch: body.epoch,
             expires_ms: body.expires_ms,
+            endpoint: body.endpoint,
         }
     }
 }
@@ -161,7 +247,7 @@ impl Leases {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 let epoch = match current {
                     None => 1,
-                    Some(lease) if lease.expires_ms > now => {
+                    Some(lease) if lease.expires_ms > now && !lease.released => {
                         if lease.holder == holder {
                             lease.epoch
                         } else {
@@ -177,6 +263,8 @@ impl Leases {
                     holder: holder.to_owned(),
                     epoch,
                     expires_ms,
+                    endpoint: None,
+                    released: false,
                 }))
             })
             .await?;
@@ -209,7 +297,10 @@ impl Leases {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 Ok(current
                     .filter(|lease| {
-                        lease.holder == holder && lease.epoch == epoch && lease.expires_ms > now
+                        lease.holder == holder
+                            && lease.epoch == epoch
+                            && lease.expires_ms > now
+                            && !lease.released
                     })
                     .map(|lease| Body {
                         expires_ms,
@@ -237,10 +328,14 @@ impl Leases {
             .update(&id, |current| {
                 Ok(current
                     .filter(|lease| {
-                        lease.holder == holder && lease.epoch == epoch && lease.expires_ms > now
+                        lease.holder == holder
+                            && lease.epoch == epoch
+                            && lease.expires_ms > now
+                            && !lease.released
                     })
                     .map(|lease| Body {
                         expires_ms: now,
+                        released: true,
                         ..lease
                     }))
             })
@@ -260,8 +355,150 @@ impl Leases {
             .repo
             .get(&id)
             .await?
-            .filter(|found| found.doc.expires_ms > now)
+            .filter(|found| found.doc.expires_ms > now && !found.doc.released)
             .map(|found| Lease::from_body(id, found.doc)))
+    }
+
+    /// Take `(owner, key)` with the full host semantics: an endpoint, a
+    /// distinction between a clean and an unclean takeover, and an unclean
+    /// takeover of the same holder's leftover live record.
+    ///
+    /// The rule, in order:
+    ///
+    /// 1. no record: epoch 1, clean;
+    /// 2. live, same holder and `held_epoch == Some(record.epoch)`:
+    ///    re-entrant, the epoch stays, clean;
+    /// 3. released: epoch + 1, clean;
+    /// 4. same holder otherwise (a live record the caller does not hold:
+    ///    the previous incarnation died before it expired): epoch + 1,
+    ///    unclean, taken over at once, fencing the old incarnation out;
+    /// 5. expired (`now >= expires_ms`): epoch + 1, unclean;
+    /// 6. otherwise [`Acquisition::Held`] with the live record.
+    ///
+    /// Racing acquirers get exactly one winner.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for a non-positive ttl, a storage error, or a backend
+    /// error when the epoch cannot be advanced.
+    pub async fn acquire_with(&self, request: Acquire<'_>) -> Result<Acquisition> {
+        let Acquire {
+            owner,
+            key,
+            holder,
+            ttl_ms,
+            endpoint,
+            held_epoch,
+        } = request;
+        let id = id(owner, key)?;
+        let mut unclean = false;
+        let mut seen: Option<Body> = None;
+        let stored = self
+            .repo
+            .update(&id, |current| {
+                let (now, expires_ms) = self.deadline(ttl_ms)?;
+                unclean = false;
+                seen = None;
+                let (epoch, was_unclean) = match &current {
+                    None => (1, false),
+                    Some(found) => {
+                        let live = found.expires_ms > now && !found.released;
+                        if live && found.holder == holder && held_epoch == Some(found.epoch) {
+                            (found.epoch, false)
+                        } else {
+                            let next = found
+                                .epoch
+                                .checked_add(1)
+                                .ok_or_else(|| StorageError::backend("lease epoch overflow"))?;
+                            if found.released {
+                                (next, false)
+                            } else if found.holder == holder || !live {
+                                (next, true)
+                            } else {
+                                seen.clone_from(&current);
+                                return Ok(None);
+                            }
+                        }
+                    }
+                };
+                unclean = was_unclean;
+                Ok(Some(Body {
+                    holder: holder.to_owned(),
+                    epoch,
+                    expires_ms,
+                    endpoint: endpoint.map(str::to_owned),
+                    released: false,
+                }))
+            })
+            .await?;
+        Ok(match stored {
+            Some((body, _)) => Acquisition::Granted {
+                lease: Lease::from_body(id, body),
+                previous_unclean: unclean,
+            },
+            None => match seen {
+                Some(body) => Acquisition::Held(LeaseRecord::from_body(body)),
+                None => {
+                    return Err(StorageError::backend(
+                        "lease acquire declined without a live record",
+                    ));
+                }
+            },
+        })
+    }
+
+    /// The stored record of `(owner, key)`, live, lapsed or released. Unlike
+    /// [`current`](Self::current) it does not hide a record that stopped
+    /// excluding others, so an observer can tell a clean release from an
+    /// abandoned lease and read the epoch a takeover would continue.
+    ///
+    /// # Errors
+    ///
+    /// A storage error.
+    pub async fn inspect(&self, owner: &str, key: &str) -> Result<Option<LeaseRecord>> {
+        let id = id(owner, key)?;
+        Ok(self
+            .repo
+            .get(&id)
+            .await?
+            .map(|found| LeaseRecord::from_body(found.doc)))
+    }
+
+    /// Drop the record of `(owner, key)` if and only if it still belongs to
+    /// the tenure `(holder, epoch)`, live or not. Returns whether a record was
+    /// removed; a record at another holder or epoch (a takeover wrote it) is
+    /// left alone.
+    ///
+    /// This is the compaction primitive for lease keys that are never
+    /// acquired again (one lease per cron occurrence, per run, per claim),
+    /// which would otherwise pile up: [`release`](Self::release) deliberately
+    /// keeps the record so a takeover continues the epoch, and nothing else
+    /// ever removes it.
+    ///
+    /// # Why dropping is safe
+    ///
+    /// tsd keeps expired and released leases for one reason: a takeover reads
+    /// the old record and writes `epoch + 1`, so a stale holder's fence at the
+    /// old epoch stays dead. The delete is conditional on holder and epoch, so
+    /// it can only remove the very tenure the caller knows: any takeover bumps
+    /// the epoch, and a record that moved on is not touched. A [`Fence`] on a
+    /// removed record refuses every write (a missing fence document is a
+    /// failed check), so the tenure that was dropped is fenced out for good.
+    ///
+    /// What the delete gives up is the epoch history: a later acquire of the
+    /// same key would restart at epoch 1. The caller therefore must only
+    /// compact a key that nothing will acquire again (for a cron occurrence:
+    /// once the job's next run has moved past it), or one whose protected
+    /// resources no longer hold epoch-1 writers.
+    ///
+    /// # Errors
+    ///
+    /// A storage error, or a conflict past the retry budget.
+    pub async fn compact(&self, owner: &str, key: &str, holder: &str, epoch: u64) -> Result<bool> {
+        let id = id(owner, key)?;
+        self.repo
+            .delete_if(&id, |lease| lease.holder == holder && lease.epoch == epoch)
+            .await
     }
 }
 

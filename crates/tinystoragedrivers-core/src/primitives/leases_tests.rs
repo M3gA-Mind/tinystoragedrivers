@@ -338,3 +338,197 @@ async fn a_stale_tenure_cannot_renew_or_release_the_new_one() {
     assert_eq!(renewed.epoch, 2);
     assert!(rig.leases.release("host", "p1", "a", 2).await.unwrap());
 }
+
+fn request(holder: &str, held_epoch: Option<u64>) -> Acquire<'_> {
+    Acquire {
+        owner: "host",
+        key: "p1",
+        holder,
+        ttl_ms: 100,
+        endpoint: Some("http://node-a:7788"),
+        held_epoch,
+    }
+}
+
+fn granted(outcome: Acquisition) -> (Lease, bool) {
+    match outcome {
+        Acquisition::Granted {
+            lease,
+            previous_unclean,
+        } => (lease, previous_unclean),
+        Acquisition::Held(record) => panic!("expected a grant, held by {record:?}"),
+    }
+}
+
+#[tokio::test]
+async fn acquire_with_records_the_endpoint_and_a_fresh_key_is_clean() {
+    let rig = rig();
+    let (lease, unclean) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!((lease.epoch, unclean), (1, false));
+    assert_eq!(lease.endpoint.as_deref(), Some("http://node-a:7788"));
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert_eq!(record.endpoint.as_deref(), Some("http://node-a:7788"));
+    assert!(record.is_live(1_050) && !record.released);
+    // Renewing keeps the endpoint.
+    let renewed = rig
+        .leases
+        .renew("host", "p1", "a", 1, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renewed.endpoint.as_deref(), Some("http://node-a:7788"));
+}
+
+#[tokio::test]
+async fn acquire_with_reports_the_live_record_of_another_holder() {
+    let rig = rig();
+    granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    match rig.leases.acquire_with(request("b", None)).await.unwrap() {
+        Acquisition::Held(record) => {
+            assert_eq!((record.holder.as_str(), record.epoch), ("a", 1));
+            assert_eq!(record.endpoint.as_deref(), Some("http://node-a:7788"));
+        }
+        other @ Acquisition::Granted { .. } => panic!("must be held: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_release_is_a_distinct_state_from_expiry_and_hands_over_clean() {
+    let rig = rig();
+    let (lease, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert!(
+        rig.leases
+            .release("host", "p1", "a", lease.epoch)
+            .await
+            .unwrap()
+    );
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert!(record.released && !record.is_live(1_000));
+    assert!(rig.leases.current("host", "p1").await.unwrap().is_none());
+    let (next, unclean) = granted(rig.leases.acquire_with(request("b", None)).await.unwrap());
+    assert_eq!((next.epoch, unclean), (2, false));
+
+    // An abandoned lease is expired, not released.
+    rig.now.store(2_000, Ordering::SeqCst);
+    let record = rig.leases.inspect("host", "p1").await.unwrap().unwrap();
+    assert!(!record.released && !record.is_live(2_000));
+    let (after, unclean) = granted(rig.leases.acquire_with(request("c", None)).await.unwrap());
+    assert_eq!((after.epoch, unclean), (3, true));
+}
+
+#[tokio::test]
+async fn the_same_holder_reenters_only_with_the_epoch_it_holds() {
+    let rig = rig();
+    let (first, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    // Same instance, still live: the epoch stays and it is clean.
+    rig.now.store(1_050, Ordering::SeqCst);
+    let (again, unclean) = granted(
+        rig.leases
+            .acquire_with(request("a", Some(first.epoch)))
+            .await
+            .unwrap(),
+    );
+    assert_eq!((again.epoch, unclean, again.expires_ms), (1, false, 1_150));
+}
+
+#[tokio::test]
+async fn a_live_record_left_by_a_dead_incarnation_is_taken_over_and_fenced() {
+    let scope = Scope::local();
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&scope).unwrap();
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    let leases =
+        Leases::new(storage.documents()).with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let (old, _) = granted(leases.acquire_with(request("a", None)).await.unwrap());
+    let fenced = backend
+        .for_scope_fenced(&scope, &old.fence(&scope))
+        .unwrap();
+    // A new incarnation with the same holder id, record still live.
+    now.store(1_010, Ordering::SeqCst);
+    let (new, unclean) = granted(leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!((new.epoch, unclean), (2, true));
+    // The old incarnation can neither renew nor release the new tenure.
+    assert!(
+        leases
+            .renew("host", "p1", "a", old.epoch, 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!leases.release("host", "p1", "a", old.epoch).await.unwrap());
+    // And its fence is dead.
+    let error = fenced
+        .documents()
+        .put(
+            "work",
+            "w",
+            serde_json::json!({"n": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+}
+
+#[tokio::test]
+async fn compact_drops_only_the_named_tenure() {
+    let rig = rig();
+    let (first, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    rig.now.store(2_000, Ordering::SeqCst);
+    let (second, _) = granted(rig.leases.acquire_with(request("b", None)).await.unwrap());
+    // The earlier tenure's token no longer matches: nothing is removed.
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "a", first.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "b", first.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(rig.leases.inspect("host", "p1").await.unwrap().is_some());
+    assert!(
+        rig.leases
+            .compact("host", "p1", "b", second.epoch)
+            .await
+            .unwrap()
+    );
+    assert!(rig.leases.inspect("host", "p1").await.unwrap().is_none());
+    assert!(
+        !rig.leases
+            .compact("host", "p1", "b", second.epoch)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_compacted_tenure_is_fenced_out() {
+    let rig = rig();
+    let scope = rig.storage.scope().clone();
+    let backend = MemoryStorage::new();
+    let storage = backend.for_scope(&scope).unwrap();
+    let leases = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    let a = leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let fenced = backend.for_scope_fenced(&scope, &a.fence(&scope)).unwrap();
+    assert!(leases.compact("host", "p1", "a", a.epoch).await.unwrap());
+    let error = fenced
+        .documents()
+        .put(
+            "work",
+            "w",
+            serde_json::json!({"n": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+}
