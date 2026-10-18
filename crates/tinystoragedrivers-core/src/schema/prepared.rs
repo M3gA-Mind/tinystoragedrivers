@@ -52,13 +52,6 @@ impl PreparedBody {
             super::StepExecution::External,
         )
     }
-    pub(super) fn external(&self) -> bool {
-        match self {
-            Self::Documents(t) => matches!(t, Transform::External(_)),
-            Self::Streams(t) => matches!(t, Transform::External(_)),
-            Self::Blobs(t) => matches!(t, Transform::External(_)),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

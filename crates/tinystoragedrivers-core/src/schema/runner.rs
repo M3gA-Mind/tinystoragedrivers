@@ -171,11 +171,6 @@ impl PreparedRegistry {
                 report.already_done += 1;
                 continue;
             }
-            if step.run.external() && executor.is_none() {
-                return Err(StorageError::unavailable(
-                    "external migration requires a transform executor",
-                ));
-            }
             let written = match &step.run {
                 StepBody::Documents(run) => {
                     StepRun {

@@ -12,22 +12,132 @@ fn declaration() -> SchemaDeclaration {
     .unwrap()
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test]
 async fn missing_executor_keeps_external_steps_pending() {
-    let registry = Registry::compose_with_declarations([], [declaration()]).unwrap();
-    let backend = MemoryStorage::new();
+    for index in 0..3 {
+        let mut declaration = all_external();
+        declaration.steps = vec![declaration.steps.remove(index)];
+        if index == 0 {
+            declaration.steps[0].source = Some("old_orders".into());
+        } else {
+            declaration
+                .items
+                .retain(|item| !matches!(item, Item::Collection { .. }));
+        }
+        let registry = Registry::compose_with_declarations([], [declaration]).unwrap();
+        let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
+        registry.prepare(&backend).await.unwrap();
+        let storage = backend.for_scope(&Scope::local()).unwrap();
+        seed(&storage).await;
+        if index == 0 {
+            storage
+                .documents()
+                .put(
+                    "old_orders",
+                    "legacy",
+                    json!({"legacy":true}),
+                    crate::Precondition::Absent,
+                )
+                .await
+                .unwrap();
+        }
+        let before = snapshot(&storage).await;
+        assert_eq!(
+            registry
+                .migrate(&storage, &MigrateOptions::new())
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unavailable
+        );
+        assert!(
+            registry
+                .check_ready_in(storage.scope(), &registry.schemas()[0].steps[0].item)
+                .is_err()
+        );
+        assert_eq!(snapshot(&storage).await, before);
+    }
+}
+
+#[tokio::test]
+async fn empty_external_sources_complete_without_executor() {
+    let registry = Registry::compose_with_declarations([], [all_external()]).unwrap();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
-    assert_eq!(registry.schemas()[0].steps[0].id, "upgrade");
+    let report = registry
+        .migrate(&storage, &MigrateOptions::new())
+        .await
+        .unwrap();
+    assert_eq!(report.ran.len(), 3);
+    assert!(report.ran.iter().all(|step| step.written == 0));
+    for item in ["shop.orders", "shop.events", "shop/files/"] {
+        registry.check_ready_in(storage.scope(), item).unwrap();
+    }
+    // Durable completion also needs no function after reopening the registry.
+    let reopened = Registry::compose_with_declarations([], [all_external()]).unwrap();
     assert_eq!(
-        registry
+        reopened
             .migrate(&storage, &MigrateOptions::new())
             .await
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Unavailable
+            .unwrap()
+            .already_done,
+        3
     );
-    assert!(registry.check_ready("shop.orders").is_err());
+}
+
+#[tokio::test]
+async fn existing_empty_stream_and_blob_still_require_executor() {
+    for index in [1, 2] {
+        let mut declaration = all_external();
+        declaration.steps = vec![declaration.steps.remove(index)];
+        declaration
+            .items
+            .retain(|item| !matches!(item, Item::Collection { .. }));
+        let registry = Registry::compose_with_declarations([], [declaration]).unwrap();
+        let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
+        registry.prepare(&backend).await.unwrap();
+        let storage = backend.for_scope(&Scope::local()).unwrap();
+        // Truncating preserves the stream's name and offset metadata.
+        storage
+            .streams()
+            .append("legacy/a", json!(1))
+            .await
+            .unwrap();
+        storage
+            .streams()
+            .truncate_before("legacy/a", 1)
+            .await
+            .unwrap();
+        storage
+            .blobs()
+            .put("old/a", vec![], Some("text/plain"))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .streams()
+                .read_window("legacy/a", 0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let before = snapshot(&storage).await;
+        assert_eq!(
+            registry
+                .migrate(&storage, &MigrateOptions::new())
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unavailable
+        );
+        assert_eq!(snapshot(&storage).await, before);
+        assert!(
+            registry
+                .check_ready_in(storage.scope(), &registry.schemas()[0].steps[0].item)
+                .is_err()
+        );
+    }
 }
 
 struct Gated {
@@ -69,7 +179,7 @@ impl TransformExecutor for Gated {
 #[tokio::test(flavor = "current_thread")]
 async fn pending_transform_yields_without_cleanup() {
     let registry = Registry::compose_with_declarations([], [declaration()]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     storage
@@ -115,7 +225,14 @@ struct Echo;
 fn mapped(records: Vec<SourceRecord>) -> Vec<TargetRecord> {
     records
         .into_iter()
-        .map(|r| TargetRecord::new("shop.orders", r.id, r.body).created_ms(r.meta.created_ms))
+        .map(|r| {
+            let target = TargetRecord::new("shop.orders", r.id.clone(), r.body);
+            match r.id.as_str() {
+                "two" => target.expires_ms(None).created_ms(321),
+                "three" => target.expires_ms(Some(65_000)),
+                _ => target.created_ms(r.meta.created_ms),
+            }
+        })
         .collect()
 }
 impl TransformExecutor for Echo {
@@ -229,7 +346,7 @@ fn all_external() -> SchemaDeclaration {
 async fn seed(storage: &crate::ScopedStorage) {
     for (id, expires) in [
         ("one", Some(90_000)),
-        ("two", None),
+        ("two", Some(70_000)),
         ("three", Some(80_000)),
     ] {
         let mut options = crate::WriteOptions::new().schema(1).created_ms(123);
@@ -267,6 +384,10 @@ async fn snapshot(storage: &crate::ScopedStorage) -> serde_json::Value {
         "stream":storage.streams().read_window("shop.events/a", 0, 50).await.unwrap(),
         "stream_info":storage.streams().info("shop.events/a").await.unwrap(),
         "blob":storage.blobs().get("shop/files/a").await.unwrap().map(|b| (b.bytes, b.meta)),
+        "old_docs":storage.documents().query("old_orders", &crate::Query::default()).await.unwrap(),
+        "old_stream":storage.streams().read_window("legacy/a", 0, 50).await.unwrap(),
+        "old_stream_info":storage.streams().info("legacy/a").await.unwrap(),
+        "old_blob":storage.blobs().get("old/a").await.unwrap().map(|b| (b.bytes, b.meta)),
         "old_streams":storage.streams().streams("legacy").await.unwrap(),
         "old_blobs":storage.blobs().list("old/").await.unwrap()
     })
@@ -294,6 +415,23 @@ async fn external_and_local_share_outputs_metadata_reports_and_progress() {
             .unwrap()
     );
     assert_eq!(snapshot(&a).await, snapshot(&b).await);
+    for storage in [&a, &b] {
+        for (id, expiry, created) in [
+            ("one", Some(90_000), 123),
+            ("two", None, 321),
+            ("three", Some(65_000), 123),
+        ] {
+            let stored = storage
+                .documents()
+                .get("shop.orders", id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.meta.expires_ms, expiry, "{id}");
+            assert_eq!(stored.meta.created_ms, created, "{id}");
+            assert_eq!(stored.meta.schema, 2, "{id}");
+        }
+    }
     assert_eq!(
         external.migrate(&b, &options).await.unwrap().already_done,
         3
@@ -387,7 +525,7 @@ impl TransformExecutor for NoCalls {
 #[tokio::test]
 async fn empty_and_completed_steps_do_not_invoke_executor() {
     let registry = Registry::compose_with_declarations([], [all_external()]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     let report = registry
@@ -408,7 +546,7 @@ async fn empty_and_completed_steps_do_not_invoke_executor() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelling_pending_transform_reopens_without_lost_records() {
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     let storage = backend.for_scope(&Scope::local()).unwrap();
     let registry = Registry::compose_with_declarations([], [declaration()]).unwrap();
     registry.prepare(&backend).await.unwrap();
@@ -496,7 +634,7 @@ impl TransformExecutor for FailSecond {
 async fn external_page_failure_keeps_cursor_and_resumes_legacy_cleanup() {
     let mut schema = declaration();
     schema.steps[0].source = Some("old_orders".into());
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     let storage = backend.for_scope(&Scope::local()).unwrap();
     let registry = Registry::compose_with_declarations([], [schema.clone()]).unwrap();
     registry.prepare(&backend).await.unwrap();
@@ -623,7 +761,7 @@ async fn invalid_external_outputs_keep_sources_and_write_no_partial_batch() {
                 .items
                 .retain(|i| !matches!(i, Item::Collection { .. }));
         }
-        let backend = MemoryStorage::new();
+        let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
         let registry = Registry::compose_with_declarations([], [declaration]).unwrap();
         registry.prepare(&backend).await.unwrap();
         let storage = backend.for_scope(&Scope::local()).unwrap();
@@ -676,7 +814,7 @@ impl TransformExecutor for DropOutput {
 #[tokio::test]
 async fn explicit_empty_external_outputs_follow_existing_drop_policy() {
     let registry = Registry::compose_with_declarations([], [all_external()]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     seed(&storage).await;
@@ -708,7 +846,7 @@ async fn explicit_empty_external_outputs_follow_existing_drop_policy() {
 #[tokio::test(flavor = "current_thread")]
 async fn source_changed_during_external_await_conflicts_without_marking_ready() {
     let registry = Registry::compose_with_declarations([], [declaration()]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     storage
@@ -768,7 +906,7 @@ async fn existing_stream_and_blob_targets_are_not_overwritten() {
             .items
             .retain(|i| !matches!(i, Item::Collection { .. }));
         let registry = Registry::compose_with_declarations([], [declaration]).unwrap();
-        let backend = MemoryStorage::new();
+        let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
         registry.prepare(&backend).await.unwrap();
         let storage = backend.for_scope(&Scope::local()).unwrap();
         seed(&storage).await;
@@ -817,7 +955,7 @@ async fn existing_stream_and_blob_targets_are_not_overwritten() {
 #[tokio::test(flavor = "current_thread")]
 async fn lease_fence_lost_during_external_await_prevents_writes_and_completion() {
     let registry = Registry::compose_with_declarations([], [declaration()]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     storage
@@ -891,7 +1029,7 @@ async fn unknown_external_operation_failure_is_not_hidden_or_marked_done() {
     let mut declaration = declaration();
     declaration.steps[0].transform.operation = "unknown".into();
     let registry = Registry::compose_with_declarations([], [declaration]).unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryStorage::with_clock(std::sync::Arc::new(|| 5_000));
     registry.prepare(&backend).await.unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
     storage

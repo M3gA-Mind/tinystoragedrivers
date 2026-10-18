@@ -267,8 +267,14 @@ macro_rules! registry_api {
             /// [`Registry::prepare`]; the progress collection and a legacy source are
             /// declared here.
             ///
+            /// External steps need an executor only when an eligible source document,
+            /// stream name or blob exists. Empty sources and completed steps can finish
+            /// without one; use [`Self::migrate_with_executor`] to transform legacy data.
+            ///
             /// # Errors
             ///
+            /// [`crate::ErrorKind::Unavailable`] when source data requires an external
+            /// transform executor. The step remains pending and its source is retained.
             /// [`crate::ErrorKind::InvalidInput`] for a zero batch size or a step that emits
             /// a record for a collection its owner does not declare; whatever the step
             /// function or the document store returns otherwise.
