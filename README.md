@@ -140,8 +140,13 @@ drivers land and consumers migrate is in
 ## Releases
 
 `.github/workflows/release.yml` (manual dispatch) validates, bumps the single
-workspace version, tags `vX.Y.Z`, and creates a GitHub release. Consumers pin
-the tag through a git dependency or a submodule gitlink.
+workspace version, refreshes the root and discovered proof-workspace lockfiles,
+tags `vX.Y.Z`, and creates a GitHub release. Before staging the exact version
+and lockfile paths, it validates each workspace with locked metadata using
+default and all features. Failed updates or validation restore the affected
+files to their original bytes and existence. See the
+[release runbook](AGENTS.md#releases). Consumers pin the tag through a git
+dependency or a submodule gitlink.
 
 ## License
 
