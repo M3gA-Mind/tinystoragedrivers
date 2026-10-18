@@ -9,6 +9,11 @@ It depends on no database client and no transport, and CI checks this. Driver
 crates and consumers both compile against it. Most code should depend on the
 `tinystoragedrivers` facade instead, which re-exports everything here.
 
+Pure schema declarations and transform wire contracts live in
+[`tinystoragedrivers-schema`](../tinystoragedrivers-schema/README.md), reexported
+here as `declarations`. The existing closure-backed `Schema`, `Step`, registry,
+keys and storage ports remain in core.
+
 See [`../../docs/specs/storage-ports.md`](../../docs/specs/storage-ports.md).
 
 Native document invalidation is optional through `DocumentStore::watch` and

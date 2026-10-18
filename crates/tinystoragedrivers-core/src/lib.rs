@@ -121,3 +121,11 @@ pub use watch::PollingWatch;
 pub use watch::{
     DocumentWatch, MAX_WATCH_CURSOR_BYTES, WatchCursor, WatchNotice, WatchOptions, WatchReset,
 };
+
+/// Pure schema declarations and transformation wire contracts.
+pub use tinystoragedrivers_schema as declarations;
+pub use tinystoragedrivers_schema::{
+    BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest, SchemaDeclaration,
+    StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
+    TransformError, TransformErrorKind, TransformKind, TransformResult,
+};

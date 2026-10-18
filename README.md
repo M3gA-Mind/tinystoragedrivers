@@ -41,6 +41,11 @@ consumer's schema.
 
 ## The schema
 
+Owners needing only declarations and wire contracts can use
+[`tinystoragedrivers-schema`](crates/tinystoragedrivers-schema/README.md) without
+linking the storage runtime. Core and the facade reexport these shared types
+while keeping their existing executable schema and migration APIs.
+
 Since v1.0.0, every record follows one uniform schema
 ([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
 

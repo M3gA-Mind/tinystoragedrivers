@@ -74,3 +74,9 @@ pub use types::{
     BlobOutput, BlobStepFn, Expiry, Item, Owner, Schema, ScopeClass, SourceRecord, Step, StepBody,
     StepFn, StreamStepFn, TargetRecord,
 };
+
+pub use tinystoragedrivers_schema::{
+    BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest, SchemaDeclaration,
+    StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
+    TransformError, TransformErrorKind, TransformKind, TransformResult,
+};

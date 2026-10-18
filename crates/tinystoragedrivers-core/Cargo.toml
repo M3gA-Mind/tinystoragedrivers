@@ -12,8 +12,9 @@ categories = ["database"]
 publish = false
 
 [dependencies]
+# Reexport shared pure declarations while retaining the legacy core API.
+tinystoragedrivers-schema = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `Key::of` hashes keys that outgrow the document id limit.
