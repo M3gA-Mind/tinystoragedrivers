@@ -208,45 +208,82 @@ fn legacy_userinfo_password_span(url: &str) -> Option<Range<usize>> {
 /// legacy behavior through the URI end, including `#` and any query-looking
 /// text after it.
 fn secret_query_value_spans(url: &str) -> Vec<Range<usize>> {
+    scan_secret_query_value_spans(url, || {})
+}
+
+/// Each URI byte is visited once by the outer scan. Every query boundary can
+/// inspect only the finite, bounded set of secret option names, so query work
+/// is linear in URI length even when `?` appears in values or malformed input.
+fn scan_secret_query_value_spans(
+    url: &str,
+    mut visit_input_byte: impl FnMut(),
+) -> Vec<Range<usize>> {
+    let bytes = url.as_bytes();
     let mut spans = Vec::new();
-    let mut search = 0;
-    while let Some(marker) = url[search..].find('?') {
-        let query_start = search + marker + 1;
-        let query = &url[query_start..];
-        let mut option_start = 0;
-        for option in query.split('&') {
-            if let Some((key, value)) = option.split_once('=')
-                && is_secret_option(key)
+    let mut secret_starts = Vec::new();
+    let mut query_started = false;
+
+    for index in 0..=bytes.len() {
+        let byte = bytes.get(index).copied();
+        if byte == Some(b'?') {
+            query_started = true;
+            if let Some(value_start) =
+                secret_query_value_start(bytes, index + 1, &mut visit_input_byte)
             {
-                let value_start = query_start + option_start + key.len() + 1;
-                spans.push(value_start..value_start + value.len());
+                secret_starts.push(value_start);
             }
-            option_start += option.len() + 1;
+        } else if query_started && (byte == Some(b'&') || byte.is_none()) {
+            spans.extend(secret_starts.drain(..).map(|start| start..index));
+            if byte == Some(b'&')
+                && let Some(value_start) =
+                    secret_query_value_start(bytes, index + 1, &mut visit_input_byte)
+            {
+                secret_starts.push(value_start);
+            }
         }
-        search = query_start;
+        if byte.is_some() {
+            visit_input_byte();
+        }
     }
     spans
 }
 
-fn is_secret_option(key: &str) -> bool {
-    let bytes = key.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && let Some((&high, &low)) = bytes.get(index + 1).zip(bytes.get(index + 2))
-            && let (Some(high), Some(low)) = (hex_value(high), hex_value(low))
-        {
-            decoded.push(high << 4 | low);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
+fn secret_query_value_start(
+    bytes: &[u8],
+    start: usize,
+    mut visit_input_byte: impl FnMut(),
+) -> Option<usize> {
+    for option in SECRET_OPTIONS {
+        let mut cursor = start;
+        let mut matched = true;
+        for expected in option.bytes() {
+            let Some(&byte) = bytes.get(cursor) else {
+                matched = false;
+                break;
+            };
+            visit_input_byte();
+            let (decoded, width) = if byte == b'%'
+                && let Some((&high, &low)) = bytes.get(cursor + 1).zip(bytes.get(cursor + 2))
+                && let (Some(high), Some(low)) = (hex_value(high), hex_value(low))
+            {
+                visit_input_byte();
+                visit_input_byte();
+                (high << 4 | low, 3)
+            } else {
+                (byte, 1)
+            };
+            if !decoded.eq_ignore_ascii_case(&expected) {
+                matched = false;
+                break;
+            }
+            cursor += width;
+        }
+        if matched && bytes.get(cursor) == Some(&b'=') {
+            visit_input_byte();
+            return Some(cursor + 1);
         }
     }
-    SECRET_OPTIONS
-        .iter()
-        .any(|option| decoded.eq_ignore_ascii_case(option.as_bytes()))
+    None
 }
 
 fn hex_value(byte: u8) -> Option<u8> {

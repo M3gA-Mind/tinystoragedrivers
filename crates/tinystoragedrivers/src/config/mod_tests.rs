@@ -339,6 +339,22 @@ fn redaction_matches_percent_encoded_secret_option_names() {
 }
 
 #[test]
+fn secret_query_scanning_has_linear_work_for_dense_query_markers() {
+    let prefix = "mongodb://h/db";
+    let input = format!("{prefix}{}password=linearSecret", "?".repeat(4_096));
+    let mut scanned_bytes = 0;
+    let spans = scan_secret_query_value_spans(&input, || scanned_bytes += 1);
+    let value_start = input.len() - "linearSecret".len();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0], value_start..input.len());
+    assert!(
+        scanned_bytes <= input.len() * 512,
+        "visited {scanned_bytes} input bytes for {} URI bytes",
+        input.len()
+    );
+}
+
+#[test]
 fn redaction_does_not_let_secret_query_scrubbing_expose_ambiguous_userinfo() {
     for input in [
         "mongodb://app:123?password=suffix@host/db",
