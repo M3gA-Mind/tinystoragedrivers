@@ -150,6 +150,9 @@ mod baseline {
         fn driver(&self) -> &'static str {
             "narrow"
         }
+        fn document_driver(&self) -> &'static str {
+            "memory"
+        }
         fn capabilities(&self) -> Capabilities {
             Capabilities::none()
         }

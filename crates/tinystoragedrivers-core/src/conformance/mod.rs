@@ -72,6 +72,24 @@ pub async fn run_ports(storage: &ScopedStorage) {
 /// On the first check the driver fails, naming it. That is the suite's
 /// purpose: it is called from a driver's tests.
 pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
+    let expected = match backend.document_driver() {
+        "memory" | "file" => (false, false),
+        "sqlite" | "mongodb" => (true, true),
+        driver => panic!("conformance suite has no concurrency declaration for driver {driver:?}"),
+    };
+    let capabilities = backend.capabilities();
+    assert_eq!(
+        capabilities.contains(Capability::SharedAcrossProcesses),
+        expected.0,
+        "{} shared_across_processes capability declaration",
+        backend.document_driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::CrossProcessCas),
+        expected.1,
+        "{} cross_process_cas capability declaration",
+        backend.document_driver()
+    );
     let local = backend
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");

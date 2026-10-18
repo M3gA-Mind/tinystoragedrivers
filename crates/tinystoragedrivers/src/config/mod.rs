@@ -88,7 +88,7 @@ impl StorageConfig {
         }
         Err(StorageError::invalid_input(format!(
             "unrecognized storage URL `{}`; expected memory, sqlite:<path>, mongodb://…/<db> or file:<dir>",
-            redact(url)
+            redact_url(url)
         )))
     }
 
@@ -98,7 +98,7 @@ impl StorageConfig {
         if database.is_empty() {
             return Err(StorageError::invalid_input(format!(
                 "MongoDB URL `{}` names no database; add one as the path, e.g. mongodb://host/openhuman",
-                redact(url)
+                redact_url(url)
             )));
         }
         Ok(Self::MongoDb {
@@ -185,9 +185,13 @@ const SECRET_OPTIONS: [&str; 3] = [
     "password",
 ];
 
-/// Hide every credential in a connection URI: the password, and the value of
-/// any option in [`SECRET_OPTIONS`].
-fn redact(url: &str) -> String {
+/// Hide credentials in a storage connection URI before displaying it.
+///
+/// The password and credential-valued query options are replaced with `***`.
+/// Malformed URI input is returned unchanged because no safe credential
+/// boundary can be inferred.
+#[must_use]
+pub fn redact_url(url: &str) -> String {
     let Some(parts) = split_uri(url, Boundary::Anywhere) else {
         return url.to_owned();
     };
@@ -226,7 +230,7 @@ impl fmt::Display for StorageConfig {
         match self {
             Self::Memory => f.write_str("memory"),
             Self::Sqlite { path } => write!(f, "sqlite:{}", path.display()),
-            Self::MongoDb { uri, .. } => f.write_str(&redact(uri)),
+            Self::MongoDb { uri, .. } => f.write_str(&redact_url(uri)),
             Self::File { dir } => write!(f, "file:{}", dir.display()),
         }
     }

@@ -13,8 +13,21 @@ impl StorageBackend for Composite {
     fn driver(&self) -> &'static str {
         "test-composite"
     }
+    fn document_driver(&self) -> &'static str {
+        self.documents.document_driver()
+    }
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        self.documents
+            .capabilities()
+            .iter()
+            .filter(|capability| {
+                matches!(
+                    capability,
+                    tinystoragedrivers_core::Capability::SharedAcrossProcesses
+                        | tinystoragedrivers_core::Capability::CrossProcessCas
+                )
+            })
+            .fold(Capabilities::none(), Capabilities::with)
     }
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         let local = self.documents.for_scope(scope)?;

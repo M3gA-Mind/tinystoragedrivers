@@ -44,7 +44,7 @@ mod blobs;
 mod config;
 pub use blobs::{BlobConfig, open_blobs, open_composite};
 
-pub use config::{StorageConfig, open};
+pub use config::{StorageConfig, open, redact_url};
 pub use tinystoragedrivers_core::*;
 /// The SQLite driver, including raw access for owners that keep their own
 /// tables.

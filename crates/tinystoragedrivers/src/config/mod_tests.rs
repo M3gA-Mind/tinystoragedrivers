@@ -77,9 +77,9 @@ fn never_prints_a_password() {
     assert!(!error.to_string().contains("s3cret"), "{error}");
     let error = StorageConfig::parse("redis://app:s3cret@h/0").unwrap_err();
     assert!(!error.to_string().contains("s3cret"), "{error}");
-    assert_eq!(redact("mongodb://user@h/db"), "mongodb://user@h/db");
-    assert_eq!(redact("mongodb://h/db"), "mongodb://h/db");
-    assert_eq!(redact("no-scheme"), "no-scheme");
+    assert_eq!(redact_url("mongodb://user@h/db"), "mongodb://user@h/db");
+    assert_eq!(redact_url("mongodb://h/db"), "mongodb://h/db");
+    assert_eq!(redact_url("no-scheme"), "no-scheme");
 }
 
 #[test]
@@ -158,10 +158,10 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
     assert!(shown.contains("retryWrites=true"), "{shown}");
 
     assert_eq!(
-        redact("mongodb://h/?tlsCertificateKeyFilePassword=pw&x"),
+        redact_url("mongodb://h/?tlsCertificateKeyFilePassword=pw&x"),
         "mongodb://h/?tlsCertificateKeyFilePassword=***&x"
     );
-    assert_eq!(redact("mongodb://h?x=1"), "mongodb://h/?x=1");
+    assert_eq!(redact_url("mongodb://h?x=1"), "mongodb://h/?x=1");
 }
 
 #[cfg(feature = "sqlite")]
@@ -182,7 +182,7 @@ async fn opens_sqlite_directories_and_files() {
 
 #[test]
 fn a_question_mark_in_a_password_stays_hidden() {
-    let shown = redact("mongodb://app:p?assword@host/db");
+    let shown = redact_url("mongodb://app:p?assword@host/db");
     assert_eq!(shown, "mongodb://app:***@host/db");
     let error = StorageConfig::parse("mongodb://app:p?assword@host").unwrap_err();
     assert!(!error.to_string().contains("assword"), "{error}");

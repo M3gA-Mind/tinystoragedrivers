@@ -43,6 +43,8 @@ fn all_holds_every_capability() {
             Capability::Maintenance,
             Capability::ScopeEnumeration,
             Capability::StreamSeal,
+            Capability::SharedAcrossProcesses,
+            Capability::CrossProcessCas,
         ]
     );
 }

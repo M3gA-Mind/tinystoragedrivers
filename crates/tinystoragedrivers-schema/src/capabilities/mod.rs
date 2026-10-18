@@ -69,10 +69,14 @@ pub enum Capability {
     /// `StreamStore::seal`: close a stream to
     /// appends and keep its entries as one compressed blob.
     StreamSeal,
+    /// Independent processes can safely use the same backend concurrently.
+    SharedAcrossProcesses,
+    /// Conditional writes provide compare-and-swap semantics across processes.
+    CrossProcessCas,
 }
 
 impl Capability {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 21] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -92,6 +96,8 @@ impl Capability {
         Self::Maintenance,
         Self::ScopeEnumeration,
         Self::StreamSeal,
+        Self::SharedAcrossProcesses,
+        Self::CrossProcessCas,
     ];
 
     const fn bit(self) -> u32 {
@@ -115,6 +121,8 @@ impl Capability {
             Self::Maintenance => 1 << 17,
             Self::ScopeEnumeration => 1 << 18,
             Self::StreamSeal => 1 << 19,
+            Self::SharedAcrossProcesses => 1 << 20,
+            Self::CrossProcessCas => 1 << 21,
         }
     }
 }
@@ -141,6 +149,8 @@ impl fmt::Display for Capability {
             Self::Maintenance => "maintenance",
             Self::ScopeEnumeration => "scope_enumeration",
             Self::StreamSeal => "stream_seal",
+            Self::SharedAcrossProcesses => "shared_across_processes",
+            Self::CrossProcessCas => "cross_process_cas",
         })
     }
 }
@@ -193,7 +203,9 @@ impl Capabilities {
                 | Capability::RecordMetadata.bit()
                 | Capability::Maintenance.bit()
                 | Capability::ScopeEnumeration.bit()
-                | Capability::StreamSeal.bit(),
+                | Capability::StreamSeal.bit()
+                | Capability::SharedAcrossProcesses.bit()
+                | Capability::CrossProcessCas.bit(),
         )
     }
 
