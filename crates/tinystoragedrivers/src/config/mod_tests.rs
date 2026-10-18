@@ -80,6 +80,10 @@ fn never_prints_a_password() {
     assert_eq!(redact_url("mongodb://user@h/db"), "mongodb://user@h/db");
     assert_eq!(redact_url("mongodb://h/db"), "mongodb://h/db");
     assert_eq!(redact_url("no-scheme"), "no-scheme");
+    assert_eq!(
+        redact_url("no-scheme?password=secret"),
+        "no-scheme?password=***"
+    );
 }
 
 #[test]
@@ -162,6 +166,14 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         "mongodb://h/?tlsCertificateKeyFilePassword=***&x"
     );
     assert_eq!(redact_url("mongodb://h?x=1"), "mongodb://h/?x=1");
+    assert_eq!(
+        redact_url("mongodb://h/db?appName=a@b&password=secret"),
+        "mongodb://h/db?appName=a@b&password=***"
+    );
+    assert_eq!(
+        redact_url("mongodb://app:p?assword@host/db?password=secret"),
+        "mongodb://app:***@host/db?password=***"
+    );
 }
 
 #[cfg(feature = "sqlite")]

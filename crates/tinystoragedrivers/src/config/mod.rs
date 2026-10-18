@@ -192,8 +192,9 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// boundary can be inferred.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
-    let Some(parts) = split_uri(url, Boundary::Anywhere) else {
-        return url.to_owned();
+    let sanitized = redact_secret_options(url);
+    let Some(parts) = split_uri(&sanitized, Boundary::Anywhere) else {
+        return sanitized;
     };
     let mut out = format!("{}://", parts.scheme);
     if let Some(userinfo) = parts.userinfo {
@@ -223,6 +224,37 @@ pub fn redact_url(url: &str) -> String {
         out.push_str(&options.join("&"));
     }
     out
+}
+
+/// Mask secret query options before parsing userinfo: an `@` in a query value
+/// must never hide a later credential option from the parser.
+fn redact_secret_options(url: &str) -> String {
+    let mut output = String::with_capacity(url.len());
+    let mut remaining = url;
+    loop {
+        let Some(question) = remaining.find('?') else {
+            output.push_str(remaining);
+            return output;
+        };
+        let (prefix, query) = remaining.split_at(question + 1);
+        output.push_str(&prefix[..prefix.len() - 1]);
+        output.push('?');
+        let next_query = query.find('?').unwrap_or(query.len());
+        let (options, suffix) = query.split_at(next_query);
+        for (index, option) in options.split('&').enumerate() {
+            if index > 0 {
+                output.push('&');
+            }
+            match option.split_once('=') {
+                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
+                    output.push_str(key);
+                    output.push_str("=***");
+                }
+                _ => output.push_str(option),
+            }
+        }
+        remaining = suffix;
+    }
 }
 
 impl fmt::Display for StorageConfig {
