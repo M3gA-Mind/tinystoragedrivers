@@ -41,7 +41,9 @@ polling-watch = ["tokio/time"]
 blocking = ["tokio/rt-multi-thread"]
 # `conformance`: the behavioral suite every driver must pass. Drivers enable it
 # from their dev-dependencies.
-testkit = []
+# The conformance suite uses tokio::join! outside cfg(test); dev-dependency
+# feature unification must not be needed to build or document this feature.
+testkit = ["tokio/macros"]
 
 [lints]
 workspace = true
