@@ -204,18 +204,19 @@ fn legacy_userinfo_password_span(url: &str) -> Option<Range<usize>> {
 }
 
 /// Locate values for known secret query options using only original input
-/// boundaries: the first `?`, `&` between options, and `#` ending the query.
+/// boundaries: `?` starts an option list and `&` separates options. Match
+/// legacy behavior through the URI end, including `#` and any query-looking
+/// text after it.
 fn secret_query_value_spans(url: &str) -> Vec<Range<usize>> {
-    let query_end = url.find('#').unwrap_or(url.len());
     let mut spans = Vec::new();
     let mut search = 0;
-    while let Some(marker) = url[search..query_end].find('?') {
+    while let Some(marker) = url[search..].find('?') {
         let query_start = search + marker + 1;
-        let query = &url[query_start..query_end];
+        let query = &url[query_start..];
         let mut option_start = 0;
         for option in query.split('&') {
             if let Some((key, value)) = option.split_once('=')
-                && SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str())
+                && is_secret_option(key)
             {
                 let value_start = query_start + option_start + key.len() + 1;
                 spans.push(value_start..value_start + value.len());
@@ -225,6 +226,36 @@ fn secret_query_value_spans(url: &str) -> Vec<Range<usize>> {
         search = query_start;
     }
     spans
+}
+
+fn is_secret_option(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some((&high, &low)) = bytes.get(index + 1).zip(bytes.get(index + 2))
+            && let (Some(high), Some(low)) = (hex_value(high), hex_value(low))
+        {
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    SECRET_OPTIONS
+        .iter()
+        .any(|option| decoded.eq_ignore_ascii_case(option.as_bytes()))
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Replace overlapping sensitive intervals together so processing one kind

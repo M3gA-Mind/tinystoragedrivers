@@ -75,7 +75,7 @@ struct UnregisteredDriver(MemoryStorage);
 #[async_trait::async_trait]
 impl StorageBackend for UnregisteredDriver {
     fn driver(&self) -> &'static str {
-        "memory"
+        "new_backend"
     }
     fn document_driver(&self) -> &'static str {
         "new_backend"
@@ -117,8 +117,47 @@ async fn conformance_rejects_an_unregistered_driver_identity() {
         .or_else(|| panic.downcast_ref::<&str>().copied())
         .unwrap_or_default();
     assert!(
-        message.contains("unregistered document driver"),
+        message.contains("unregistered backend driver"),
         "expected an unregistered identity error, got {message:?}"
+    );
+}
+
+#[derive(Debug)]
+struct SqliteIdentityWrapper(MemoryStorage);
+
+#[async_trait::async_trait]
+impl StorageBackend for SqliteIdentityWrapper {
+    fn driver(&self) -> &'static str {
+        "external_wrapper"
+    }
+    fn document_driver(&self) -> &'static str {
+        "sqlite"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0.capabilities()
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+}
+
+#[tokio::test]
+async fn wrappers_cannot_inherit_native_expectations_from_document_identity() {
+    let failure = tokio::spawn(async {
+        run(&SqliteIdentityWrapper(MemoryStorage::new()), true).await;
+    })
+    .await;
+    let panic = failure
+        .expect_err("a wrapper must declare its process capabilities explicitly")
+        .into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("unregistered backend driver"),
+        "expected an unregistered wrapper error, got {message:?}"
     );
 }
 
@@ -252,13 +291,25 @@ mod baseline {
 
 #[tokio::test]
 async fn a_driver_without_optional_capabilities_passes() {
-    run(&baseline::Narrow(MemoryStorage::new(), false), false).await;
+    run_with_process_capabilities(
+        &baseline::Narrow(MemoryStorage::new(), false),
+        false,
+        false,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn conformance_rejects_cross_scope_collection_enumeration() {
     let outcome = tokio::spawn(async {
-        run(&baseline::Narrow(MemoryStorage::new(), true), false).await;
+        run_with_process_capabilities(
+            &baseline::Narrow(MemoryStorage::new(), true),
+            false,
+            false,
+            false,
+        )
+        .await;
     })
     .await;
     assert!(

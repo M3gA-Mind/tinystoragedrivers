@@ -19,7 +19,10 @@ async fn live_minio_blob_and_isolation_conformance() {
         return;
     };
     let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), Arc::new(blobs));
-    tinystoragedrivers_core::conformance::run(&backend, false).await;
+    tinystoragedrivers_core::conformance::run_with_process_capabilities(
+        &backend, false, false, false,
+    )
+    .await;
 }
 
 #[tokio::test]

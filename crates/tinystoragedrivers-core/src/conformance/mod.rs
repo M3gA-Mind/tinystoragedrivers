@@ -73,21 +73,21 @@ pub async fn run_ports(storage: &ScopedStorage) {
 ///
 /// On the first check the driver fails, naming it. That is the suite's
 /// purpose: it is called from a driver's tests. Also panics if
-/// [`StorageBackend::document_driver`] is not a registered native driver;
+/// [`StorageBackend::driver`] is not a registered native driver;
 /// external drivers should call [`run_with_process_capabilities`] instead.
 pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     // These expectations cover every built-in native record driver. A new
     // driver must choose its guarantees explicitly instead of silently
     // skipping the declaration checks.
-    let expected = match backend.document_driver() {
+    let expected = match backend.driver() {
         "memory" | "file" => Some((false, false)),
         "sqlite" | "mongodb" => Some((true, true)),
         _ => None,
     }
     .unwrap_or_else(|| {
         panic!(
-            "unregistered document driver {:?}; call run_with_process_capabilities with its expected declarations",
-            backend.document_driver()
+            "unregistered backend driver {:?}; call run_with_process_capabilities with its expected declarations",
+            backend.driver()
         )
     });
     run_with_process_capabilities(backend, single_scope, expected.0, expected.1).await;

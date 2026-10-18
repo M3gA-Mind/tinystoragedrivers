@@ -77,7 +77,10 @@ pub enum Capability {
     /// (`SQLite` and `MongoDB`); the memory driver is one process's heap, and the
     /// file driver serializes only among the handles of one process.
     SharedAcrossProcesses,
-    /// Conditional writes provide compare-and-swap semantics across processes.
+    /// Version preconditions, `Absent` creates, claims and fences arbitrate
+    /// atomically across processes, so racing conditional writes have exactly
+    /// one winner. This capability names that subset of the broader
+    /// [`Capability::SharedAcrossProcesses`] guarantee explicitly.
     CrossProcessCas,
 }
 

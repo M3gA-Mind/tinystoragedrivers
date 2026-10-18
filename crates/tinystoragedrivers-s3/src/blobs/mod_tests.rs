@@ -56,7 +56,10 @@ async fn blob_contract_and_scope_isolation() {
         documents: Arc::new(MemoryStorage::new()),
         objects: Arc::new(object_store::memory::InMemory::new()),
     };
-    tinystoragedrivers_core::conformance::run(&backend, false).await;
+    tinystoragedrivers_core::conformance::run_with_process_capabilities(
+        &backend, false, false, false,
+    )
+    .await;
 }
 
 #[tokio::test]

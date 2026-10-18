@@ -205,7 +205,7 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         redact_url(
             "mongodb+srv://app:p@ss@h/db?password=first?second&authMechanismProperties=token#frag"
         ),
-        "mongodb+srv://app:***@h/db?password=***&authMechanismProperties=***#frag"
+        "mongodb+srv://app:***@h/db?password=***&authMechanismProperties=***"
     );
     let ambiguous = redact_url("mongodb://app:credential@host/db?appName=a:b@c&password=second");
     assert!(!ambiguous.contains("credential"), "{ambiguous}");
@@ -255,7 +255,7 @@ fn redaction_merges_original_credential_spans_across_uri_components() {
         ),
         (
             "mongodb+srv://user:credential@host/db?authMechanismProperties=token&tlsCertificateKeyFilePassword=other#safe",
-            "mongodb+srv://user:***@host/db?authMechanismProperties=***&tlsCertificateKeyFilePassword=***#safe",
+            "mongodb+srv://user:***@host/db?authMechanismProperties=***&tlsCertificateKeyFilePassword=***",
         ),
         (
             "mongodb://host:27017/db?password=first?second@third&x=kept#frag",
@@ -309,6 +309,33 @@ fn redaction_hides_multiple_at_passwords_across_reserved_delimiters() {
         assert!(!output.contains("querySecret"), "{input}: {output}");
         assert!(output.contains("***"), "{input}: {output}");
     }
+}
+
+#[test]
+fn redaction_keeps_secret_query_spans_through_fragment_markers() {
+    let cases = [
+        (
+            "mongodb://h/db?password=first#secretRight",
+            "mongodb://h/db?password=***",
+        ),
+        (
+            "mongodb://h/db#fragment?password=secretRight",
+            "mongodb://h/db#fragment?password=***",
+        ),
+    ];
+    for (input, expected) in cases {
+        let output = redact_url(input);
+        assert_eq!(output, expected, "{input}");
+        assert!(!output.contains("secretRight"), "{input}: {output}");
+    }
+}
+
+#[test]
+fn redaction_matches_percent_encoded_secret_option_names() {
+    let input = "mongodb://h/db?tlsCertificateKeyFilePass%77ord=querySecret";
+    let output = redact_url(input);
+    assert_eq!(output, "mongodb://h/db?tlsCertificateKeyFilePass%77ord=***");
+    assert!(!output.contains("querySecret"));
 }
 
 #[test]

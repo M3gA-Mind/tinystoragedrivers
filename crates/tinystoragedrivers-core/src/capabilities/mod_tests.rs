@@ -91,6 +91,7 @@ fn renders_names() {
         (Capability::ScopeEnumeration, "scope_enumeration"),
         (Capability::StreamSeal, "stream_seal"),
         (Capability::SharedAcrossProcesses, "shared_across_processes"),
+        (Capability::CrossProcessCas, "cross_process_cas"),
     ] {
         assert_eq!(capability.to_string(), expected);
     }
