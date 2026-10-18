@@ -195,3 +195,157 @@ async fn a_fenced_handle_that_lost_its_lease_cannot_sweep_blobs() {
     // The refused sweep removed nothing: an unfenced sweep still finds it.
     assert_eq!(root.sweep_expired_blobs(&scope).await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn stale_fenced_purge_and_status_refuse_without_erasing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("fenced-purge-target").unwrap();
+    let guard_scope = Scope::new("fenced-purge-lease").unwrap();
+    let lease_scope = root.for_scope(&guard_scope).unwrap();
+    lease_scope
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 1}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let fence = Fence::epoch(guard_scope.clone(), "leases", "l", "epoch", 1);
+    let target = root.for_scope(&scope).unwrap();
+    target
+        .documents()
+        .put(
+            "docs",
+            "keep",
+            serde_json::json!({"alive": true}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    target.blobs().put("keep", vec![7], None).await.unwrap();
+    let fenced = root.for_scope_fenced(&scope, &fence).unwrap();
+    lease_scope
+        .documents()
+        .put(
+            "leases",
+            "l",
+            serde_json::json!({"epoch": 2}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fenced.purge_status("stale-purge").await.unwrap_err().kind(),
+        ErrorKind::Fenced
+    );
+    assert_eq!(
+        fenced
+            .purge(&PurgeRequest {
+                operation_id: "stale-purge".into(),
+                mode: PurgeMode::Quiescent
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Fenced
+    );
+    let current_fence = Fence::epoch(guard_scope, "leases", "l", "epoch", 2);
+    let current_generation = root
+        .for_scope_fenced_generation(&scope, ScopeGeneration(0), &current_fence)
+        .unwrap();
+    assert_eq!(
+        current_generation
+            .documents()
+            .get("docs", "keep")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"alive": true})
+    );
+    assert_eq!(
+        target
+            .documents()
+            .get("docs", "keep")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"alive": true})
+    );
+    assert_eq!(
+        target.blobs().get("keep").await.unwrap().unwrap().bytes,
+        [7]
+    );
+}
+
+#[tokio::test]
+async fn maximum_scope_has_bounded_durable_purge_metadata_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("a".repeat(tinystoragedrivers_core::MAX_SCOPE_LEN)).unwrap();
+    let receipt = root
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&PurgeRequest {
+            operation_id: "maximum-scope".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        root.for_scope(&scope)
+            .unwrap()
+            .purge_status("maximum-scope")
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+}
+
+#[tokio::test]
+async fn corrupt_purge_receipt_fails_closed_without_erasing_scope_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("corrupt-purge-state").unwrap();
+    let target = root.for_scope(&scope).unwrap();
+    target
+        .documents()
+        .put(
+            "docs",
+            "keep",
+            serde_json::json!({"alive": true}),
+            tinystoragedrivers_core::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let state_path = root.db.purge_state_path(&scope);
+    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    std::fs::write(&state_path, b"{invalid json").unwrap();
+
+    assert_eq!(
+        target
+            .purge(&PurgeRequest {
+                operation_id: "must-not-erase".into(),
+                mode: PurgeMode::Quiescent,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Serialization
+    );
+    assert_eq!(
+        target
+            .documents()
+            .get("docs", "keep")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"alive": true})
+    );
+}

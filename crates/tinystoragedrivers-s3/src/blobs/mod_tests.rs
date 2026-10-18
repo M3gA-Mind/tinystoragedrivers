@@ -1,7 +1,95 @@
 //! Scoped blob conformance and multipart publication guarantees.
 
 use super::*;
-use tinystoragedrivers_core::{MemoryStorage, ScopedStorage, StorageBackend};
+use futures_util::{StreamExt, stream::BoxStream};
+use object_store::{MultipartUpload, PutPayload, PutResult};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tinystoragedrivers_core::{MemoryStorage, ScopeGeneration, ScopedStorage, StorageBackend};
+
+#[derive(Debug, Default)]
+struct DeleteGate {
+    pause: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+struct PausingDeletes {
+    inner: Arc<object_store::memory::InMemory>,
+    gate: Arc<DeleteGate>,
+}
+
+impl std::fmt::Display for PausingDeletes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pausing-deletes")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for PausingDeletes {
+    async fn put_opts(
+        &self,
+        path: &Path,
+        data: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(path, data, options).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        path: &Path,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(path, options).await
+    }
+    async fn get_opts(
+        &self,
+        path: &Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        self.inner.get_opts(path, options).await
+    }
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        Box::pin(locations.then(move |result| {
+            let inner = inner.clone();
+            let gate = gate.clone();
+            async move {
+                let path = result?;
+                if gate.pause.swap(false, Ordering::SeqCst) {
+                    gate.entered.notify_one();
+                    gate.release.notified().await;
+                }
+                inner.delete(&path).await?;
+                Ok(path)
+            }
+        }))
+    }
+    fn list(
+        &self,
+        prefix: Option<&Path>,
+    ) -> BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
 
 #[derive(Debug)]
 struct Composite {
@@ -109,6 +197,100 @@ async fn backend_enumerates_and_purges_only_the_requested_scope() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn delayed_old_composite_purge_cannot_delete_replacement_blob() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let gate = Arc::new(DeleteGate {
+        pause: AtomicBool::new(true),
+        ..DeleteGate::default()
+    });
+    let paused_objects = Arc::new(PausingDeletes {
+        inner: objects.clone(),
+        gate: gate.clone(),
+    });
+    let records = Arc::new(MemoryStorage::new());
+    let first = tinystoragedrivers_core::CompositeStorage::new(
+        records.clone(),
+        Arc::new(S3Storage::with_store(paused_objects, None, "test").unwrap()),
+    );
+    let second = tinystoragedrivers_core::CompositeStorage::new(
+        records,
+        Arc::new(S3Storage::with_store(objects, None, "test").unwrap()),
+    );
+    let scope = Scope::new("u:delayed-s3-purge").unwrap();
+    let old = first.for_scope(&scope).unwrap();
+    old.blobs().put("same-key", vec![1], None).await.unwrap();
+    let request = tinystoragedrivers_core::PurgeRequest {
+        operation_id: "delayed-s3-reset".into(),
+        mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+    };
+    let old_runner = tokio::spawn(async move { old.purge(&request).await });
+    gate.entered.notified().await;
+
+    let completed = second
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&tinystoragedrivers_core::PurgeRequest {
+            operation_id: "delayed-s3-reset".into(),
+            mode: tinystoragedrivers_core::PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.status,
+        tinystoragedrivers_core::PurgeStatus::Complete
+    );
+    let replacement = second
+        .for_scope_generation(&scope, completed.generation)
+        .unwrap();
+    replacement
+        .blobs()
+        .put("same-key", vec![2], None)
+        .await
+        .unwrap();
+
+    gate.release.notify_one();
+    let _ = old_runner.await.unwrap();
+    assert_eq!(
+        replacement
+            .blobs()
+            .get("same-key")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        [2]
+    );
+}
+
+#[tokio::test]
+async fn purge_removes_only_one_physical_generation_and_enumerates_both_roots() {
+    let objects = Arc::new(object_store::memory::InMemory::new());
+    let backend = S3Storage::with_store(objects, None, "test").unwrap();
+    let scope = Scope::new("u:generation-isolation").unwrap();
+    let legacy = backend
+        .for_scope_generation(&scope, ScopeGeneration(0))
+        .unwrap();
+    legacy.put("g/1/foo", vec![1], None).await.unwrap();
+    let next = backend
+        .for_scope_generation(&scope, ScopeGeneration(1))
+        .unwrap();
+    next.put("g/1/foo", vec![2], None).await.unwrap();
+    assert_eq!(
+        backend.scopes("u:generation-").await.unwrap(),
+        std::slice::from_ref(&scope)
+    );
+
+    backend
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap();
+
+    assert!(legacy.list("").await.unwrap().is_empty());
+    assert_eq!(next.get("g/1/foo").await.unwrap().unwrap().bytes, [2]);
+    assert_eq!(backend.scopes("u:generation-").await.unwrap(), [scope]);
 }
 
 #[tokio::test]

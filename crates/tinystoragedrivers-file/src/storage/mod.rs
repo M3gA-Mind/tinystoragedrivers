@@ -142,16 +142,11 @@ impl Db {
     }
 
     fn purge_state_path(&self, scope: &Scope) -> PathBuf {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut encoded = String::with_capacity(scope.as_str().len() * 2);
-        for byte in scope.as_str().bytes() {
-            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
         self.dir
             .join("_meta")
             .join("purges")
-            .join(format!("{encoded}.json"))
+            .join(dir_components(scope.as_str()))
+            .with_extension("json")
     }
 
     fn purge_state(&self, scope: &Scope) -> Result<FilePurgeState> {
@@ -302,6 +297,7 @@ impl FileStorage {
             db: Arc::clone(&self.db),
             scope: scope.clone(),
             generation,
+            fence: fence.cloned(),
         }))
     }
 
@@ -330,6 +326,7 @@ struct FilePurge {
     db: Arc<Db>,
     scope: Scope,
     generation: ScopeGeneration,
+    fence: Option<Arc<Fencing>>,
 }
 
 #[async_trait::async_trait]
@@ -345,8 +342,10 @@ impl ScopePurge for FilePurge {
         let scope = self.scope.clone();
         let operation_id = request.operation_id.clone();
         let generation = self.generation;
+        let fence = self.fence.clone();
         self.db
             .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
                 let mut state = db.purge_state(&scope)?;
                 if let Some(receipt) = state.receipts.get(&operation_id) {
                     return Ok(receipt.clone());
@@ -397,8 +396,10 @@ impl ScopePurge for FilePurge {
     async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
         let scope = self.scope.clone();
         let operation_id = operation_id.to_owned();
+        let fence = self.fence.clone();
         self.db
             .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
                 let state = db.purge_state(&scope)?;
                 if state
                     .pending

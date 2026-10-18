@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 use tinystoragedrivers_core::{
-    BlobBackend, CompositeStorage, MemoryStorage, PurgeMode, PurgeRequest, Scope, StorageBackend,
+    BlobBackend, CompositeStorage, MemoryStorage, PurgeMode, PurgeRequest, Scope, ScopeGeneration,
+    StorageBackend,
 };
 use tinystoragedrivers_s3::{S3Config, S3Storage};
 use tokio::io::AsyncReadExt;
@@ -20,7 +21,8 @@ async fn live_minio_blob_and_isolation_conformance() {
     let Some(blobs) = driver().unwrap() else {
         return;
     };
-    let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), Arc::new(blobs));
+    let blobs = Arc::new(blobs);
+    let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), blobs.clone());
     tinystoragedrivers_core::conformance::run(&backend, false).await;
 }
 
@@ -29,7 +31,8 @@ async fn live_minio_composite_purge_deletes_across_pages_and_keeps_sibling_scope
     let Some(blobs) = driver().unwrap() else {
         return;
     };
-    let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), Arc::new(blobs));
+    let blobs = Arc::new(blobs);
+    let backend = CompositeStorage::new(Arc::new(MemoryStorage::new()), blobs.clone());
     let target = Scope::new("live-purge-target").unwrap();
     let sibling = Scope::new("live-purge-sibling").unwrap();
     let target_blobs = backend.for_scope(&target).unwrap();
@@ -41,6 +44,11 @@ async fn live_minio_composite_purge_deletes_across_pages_and_keeps_sibling_scope
             .await
             .unwrap();
     }
+    target_blobs
+        .blobs()
+        .put("g/1/foo", vec![3], None)
+        .await
+        .unwrap();
     sibling_blobs
         .blobs()
         .put("keep", vec![2], None)
@@ -53,15 +61,28 @@ async fn live_minio_composite_purge_deletes_across_pages_and_keeps_sibling_scope
         })
         .await
         .unwrap();
-    assert!(
-        backend
-            .for_scope_generation(&target, receipt.generation)
-            .unwrap()
+    let replacement = backend
+        .for_scope_generation(&target, receipt.generation)
+        .unwrap();
+    replacement
+        .blobs()
+        .put("replacement", vec![4], None)
+        .await
+        .unwrap();
+    blobs
+        .purge_scope_generation(&target, ScopeGeneration(0))
+        .await
+        .unwrap();
+    assert_eq!(replacement.blobs().list("").await.unwrap().len(), 1);
+    assert_eq!(
+        replacement
             .blobs()
-            .list("")
+            .get("replacement")
             .await
             .unwrap()
-            .is_empty()
+            .unwrap()
+            .bytes,
+        [4]
     );
     assert_eq!(
         backend
