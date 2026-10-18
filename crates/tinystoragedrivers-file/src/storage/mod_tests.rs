@@ -323,6 +323,13 @@ async fn corrupt_purge_receipt_fails_closed_without_erasing_scope_data() {
         )
         .await
         .unwrap();
+    let data_path = root
+        .db
+        .scope_dir(&scope)
+        .join("docs")
+        .join(crate::encode::dir_components("docs"))
+        .join(format!("{}.json", crate::encode::file_stem("keep")));
+    let data_before = std::fs::read(&data_path).unwrap();
     let state_path = root.db.purge_state_path(&scope);
     std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     std::fs::write(&state_path, b"{invalid json").unwrap();
@@ -341,5 +348,10 @@ async fn corrupt_purge_receipt_fails_closed_without_erasing_scope_data() {
     assert!(
         root.db.scope_dir(&scope).exists(),
         "corrupt receipt metadata must not remove the tenant scope directory"
+    );
+    assert_eq!(
+        std::fs::read(&data_path).unwrap(),
+        data_before,
+        "corrupt receipt metadata must preserve the persisted tenant document"
     );
 }
