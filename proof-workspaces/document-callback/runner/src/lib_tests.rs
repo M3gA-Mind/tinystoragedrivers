@@ -8,12 +8,31 @@ use tinystoragedrivers_core::{
 };
 use tinystoragedrivers_tinybus::{endpoint, serve_collection};
 
+struct TestNetwork {
+    bus: MemoryBus,
+    broker: Broker,
+    task: tokio::task::JoinHandle<tinybus::Result<()>>,
+}
+impl TestNetwork {
+    fn new() -> Arc<Self> {
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let task = broker.spawn(bus.clone());
+        Arc::new(Self { bus, broker, task })
+    }
+}
+impl Drop for TestNetwork {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 struct Fixture {
     host: ModuleHost,
     binding: tinybus::module::HostCallbackBinding,
     _artifact: tempfile::TempDir,
     attacker: Connection,
-    broker_task: tokio::task::JoinHandle<tinybus::Result<()>>,
+    network: Arc<TestNetwork>,
+    interface: &'static str,
 }
 impl Fixture {
     async fn new(documents: Arc<dyn DocumentStore>) -> Self {
@@ -23,8 +42,26 @@ impl Fixture {
         documents: Arc<dyn DocumentStore>,
         server: Option<Arc<tinystoragedrivers_client::StorageServer>>,
     ) -> Self {
+        Self::on_network(documents, server, TestNetwork::new(), false).await
+    }
+    async fn on_network(
+        documents: Arc<dyn DocumentStore>,
+        server: Option<Arc<tinystoragedrivers_client::StorageServer>>,
+        network: Arc<TestNetwork>,
+        replacement: bool,
+    ) -> Self {
+        let variable = if replacement {
+            "TSD_DOCUMENT_REPLACEMENT_MODULE"
+        } else {
+            "TSD_DOCUMENT_MODULE"
+        };
+        let interface = if replacement {
+            "ai.tinyhumans.storage.ReplacementProof1"
+        } else {
+            "ai.tinyhumans.storage.DocumentProof1"
+        };
         let artifact = PathBuf::from(
-            std::env::var_os("TSD_DOCUMENT_MODULE").expect("run scripts/test-document-callback.sh"),
+            std::env::var_os(variable).expect("run scripts/test-document-callback.sh"),
         );
         let hash = tinybus::module::sha256_file(&artifact).unwrap();
         let directory = tempfile::tempdir_in(artifact.parent().unwrap()).unwrap();
@@ -36,10 +73,7 @@ impl Fixture {
             format!("{:?} = {hash:?}\n", filename.to_str().unwrap()),
         )
         .unwrap();
-        let bus = MemoryBus::new();
-        let broker = Broker::new();
-        let broker_task = broker.spawn(bus.clone());
-        let host = ModuleHost::new(broker);
+        let host = ModuleHost::new(network.broker.clone());
         let mut endpoints = vec![endpoint("/documents").unwrap()];
         if server.is_some() {
             endpoints
@@ -66,7 +100,7 @@ impl Fixture {
         host.load_file_with_host_callbacks(staged, json!({}), &binding)
             .await
             .unwrap();
-        let attacker = Connection::connect(bus.connect().await.unwrap())
+        let attacker = Connection::connect(network.bus.connect().await.unwrap())
             .await
             .unwrap();
         Self {
@@ -74,7 +108,8 @@ impl Fixture {
             binding,
             _artifact: directory,
             attacker,
-            broker_task,
+            network,
+            interface,
         }
     }
     fn proxy(&self) -> tinybus::module::HostCallbackProxy {
@@ -82,15 +117,10 @@ impl Fixture {
             .proxy(
                 self.binding.guard().module_peer().unwrap().as_str(),
                 "/proof",
-                "ai.tinyhumans.storage.DocumentProof1",
+                self.interface,
             )
             .unwrap()
             .with_timeout(Duration::from_secs(3))
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.broker_task.abort();
     }
 }
 
@@ -346,6 +376,12 @@ async fn scoped_native_ports_preserve_metadata_cache_secrets_env_and_audit() {
         .add_match(tinybus::MatchRule::new())
         .await
         .unwrap();
+    let publisher = Connection::connect(fixture.network.bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    monitor_barrier(&publisher, &mut monitor, "before")
+        .await
+        .unwrap();
     let result: serde_json::Value = fixture
         .proxy()
         .call_confidential("NativeRoundtrip", (route(&fixture),))
@@ -380,7 +416,9 @@ async fn scoped_native_ports_preserve_metadata_cache_secrets_env_and_audit() {
         .await
         .unwrap();
     assert_eq!(second["before"], true);
-    assert!(monitor.try_recv().is_err());
+    monitor_barrier(&publisher, &mut monitor, "after")
+        .await
+        .unwrap();
     assert!(
         fixture
             .proxy()
@@ -603,9 +641,21 @@ async fn scoped_native_fence_generation_expiry_and_replacement_remain_authoritat
     let fresh = backend
         .for_scope_fenced_generation(&owner, receipt.generation, &fence)
         .unwrap();
-    let replacement = Fixture::with_server(
+    fresh
+        .documents()
+        .put(
+            "cache",
+            "replacement-live",
+            json!({"identity":"replacement"}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let replacement = Fixture::on_network(
         fresh.documents().clone(),
         Some(Arc::new(StorageServer::new(fresh.clone()))),
+        fixture.network.clone(),
+        true,
     )
     .await;
     assert!(
@@ -618,6 +668,59 @@ async fn scoped_native_fence_generation_expiry_and_replacement_remain_authoritat
         .await
         .unwrap()
         .is_null()
+    );
+    let positive = scoped_call(
+        &replacement,
+        "Documents",
+        "Get",
+        json!({"collection":"cache","document_id":"replacement-live"}),
+    )
+    .await
+    .unwrap();
+    let positive: tinystoragedrivers_bus::Versioned = serde_json::from_value(positive).unwrap();
+    assert_eq!(positive.doc, json!({"identity":"replacement"}));
+    let mut attestations = Vec::new();
+    for active in [&fixture, &replacement] {
+        let module = active
+            .attacker
+            .proxy(
+                active.binding.guard().module_peer().unwrap().as_str(),
+                "/proof",
+                active.interface,
+            )
+            .unwrap();
+        attestations.push(module.attestation().await.unwrap().unwrap());
+    }
+    assert_ne!(attestations[0].sha256, attestations[1].sha256);
+    assert_ne!(attestations[0].name, attestations[1].name);
+    assert!(Arc::ptr_eq(&fixture.network, &replacement.network));
+    assert_ne!(route(&fixture).destination, route(&replacement).destination);
+    assert_ne!(
+        fixture.binding.guard().module_peer(),
+        replacement.binding.guard().module_peer()
+    );
+    let target = fixture
+        .attacker
+        .proxy(
+            replacement.binding.unique_name().as_str(),
+            "/storage/Documents",
+            tinystoragedrivers_bus::STORAGE_INTERFACE,
+        )
+        .unwrap();
+    assert!(
+        target
+            .call::<serde_json::Value>("Get", (json!({"collection":"cache","document_id":"late"}),))
+            .await
+            .is_err()
+    );
+    assert!(
+        target
+            .call_confidential::<serde_json::Value>(
+                "Get",
+                (json!({"collection":"cache","document_id":"late"}),)
+            )
+            .await
+            .is_err()
     );
     // A valid old module cannot target a newly admitted exact-instance binding.
     assert!(
@@ -654,3 +757,7 @@ async fn scoped_native_fence_generation_expiry_and_replacement_remain_authoritat
 
 #[path = "scoped_lifecycle_tests.rs"]
 mod scoped_lifecycle_tests;
+
+#[path = "monitor_tests.rs"]
+mod monitor_tests;
+use monitor_tests::monitor_barrier;

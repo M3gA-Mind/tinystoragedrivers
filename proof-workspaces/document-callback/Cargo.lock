@@ -240,6 +240,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "document-callback-peer-proof"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tinybus",
+ "tinybus-module",
+ "tinystoragedrivers-bus",
+ "tinystoragedrivers-busproxy",
+ "tinystoragedrivers-core",
+ "tinystoragedrivers-schema",
+ "tinystoragedrivers-secrets",
+]
+
+[[package]]
 name = "document-callback-proof"
 version = "0.0.0"
 dependencies = [

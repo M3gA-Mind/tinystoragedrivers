@@ -30,7 +30,7 @@ metadata:
 - cargo test --locked --all-features, including legacy unattested-host tests.
 - cargo test --locked --no-default-features.
 - cargo doc --locked --no-deps --all-features with RUSTDOCFLAGS=-D warnings.
-- scripts/test-document-callback.sh (locked native build and seven tests).
+- scripts/test-document-callback.sh (locked builds and nine proof tests).
 - Independent document-callback clippy and all-target/all-feature locked build.
 - Independent schema-contract locked default and all-feature builds.
 - python3 scripts/check-schema-dependencies.py --negative-test: isolated default
@@ -54,9 +54,35 @@ The pure schema's dependencies remain unchanged (serde/serde_json/thiserror only
 Root lock package identities are unchanged; the native proof lock adds only
 required packages and retains every prior identity/version.
 
-Native fixture SHA-256 at validation:
+Native fixture SHA-256 after review correction:
 
-    6be072ab509071e89b2356429ab268aa398dd2923fa903d1fab91a145223a2ac
+- Primary DocumentProof1:
+  50fbfe8995c9abcd1949d7bd594aff8690532fce73a4efdd22cd4e0f06348a09
+- Replacement ReplacementProof1:
+  87cbd70d4b4f950ee755cdd86f0eb1aad43f53e2a9445b39e30326de1a9960ac
+
+Independent review exposed two gaps in the original proof, without identifying a
+production defect. Both were reproduced before correcting the fixture:
+review-peer-red.log shows two separate brokers reusing destination :1.1;
+review-monitor-red.log shows the original empty-or-error check accepted a closed
+observer. The original cross-broker refusal did not prove instance isolation.
+
+The corrected replacement proof uses one shared broker, two distinct SHA-admitted
+SDK identities and distinct module/callback unique names. The replacement's
+native marker is read successfully first. The original still-live verified
+module and an ordinary outsider are then rejected against that same replacement
+destination. Both attestation names and digests are checked as distinct. The
+second artifact shares the entire relay implementation; only its SDK identity
+wrapper differs, because the SDK reserves each provided bus name.
+
+The corrected broad monitor observes public before/after signals around completed
+confidential calls. The latter is an event barrier. Closed, lagged or timed-out
+observers fail explicitly; controlled injections of plaintext and byte-encoded
+secret/document/audit sentinels are rejected. Nine proof tests pass, including
+seven real module tests and two monitor-oracle controls (review-native-green.log).
+Fixture fmt, strict clippy and locked all-target/all-feature build pass. No
+production source changed during this review correction, so the full workspace
+suites and production coverage above were not unnecessarily repeated.
 
 This proves the canonical callback prerequisite. The owning MCP consumer still
 must adopt the public route/client and pass its ordinary retry acceptance; this

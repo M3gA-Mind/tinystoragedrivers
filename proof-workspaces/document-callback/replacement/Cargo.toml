@@ -1,0 +1,21 @@
+[package]
+name = "document-callback-peer-proof"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tinystoragedrivers-busproxy = { path = "../../../crates/tinystoragedrivers-busproxy" }
+tinystoragedrivers-core = { path = "../../../crates/tinystoragedrivers-core" }
+tinystoragedrivers-schema = { path = "../../../crates/tinystoragedrivers-schema" }
+tinystoragedrivers-secrets = { path = "../../../crates/tinystoragedrivers-secrets" }
+async-trait = "0.1"
+serde_json.workspace = true
+tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
+tinybus.workspace = true
+# Only the fixture SDK exports the native ABI; no native storage implementation.
+tinybus-module = { git = "https://github.com/tinyhumansai/tinybus", rev = "d5b949be8ea56eb5a17289a09aa28e8c09bd88b7" }

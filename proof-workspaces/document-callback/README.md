@@ -28,3 +28,16 @@ Get/Set/Get, environment secrets, JSON audit append/read/len, rejected authority
 fields, empty collection declarations, blob/watch refusals, absent secrets,
 native clock expiry, stale fences, retired generations and exact-instance
 replacement. Every profile call uses the confidential route.
+
+The replacement test uses two differently named SDK artifacts compiled from the
+same relay source. Both have separate SHA allowlist admissions and distinct
+provided bus names on one shared broker. It first reads a native replacement
+marker through the replacement module, then rejects the old verified module and
+an ordinary outsider against that actual callback destination. The SDK reserves
+provided bus names, so copying the original artifact under another pathname
+would not create a valid simultaneous second identity.
+
+The broad monitor must receive public positive-control signals before and after
+the confidential requests. The after signal is an event barrier following the
+completed calls. Dead, lagged or timed-out observers fail; injected textual and
+byte-encoded private sentinels prove the leak oracle fails when it should.
