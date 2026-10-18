@@ -217,7 +217,8 @@ Carried (additive; every new field is optional and defaulted):
   the backend has them.
 
 Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
-keeps `maintenance` and `scope_enumeration` out of every capability list):
+keeps `maintenance`, `scope_enumeration` and `shared_across_processes` out of every
+capability list):
 
 - `StorageBackend::maintain` and `checkpoint` run vacuum, WAL checkpoints and
   the seal and retention policies across the whole database. A module could

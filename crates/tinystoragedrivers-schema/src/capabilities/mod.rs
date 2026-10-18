@@ -69,7 +69,13 @@ pub enum Capability {
     /// `StreamStore::seal`: close a stream to
     /// appends and keep its entries as one compressed blob.
     StreamSeal,
-    /// Independent processes can safely use the same backend concurrently.
+    /// Independently opened backends on the same store agree: they see each
+    /// other's writes at once, and the compare-and-swap rules (version
+    /// preconditions, `Absent` creates, claims, fences) hold between them, so
+    /// racing handles, in this process or another, get exactly one winner.
+    /// Only a driver whose engine arbitrates between connections reports it
+    /// (`SQLite` and `MongoDB`); the memory driver is one process's heap, and the
+    /// file driver serializes only among the handles of one process.
     SharedAcrossProcesses,
     /// Conditional writes provide compare-and-swap semantics across processes.
     CrossProcessCas,

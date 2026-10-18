@@ -22,12 +22,14 @@ mod fencing;
 mod isolation;
 mod ledger;
 mod maintenance;
+mod migrations;
 mod primitives;
 mod purge;
 mod purge_history;
 mod schema;
 mod seal;
 mod semantics;
+mod shared;
 mod streams;
 mod validated;
 mod watch;
@@ -103,12 +105,40 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         );
     } else {
         isolation::run(backend).await;
+        isolation::nested(backend).await;
         validated::isolation(backend).await;
         purge::run(backend).await;
         purge_history::run(backend).await;
         maintenance::run(backend).await;
     }
+    migrations::run(backend).await;
     fencing::run(backend, single_scope).await;
+}
+
+/// Run the shared-handle checks against backends `open` yields: each call
+/// opens a new, independent backend on the same store (another connection to
+/// one SQLite file or one `MongoDB` database, a directory reopened).
+///
+/// A driver that reports [`Capability::SharedAcrossProcesses`] must show that
+/// handles see each other's writes at once and arbitrate races between them:
+/// racing lease acquires have exactly one winner (at epoch 1 for a fresh
+/// key) and racing version-guarded puts do too. Every driver, with or
+/// without the capability, must show that a backend opened after another one
+/// was dropped reads what it wrote and continues its versions, offsets and
+/// lease epochs.
+///
+/// `open` is called many times; it must not clear the store.
+///
+/// # Panics
+///
+/// On the first check the driver fails, naming it.
+pub async fn run_shared<B, F, Fut>(open: F)
+where
+    B: StorageBackend,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = B>,
+{
+    shared::run(open).await;
 }
 
 /// A name unique to this process and call, safe as a collection, stream or

@@ -20,6 +20,7 @@ use super::repo::{Repo, RetryPolicy};
 use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
+use crate::filter::Filter;
 use crate::key::Key;
 use crate::memory::{Clock, system_clock};
 use crate::scope::Scope;
@@ -148,6 +149,30 @@ impl Lease {
     #[must_use]
     pub fn fence(&self, scope: &Scope) -> Fence {
         Fence::epoch(scope.clone(), LEASES, self.id.clone(), "epoch", self.epoch)
+    }
+
+    /// A [`Fence`] that holds only while this very tenure is intact: the
+    /// stored `epoch` is still this lease's, its `holder` is still this
+    /// lease's holder, and the record has not been `released`.
+    ///
+    /// [`fence`](Self::fence) checks the epoch alone, so a holder that
+    /// released the lease cleanly (the record and its epoch stay for the next
+    /// takeover to continue) can still land writes until someone takes over.
+    /// This fence refuses them as soon as the holder lets go, as it does once
+    /// another holder takes over or the record is compacted away.
+    ///
+    /// `scope` is the scope the lease record lives in, as for
+    /// [`fence`](Self::fence).
+    #[must_use]
+    pub fn holder_fence(&self, scope: &Scope) -> Fence {
+        Fence::new(
+            scope.clone(),
+            LEASES,
+            self.id.clone(),
+            Filter::eq("epoch", self.epoch)
+                .and(Filter::eq("holder", self.holder.as_str()))
+                .and(Filter::exists("released", false)),
+        )
     }
 
     fn from_body(id: String, body: Body) -> Self {

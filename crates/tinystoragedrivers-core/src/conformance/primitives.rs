@@ -353,7 +353,7 @@ async fn kv(storage: &ScopedStorage) {
 
 /// A generous budget with a short backoff: the checks assert on outcomes, so
 /// a slow driver may take many attempts but must not fail.
-fn contended() -> RetryPolicy {
+pub(super) fn contended() -> RetryPolicy {
     RetryPolicy::new(
         512,
         std::time::Duration::from_micros(200),
@@ -365,6 +365,6 @@ fn contended() -> RetryPolicy {
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback"
 )]
-fn join_error(error: tokio::task::JoinError) -> crate::StorageError {
+pub(super) fn join_error(error: tokio::task::JoinError) -> crate::StorageError {
     crate::StorageError::backend(format!("task failed: {error}"))
 }

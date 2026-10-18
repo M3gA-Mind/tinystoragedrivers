@@ -190,3 +190,22 @@ async fn reports_its_driver_and_capabilities() {
     assert_eq!(storage.dir(), dir.path().canonicalize().unwrap());
     assert!(format!("{storage:?}").starts_with("FileStorage"));
 }
+
+#[tokio::test]
+async fn reopening_the_directory_keeps_what_was_written() {
+    // The file driver does not claim `SharedAcrossProcesses`, so this runs
+    // the reopen-durability part of the shared-handle checks alone.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_owned();
+    assert!(
+        !FileStorage::open(&path)
+            .unwrap()
+            .capabilities()
+            .contains(Capability::SharedAcrossProcesses)
+    );
+    conformance::run_shared(|| {
+        let storage = FileStorage::open(&path).unwrap();
+        async move { storage }
+    })
+    .await;
+}
