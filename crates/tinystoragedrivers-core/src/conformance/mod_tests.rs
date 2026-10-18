@@ -489,6 +489,160 @@ async fn handles_that_agree_pass_the_shared_checks() {
     .await;
 }
 
+/// A driver that supports cross-process conditional writes without promising
+/// general visibility for every storage port.
+#[derive(Debug, Clone)]
+struct CasOnly(MemoryStorage);
+
+impl StorageBackend for CasOnly {
+    fn driver(&self) -> &'static str {
+        "cas_only"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::CrossProcessCas)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+}
+
+/// A CAS-claiming backend whose document adapter ignores write preconditions.
+#[derive(Debug, Clone)]
+struct BrokenCasOnly(MemoryStorage);
+
+#[derive(Debug)]
+struct UnconditionalDocs(Arc<dyn crate::DocumentStore>);
+
+#[async_trait::async_trait]
+impl crate::DocumentStore for UnconditionalDocs {
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0.capabilities()
+    }
+    async fn ensure_collection(&self, spec: &crate::CollectionSpec) -> Result<()> {
+        self.0.ensure_collection(spec).await
+    }
+    async fn get(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<crate::Versioned<serde_json::Value>>> {
+        self.0.get(collection, id).await
+    }
+    async fn put(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: serde_json::Value,
+        _precondition: crate::Precondition,
+    ) -> Result<crate::Version> {
+        self.0
+            .put(collection, id, doc, crate::Precondition::None)
+            .await
+    }
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: serde_json::Value,
+        _precondition: crate::Precondition,
+        _options: crate::WriteOptions,
+    ) -> Result<crate::Version> {
+        self.0
+            .put(collection, id, doc, crate::Precondition::None)
+            .await
+    }
+    async fn delete(
+        &self,
+        collection: &str,
+        id: &str,
+        precondition: crate::Precondition,
+    ) -> Result<bool> {
+        self.0.delete(collection, id, precondition).await
+    }
+    async fn query(
+        &self,
+        collection: &str,
+        query: &crate::Query,
+    ) -> Result<crate::Page<crate::Versioned<serde_json::Value>>> {
+        self.0.query(collection, query).await
+    }
+    async fn count(&self, collection: &str, filter: &crate::Filter) -> Result<u64> {
+        self.0.count(collection, filter).await
+    }
+    async fn delete_where(&self, collection: &str, filter: &crate::Filter) -> Result<u64> {
+        self.0.delete_where(collection, filter).await
+    }
+    async fn claim(
+        &self,
+        collection: &str,
+        filter: &crate::Filter,
+        sort: &[crate::Sort],
+        patch: &serde_json::Value,
+    ) -> Result<Option<crate::Versioned<serde_json::Value>>> {
+        self.0.claim(collection, filter, sort, patch).await
+    }
+    async fn drop_collection(&self, collection: &str) -> Result<()> {
+        self.0.drop_collection(collection).await
+    }
+}
+
+impl StorageBackend for BrokenCasOnly {
+    fn driver(&self) -> &'static str {
+        "broken_cas_only"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::CrossProcessCas)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        let storage = self.0.for_scope(scope)?;
+        Ok(crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(Arc::clone(storage.documents()))),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn cas_only_handles_pass_conditional_race_checks() {
+    let store = MemoryStorage::new();
+    run_shared(|| {
+        let backend = CasOnly(store.clone());
+        async move { backend }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cas_only_driver_that_ignores_preconditions_fails_conditional_race_checks() {
+    let persistent = MemoryStorage::new();
+    let outcome = tokio::spawn(async move {
+        run_shared(|| {
+            let backend = BrokenCasOnly(persistent.clone());
+            async move { backend }
+        })
+        .await;
+    })
+    .await
+    .expect_err("unconditional writes must fail CAS conformance");
+    let panic = outcome.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("exactly one racing version-guarded put must win"),
+        "expected the conditional race check to fail, got {message:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_driver_without_the_capability_gets_the_reopen_check_only() {
     let store = MemoryStorage::new();

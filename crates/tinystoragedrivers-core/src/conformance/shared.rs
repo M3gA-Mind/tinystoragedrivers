@@ -38,22 +38,27 @@ where
     let shared = first
         .capabilities()
         .contains(Capability::SharedAcrossProcesses);
-    if shared {
+    let cross_process_cas = first.capabilities().contains(Capability::CrossProcessCas);
+    if shared || cross_process_cas {
         let second = open().await;
         assert!(
             second
                 .capabilities()
-                .contains(Capability::SharedAcrossProcesses),
+                .contains(Capability::SharedAcrossProcesses)
+                == shared
+                && second.capabilities().contains(Capability::CrossProcessCas) == cross_process_cas,
             "independently opened backends report different capabilities"
         );
-        visibility(&handle(&first), &handle(&second)).await;
+        if shared {
+            visibility(&handle(&first), &handle(&second)).await;
+        }
         let mut racers = vec![first, second];
         while racers.len() < RACERS {
             racers.push(open().await);
         }
         let racers: Vec<ScopedStorage> = racers.iter().map(handle).collect();
-        lease_race(&racers).await;
-        version_races(&racers).await;
+        lease_race(&racers, shared).await;
+        version_races(&racers, shared).await;
     } else {
         drop(first);
     }
@@ -147,7 +152,7 @@ async fn visibility(a: &ScopedStorage, b: &ScopedStorage) {
 }
 
 /// Handles racing to acquire one lease get exactly one winner, at epoch 1.
-async fn lease_race(handles: &[ScopedStorage]) {
+async fn lease_race(handles: &[ScopedStorage], shared: bool) {
     ok(primitives::ensure(&handles[0]).await, "shared primitives");
     let owner = unique("shared_lease");
     for round in 0..ROUNDS {
@@ -180,23 +185,26 @@ async fn lease_race(handles: &[ScopedStorage]) {
         );
         let winner = &granted[0];
         assert_eq!(winner.epoch, 1, "a fresh lease starts at epoch 1");
-        // Every handle agrees on who holds it.
-        for storage in handles {
-            let seen = ok(
-                Leases::new(storage.documents()).current(&owner, &key).await,
-                "shared lease current",
-            );
-            assert_eq!(
-                seen.as_ref(),
-                Some(winner),
-                "handles disagree on the holder"
-            );
+        // General shared visibility is a separate promise from CAS. When it
+        // is declared, every handle must also observe the winning claim.
+        if shared {
+            for storage in handles {
+                let seen = ok(
+                    Leases::new(storage.documents()).current(&owner, &key).await,
+                    "shared lease current",
+                );
+                assert_eq!(
+                    seen.as_ref(),
+                    Some(winner),
+                    "handles disagree on the holder"
+                );
+            }
         }
     }
 }
 
 /// Version-guarded and create-only writes from racing handles: one winner.
-async fn version_races(handles: &[ScopedStorage]) {
+async fn version_races(handles: &[ScopedStorage], shared: bool) {
     let coll = unique("shared_cas");
     for round in 0..ROUNDS {
         let id = format!("d{round}");
@@ -243,14 +251,16 @@ async fn version_races(handles: &[ScopedStorage]) {
         );
         let (index, version) = winners[0];
         assert!(version > seed, "the winner's version moves on");
-        for storage in handles {
-            let read =
-                ok(storage.documents().get(&coll, &id).await, "cas re-read").expect("document");
-            assert_eq!(
-                (read.version, &read.doc["by"]),
-                (version, &json!(index)),
-                "every handle sees the winner's write"
-            );
+        if shared {
+            for storage in handles {
+                let read =
+                    ok(storage.documents().get(&coll, &id).await, "cas re-read").expect("document");
+                assert_eq!(
+                    (read.version, &read.doc["by"]),
+                    (version, &json!(index)),
+                    "every handle sees the winner's write"
+                );
+            }
         }
     }
 

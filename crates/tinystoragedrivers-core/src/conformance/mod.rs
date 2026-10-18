@@ -153,10 +153,13 @@ pub async fn run_with_process_capabilities(
 /// A driver that reports [`Capability::SharedAcrossProcesses`] must show that
 /// handles see each other's writes at once and arbitrate races between them:
 /// racing lease acquires have exactly one winner (at epoch 1 for a fresh
-/// key) and racing version-guarded puts do too. Every driver, with or
-/// without the capability, must show that a backend opened after another one
-/// was dropped reads what it wrote and continues its versions, offsets and
-/// lease epochs.
+/// key), and racing version-guarded puts do too. A driver that reports
+/// [`Capability::CrossProcessCas`] must also arbitrate racing claims,
+/// version-guarded puts and create-only puts, even if it does not promise
+/// immediate visibility across all storage ports. Drivers with neither
+/// capability get only the reopen check. Every driver, with or without either
+/// capability, must show that a backend opened after another one was dropped
+/// reads what it wrote and continues its versions, offsets and lease epochs.
 ///
 /// `open` is called many times; it must not clear the store.
 ///
