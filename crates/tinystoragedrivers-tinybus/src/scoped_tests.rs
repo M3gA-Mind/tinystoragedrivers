@@ -27,7 +27,7 @@ async fn service() -> (HostCallbackBinding, ScopedService) {
         scoped_storage_endpoints("/").unwrap()[0].path.as_str(),
         "/Documents"
     );
-    assert!(selectors(Object::Blobs).is_empty());
+    assert_eq!(selectors(Object::Blobs), [] as [&str; 0]);
     let endpoint = &endpoints[0];
     let service = ScopedService {
         server,
