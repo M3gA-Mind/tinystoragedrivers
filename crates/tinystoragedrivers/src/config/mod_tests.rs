@@ -160,11 +160,11 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
     );
     assert_eq!(
         redact_url("mongodb://host:27017/db?password=first@second"),
-        "mongodb://host:27017/db?password=***"
+        "mongodb://***"
     );
     assert_eq!(
         redact_url("mongodb://host/db:part@name?x=1"),
-        "mongodb://host/db:part@name?x=1"
+        "mongodb://host/db:***@name?x=1"
     );
     let StorageConfig::MongoDb { database, .. } = &slash else {
         panic!("expected a MongoDB config")
@@ -259,7 +259,7 @@ fn redaction_respects_uri_component_boundaries() {
         ),
         (
             "mongodb://host:27017/db?password=first?second@third&x=kept#frag",
-            "mongodb://host:27017/db?password=***&x=kept#frag",
+            "mongodb://***",
         ),
     ];
 
@@ -280,6 +280,31 @@ fn redaction_respects_uri_component_boundaries() {
                 "{input} leaked {sentinel}: {output}"
             );
         }
+    }
+}
+
+#[test]
+fn redaction_keeps_ambiguous_reserved_delimiters_inside_credentials_hidden() {
+    for input in [
+        "mongodb://app:123?secret@host/db",
+        "mongodb://app:123/secret@host/db",
+        "mongodb://app:123#secret@host/db",
+    ] {
+        assert_eq!(redact_url(input), "mongodb://app:***@host/db", "{input}");
+    }
+}
+
+#[test]
+fn redaction_does_not_let_secret_query_scrubbing_expose_ambiguous_userinfo() {
+    for input in [
+        "mongodb://app:123?password=suffix@host/db",
+        "mongodb://app:prefix?password=suffix@host/db",
+    ] {
+        let output = redact_url(input);
+        assert_eq!(output, "mongodb://***", "{input}");
+        assert!(!output.contains("123"), "{output}");
+        assert!(!output.contains("prefix"), "{output}");
+        assert!(!output.contains("suffix"), "{output}");
     }
 }
 

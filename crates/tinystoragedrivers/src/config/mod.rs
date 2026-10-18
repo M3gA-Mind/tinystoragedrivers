@@ -160,13 +160,17 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// Hide credentials in a storage connection URI before displaying it.
 ///
 /// The password and credential-valued query options are replaced with `***`.
-/// Malformed URI input is returned unchanged because no safe credential
-/// boundary can be inferred.
+/// If reserved delimiters make the userinfo boundary ambiguous, the URI is
+/// conservatively masked through the last `@` rather than preserving a
+/// potentially credential-bearing prefix.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return redact_unqualified_query(url);
     };
+    if secret_query_value_overlaps_ambiguous_userinfo(rest) {
+        return format!("{scheme}://***");
+    }
     let (without_fragment, fragment) = split_fragment(rest);
     let (before_query, query) = match without_fragment.split_once('?') {
         Some((before, query)) => (before, Some(query)),
@@ -203,7 +207,59 @@ pub fn redact_url(url: &str) -> String {
         output.push_str(&redact_query_options(query));
     }
     output.push_str(fragment);
-    output
+    redact_ambiguous_delimited_userinfo(&output).unwrap_or(output)
+}
+
+/// Query parsing and unescaped userinfo parsing can claim the same original
+/// bytes. If a recognized secret option contains an `@` beyond an authority
+/// delimiter and a colon could start userinfo, hide the whole URI rather than
+/// allowing either interpretation to expose the other's prefix or suffix.
+fn secret_query_value_overlaps_ambiguous_userinfo(rest: &str) -> bool {
+    let Some(delimiter) = rest.find(['/', '?', '#']) else {
+        return false;
+    };
+    if rest[..delimiter].contains('@') {
+        return false;
+    }
+    let Some(at) = rest[delimiter + 1..]
+        .rfind('@')
+        .map(|at| at + delimiter + 1)
+    else {
+        return false;
+    };
+    if !rest[..at].contains(':') {
+        return false;
+    }
+    let (before_fragment, _) = split_fragment(rest);
+    let Some(query) = before_fragment.split_once('?').map(|(_, query)| query) else {
+        return false;
+    };
+    query.split('&').any(|option| {
+        let Some((key, value)) = option.split_once('=') else {
+            return false;
+        };
+        SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) && value.contains('@')
+    })
+}
+
+/// Keep the historical conservative redaction floor for an unescaped userinfo
+/// password containing `/`, `?`, or `#`: once those delimiters appear before
+/// an `@`, the string is indistinguishable from a URI with a host/path/query.
+/// Recognized query secrets have already been removed from `url`, so their
+/// value bytes cannot move this boundary or be exposed by it.
+fn redact_ambiguous_delimited_userinfo(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority_end = rest.find(['/', '?', '#'])?;
+    if rest[..authority_end].contains('@') {
+        return None;
+    }
+    let at = rest[authority_end + 1..].rfind('@')? + authority_end + 1;
+    let colon = rest[..at].find(':')?;
+    Some(format!(
+        "{scheme}://{}:***@{}",
+        &rest[..colon],
+        &rest[at + 1..]
+    ))
 }
 
 /// Return a URI fragment, including its marker, without interpreting any of
