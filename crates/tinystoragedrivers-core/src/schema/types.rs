@@ -170,11 +170,6 @@ impl Step {
     pub fn source_prefix(self, prefix: &'static str) -> Self {
         self.source(prefix)
     }
-
-    /// The collection a document step reads.
-    pub(super) fn source_collection(&self) -> &'static str {
-        self.source.unwrap_or(self.item)
-    }
 }
 
 impl fmt::Debug for Step {

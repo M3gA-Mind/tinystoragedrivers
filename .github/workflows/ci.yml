@@ -164,7 +164,7 @@ jobs:
       # All-target checks unify dev features and hide a missing tokio/macros
       # dependency in testkit. Keep the library-only feature build independent.
       - name: Check core feature closure without dev dependency unification
-        run: cargo check -p tinystoragedrivers-core --lib --all-features
+        run: cargo check -p tinystoragedrivers-core --lib --all-features --locked
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

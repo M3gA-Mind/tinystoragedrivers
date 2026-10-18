@@ -59,14 +59,19 @@
 //! A stream's [`SealPolicy`](crate::SealPolicy) is applied by [`Registry::maintain`].
 
 mod compose;
+mod executor;
+mod metadata;
 mod migrations;
 mod policy;
+mod prepared;
 mod runner;
 mod runner_blobs;
 mod runner_streams;
 mod types;
 
-pub use compose::Registry;
+pub use compose::{ComposedRegistry, Registry};
+pub use executor::{BoxFuture, TransformExecutor};
+pub use metadata::{SchemaMetadata, StepExecution, StepMetadata};
 pub use migrations::{MIGRATIONS_COLLECTION, Migrations, Progress};
 pub use policy::PolicyReport;
 pub use runner::{MigrateOptions, MigrationReport, StepReport};
@@ -80,3 +85,7 @@ pub use tinystoragedrivers_schema::{
     StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
     TransformError, TransformErrorKind, TransformKind, TransformResult,
 };
+
+#[cfg(test)]
+#[path = "executor_tests.rs"]
+mod executor_tests;
