@@ -369,9 +369,12 @@ impl Leases {
     /// 2. live, same holder and `held_epoch == Some(record.epoch)`:
     ///    re-entrant, the epoch stays, clean;
     /// 3. released: epoch + 1, clean;
-    /// 4. same holder otherwise (a live record the caller does not hold:
+    /// 4. live, same holder, `held_epoch == None` (the caller holds nothing:
     ///    the previous incarnation died before it expired): epoch + 1,
-    ///    unclean, taken over at once, fencing the old incarnation out;
+    ///    unclean, taken over at once, fencing the old incarnation out. A
+    ///    caller that passes a `held_epoch` which no longer matches is a
+    ///    stale actor and gets [`Acquisition::Held`] instead, and so does
+    ///    a call that lost a race to another acquire of the same holder;
     /// 5. expired (`now >= expires_ms`): epoch + 1, unclean;
     /// 6. otherwise [`Acquisition::Held`] with the live record.
     ///
@@ -393,31 +396,42 @@ impl Leases {
         let id = id(owner, key)?;
         let mut unclean = false;
         let mut seen: Option<Body> = None;
+        // The record as the first attempt read it. A retry that finds the
+        // record changed means another acquirer won the swap, so it is
+        // judged as a competitor's write, never as a dead incarnation.
+        let mut first: Option<Option<Body>> = None;
         let stored = self
             .repo
             .update(&id, |current| {
                 let (now, expires_ms) = self.deadline(ttl_ms)?;
                 unclean = false;
                 seen = None;
+                let raced = match &first {
+                    None => {
+                        first = Some(current.clone());
+                        false
+                    }
+                    Some(initial) => *initial != current,
+                };
                 let (epoch, was_unclean) = match &current {
                     None => (1, false),
                     Some(found) => {
                         let live = found.expires_ms > now && !found.released;
                         if live && found.holder == holder && held_epoch == Some(found.epoch) {
                             (found.epoch, false)
+                        } else if live && (found.holder != holder || raced || held_epoch.is_some())
+                        {
+                            // Another holder, a competing call of the same
+                            // holder that just won, or a caller proving it
+                            // holds a stale epoch: the live record stands.
+                            seen.clone_from(&current);
+                            return Ok(None);
                         } else {
                             let next = found
                                 .epoch
                                 .checked_add(1)
                                 .ok_or_else(|| StorageError::backend("lease epoch overflow"))?;
-                            if found.released {
-                                (next, false)
-                            } else if found.holder == holder || !live {
-                                (next, true)
-                            } else {
-                                seen.clone_from(&current);
-                                return Ok(None);
-                            }
+                            (next, !found.released)
                         }
                     }
                 };

@@ -532,3 +532,87 @@ async fn a_compacted_tenure_is_fenced_out() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Fenced);
 }
+
+#[tokio::test]
+async fn a_stale_held_epoch_cannot_evict_the_live_replacement() {
+    let rig = rig();
+    granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    rig.now.store(1_010, Ordering::SeqCst);
+    let (replacement, _) = granted(rig.leases.acquire_with(request("a", None)).await.unwrap());
+    assert_eq!(replacement.epoch, 2);
+    // A paused older incarnation still believes it holds epoch 1.
+    match rig
+        .leases
+        .acquire_with(request("a", Some(1)))
+        .await
+        .unwrap()
+    {
+        Acquisition::Held(record) => assert_eq!(record.epoch, 2),
+        other @ Acquisition::Granted { .. } => panic!("a stale actor must not win: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_same_holder_call_that_loses_the_swap_is_refused_not_re_taken() {
+    use std::sync::atomic::AtomicBool;
+
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let rival = Leases::new(storage.documents()).with_clock(Arc::new(|| 1_000));
+    let injected = Arc::new(AtomicBool::new(false));
+    let handle = tokio::runtime::Handle::current();
+    let leases = Leases::new(storage.documents())
+        .with_retry(RetryPolicy::immediate())
+        .with_clock({
+            let (rival, injected) = (rival.clone(), Arc::clone(&injected));
+            Arc::new(move || {
+                // On the first attempt, after it read "absent", a competing
+                // call of the same holder lands its write.
+                if !injected.swap(true, Ordering::SeqCst) {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(rival.acquire_with(request("a", None)))
+                    })
+                    .unwrap();
+                }
+                1_000
+            })
+        });
+    match leases.acquire_with(request("a", None)).await.unwrap() {
+        Acquisition::Held(record) => assert_eq!((record.holder.as_str(), record.epoch), ("a", 1)),
+        other @ Acquisition::Granted { .. } => panic!("the loser must not re-take: {other:?}"),
+    }
+    let stored = rival.inspect("host", "p1").await.unwrap().unwrap();
+    assert_eq!(stored.epoch, 1, "the winner's grant stands");
+}
+
+#[test]
+fn the_body_wire_format_is_pinned() {
+    let full = Body {
+        holder: "a".into(),
+        epoch: 3,
+        expires_ms: 9,
+        endpoint: Some("http://n".into()),
+        released: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&full).unwrap(),
+        serde_json::json!({
+            "holder": "a", "epoch": 3, "expires_ms": 9,
+            "endpoint": "http://n", "released": true
+        })
+    );
+    // Optional fields are absent, not null or false, when unused.
+    let bare = Body {
+        endpoint: None,
+        released: false,
+        ..full
+    };
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap(),
+        serde_json::json!({"holder": "a", "epoch": 3, "expires_ms": 9})
+    );
+    // A record written before these fields existed still decodes.
+    let legacy: Body =
+        serde_json::from_value(serde_json::json!({"holder": "a", "epoch": 3, "expires_ms": 9}))
+            .unwrap();
+    assert_eq!(legacy, bare);
+}
