@@ -3,6 +3,20 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tinystoragedrivers_schema::*;
 
+#[path = "fixtures/owner_examples.rs"]
+mod owner_examples;
+
+#[test]
+fn all_seven_pre_port_owner_declarations_match_complete_frozen_wire_values() {
+    let expected: Value = serde_json::from_str(include_str!("fixtures/seven_owners.json")).unwrap();
+    let declarations = owner_examples::all();
+    assert_eq!(serde_json::to_value(&declarations).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_value::<Vec<SchemaDeclaration>>(expected).unwrap(),
+        declarations
+    );
+}
+
 fn roundtrip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     value: T,
 ) -> serde_json::Result<Value> {
