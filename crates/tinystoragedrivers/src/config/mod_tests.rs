@@ -147,6 +147,10 @@ async fn opens_a_file_url_with_the_file_feature() {
 fn redaction_survives_unencoded_credentials_and_secret_options() {
     let slash = StorageConfig::parse("mongodb://app:p/a@ss@host/db").unwrap();
     assert_eq!(slash.to_string(), "mongodb://app:***@host/db");
+    assert_eq!(
+        redact_url("mongodb://app:prefix&password=suffix@host/db"),
+        "mongodb://app:***@host/db"
+    );
     let StorageConfig::MongoDb { database, .. } = &slash else {
         panic!("expected a MongoDB config")
     };
@@ -182,6 +186,15 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         redact_url("mongodb://h/db?password=first?second&authMechanismProperties=token&x=1#frag"),
         "mongodb://h/db?password=***&authMechanismProperties=***&x=1#frag"
     );
+    assert_eq!(
+        redact_url(
+            "mongodb+srv://app:p@ss@h/db?password=first?second&authMechanismProperties=token#frag"
+        ),
+        "mongodb+srv://app:***@h/db?password=***&authMechanismProperties=***#frag"
+    );
+    let ambiguous = redact_url("mongodb://app:credential@host/db?appName=a:b@c&password=second");
+    assert!(!ambiguous.contains("credential"), "{ambiguous}");
+    assert!(!ambiguous.contains("second"), "{ambiguous}");
 }
 
 #[cfg(feature = "sqlite")]

@@ -192,7 +192,8 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// boundary can be inferred.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
-    let sanitized = redact_secret_options(url);
+    let userinfo_sanitized = redact_userinfo_password(url);
+    let sanitized = redact_secret_options(&userinfo_sanitized);
     let Some(parts) = split_uri(&sanitized, Boundary::Anywhere) else {
         return sanitized;
     };
@@ -215,6 +216,22 @@ pub fn redact_url(url: &str) -> String {
         out.push_str(query);
     }
     out
+}
+
+/// Redact userinfo before looking for query separators. Reserved characters
+/// such as `&` and `=` are legal in an unescaped password, so they cannot
+/// identify query options until the actual `@` boundary is handled.
+fn redact_userinfo_password(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let Some(at) = rest.rfind('@') else {
+        return url.to_owned();
+    };
+    let Some(colon) = rest[..at].find(':') else {
+        return url.to_owned();
+    };
+    format!("{scheme}://{}:***{}", &rest[..colon], &rest[at..])
 }
 
 /// Mask secret options before parsing userinfo. A secret value extends through
