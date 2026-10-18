@@ -155,6 +155,9 @@ jobs:
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
 
+      - name: Test release version and proof lockfile updates
+        run: python3 .github/scripts/release_version_tests.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
