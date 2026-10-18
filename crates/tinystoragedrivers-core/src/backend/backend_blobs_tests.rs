@@ -295,21 +295,21 @@ async fn fresh_generation_handles_read_as_empty_without_claiming_a_namespace() {
     assert!(fresh.head("missing").await.unwrap().is_none());
     assert!(fresh.get_range("missing", 0..2).await.unwrap().is_none());
     assert!(fresh.get_stream("missing").await.unwrap().is_none());
-    assert!(fresh.list("").await.unwrap().is_empty());
+    assert_eq!(fresh.list("").await.unwrap(), []);
     assert!(!fresh.delete("missing").await.unwrap());
     assert_eq!(fresh.sweep_expired().await.unwrap(), 0);
 
     let digest = scope_digest(&scope);
     let physical = Scope::new(format!("__tsd_composite_blob_generation/{digest}/1")).unwrap();
-    assert!(
+    assert_eq!(
         storage
             .for_scope(&physical)
             .unwrap()
             .blobs()
             .list("")
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        []
     );
     assert!(
         storage

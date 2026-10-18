@@ -324,7 +324,7 @@ async fn generation_admitted_blobs_forward_every_blob_operation() {
     assert!(store.get_stream("plain").await.unwrap().is_some());
     assert_eq!(store.get_range("plain", 0..1).await.unwrap().unwrap(), [1]);
     assert!(store.head("plain").await.unwrap().is_some());
-    assert!(!store.list("").await.unwrap().is_empty());
+    assert_ne!(store.list("").await.unwrap(), []);
     let _ = store.presign_get("plain", Duration::from_secs(5)).await;
     let _ = store.presign_put("presigned", Duration::from_secs(5)).await;
     let _ = store.sweep_expired().await;
@@ -339,7 +339,7 @@ async fn generation_admitted_blobs_forward_every_blob_operation() {
         )
         .await
         .unwrap();
-    assert!(!store.list_dir("tree").await.unwrap().is_empty());
+    assert_ne!(store.list_dir("tree").await.unwrap(), []);
     assert_eq!(store.delete_tree("tree").await.unwrap(), 1);
     assert!(store.delete("plain").await.unwrap());
 }
