@@ -158,6 +158,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Prove isolated schema dependency closure and negative fixture
+        run: python3 scripts/check-schema-dependencies.py --negative-test
+
+      # All-target checks unify dev features and hide a missing tokio/macros
+      # dependency in testkit. Keep the library-only feature build independent.
+      - name: Check core feature closure without dev dependency unification
+        run: cargo check -p tinystoragedrivers-core --lib --all-features --locked
+
+      - name: Check migration delivery without dev or testkit features
+        run: cargo check -p tinystoragedrivers-core --no-default-features --features migration-delivery --lib --locked
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
