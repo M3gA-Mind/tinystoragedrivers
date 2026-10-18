@@ -178,14 +178,9 @@ async fn backend_enumerates_and_purges_only_the_requested_scope() {
         [sibling.clone(), target.clone()]
     );
     backend.purge_scope(&target).await.unwrap();
-    assert!(
-        backend
-            .for_scope(&target)
-            .unwrap()
-            .list("")
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        backend.for_scope(&target).unwrap().list("").await.unwrap(),
+        [] as [tinystoragedrivers_core::BlobMeta; 0]
     );
     assert_eq!(
         backend
@@ -288,7 +283,10 @@ async fn purge_removes_only_one_physical_generation_and_enumerates_both_roots() 
         .await
         .unwrap();
 
-    assert!(legacy.list("").await.unwrap().is_empty());
+    assert_eq!(
+        legacy.list("").await.unwrap(),
+        [] as [tinystoragedrivers_core::BlobMeta; 0]
+    );
     assert_eq!(next.get("g/1/foo").await.unwrap().unwrap().bytes, [2]);
     assert_eq!(backend.scopes("u:generation-").await.unwrap(), [scope]);
 }
@@ -304,7 +302,10 @@ async fn scope_enumeration_ignores_malformed_utf8_hex_segments() {
         .await
         .unwrap();
     let backend = S3Storage::with_store(objects, None, "test").unwrap();
-    assert!(backend.scopes("").await.unwrap().is_empty());
+    assert_eq!(
+        backend.scopes("").await.unwrap(),
+        [] as [tinystoragedrivers_core::Scope; 0]
+    );
 }
 
 #[tokio::test]
