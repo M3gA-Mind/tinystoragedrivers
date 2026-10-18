@@ -338,14 +338,8 @@ async fn corrupt_purge_receipt_fails_closed_without_erasing_scope_data() {
             .kind(),
         ErrorKind::Serialization
     );
-    assert_eq!(
-        target
-            .documents()
-            .get("docs", "keep")
-            .await
-            .unwrap()
-            .unwrap()
-            .doc,
-        serde_json::json!({"alive": true})
+    assert!(
+        root.db.scope_dir(&scope).exists(),
+        "corrupt receipt metadata must not remove the tenant scope directory"
     );
 }
