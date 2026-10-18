@@ -93,7 +93,7 @@ impl StorageConfig {
     }
 
     fn parse_mongo(url: &str) -> Result<Self> {
-        let path = split_uri(url, Boundary::BeforeQuery).map_or("", |parts| parts.path);
+        let path = split_uri(url).map_or("", |parts| parts.path);
         let database = path.split('/').next().unwrap_or_default();
         if database.is_empty() {
             return Err(StorageError::invalid_input(format!(
@@ -131,50 +131,22 @@ fn non_empty_path(path: &str, driver: &str) -> Result<PathBuf> {
 
 /// The pieces of `scheme://[userinfo@]hosts[/path][?query]`.
 struct UriParts<'a> {
-    scheme: &'a str,
-    userinfo: Option<&'a str>,
-    hosts: &'a str,
     path: &'a str,
-    query: Option<&'a str>,
 }
 
 /// Split a connection URI without trusting the credentials to be
-/// percent-encoded: the userinfo ends at the *last* `@` (before the query, or
-/// anywhere, per `boundary`), so a stray `/` or `@` inside a password cannot
-/// move the boundary.
-fn split_uri(url: &str, boundary: Boundary) -> Option<UriParts<'_>> {
-    let (scheme, rest) = url.split_once("://")?;
-    let at = match boundary {
-        Boundary::BeforeQuery => rest.split('?').next().and_then(|head| head.rfind('@')),
-        Boundary::Anywhere => rest.rfind('@'),
+/// percent-encoded: the userinfo ends at the last `@` before the query, so a
+/// stray `/` or `@` inside a password cannot move the boundary.
+fn split_uri(url: &str) -> Option<UriParts<'_>> {
+    let (_, rest) = url.split_once("://")?;
+    let at = rest.split('?').next().and_then(|head| head.rfind('@'));
+    let tail = match at {
+        Some(at) => rest.get(at + 1..).unwrap_or_default(),
+        None => rest,
     };
-    let (userinfo, tail) = match at {
-        Some(at) => (rest.get(..at), rest.get(at + 1..).unwrap_or_default()),
-        None => (None, rest),
-    };
-    let (before_query, query) = match tail.split_once('?') {
-        Some((head, query)) => (head, Some(query)),
-        None => (tail, None),
-    };
-    let (hosts, path) = before_query.split_once('/').unwrap_or((before_query, ""));
-    Some(UriParts {
-        scheme,
-        userinfo,
-        hosts,
-        path,
-        query,
-    })
-}
-
-/// Where the userinfo of a connection URI may end.
-#[derive(Clone, Copy)]
-enum Boundary {
-    /// At the last `@` before the query: the parse of a well-formed URI,
-    /// where an `@` in a query value (`appName=a@b`) stays in the query.
-    BeforeQuery,
-    /// At the last `@` anywhere: for redaction, so an unencoded `?`, `/` or
-    /// `@` in a password can only make more text hidden, never less.
-    Anywhere,
+    let before_query = tail.split('?').next().unwrap_or(tail);
+    let (_, path) = before_query.split_once('/').unwrap_or((before_query, ""));
+    Some(UriParts { path })
 }
 
 /// Query options whose values are credentials (AWS session tokens ride in
@@ -192,81 +164,120 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// boundary can be inferred.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
-    let userinfo_sanitized = redact_userinfo_password(url);
-    let sanitized = redact_secret_options(&userinfo_sanitized);
-    let Some(parts) = split_uri(&sanitized, Boundary::Anywhere) else {
-        return sanitized;
-    };
-    let mut out = format!("{}://", parts.scheme);
-    if let Some(userinfo) = parts.userinfo {
-        let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
-        out.push_str(user);
-        if userinfo.contains(':') {
-            out.push_str(":***");
-        }
-        out.push('@');
-    }
-    out.push_str(parts.hosts);
-    if !parts.path.is_empty() || parts.query.is_some() {
-        out.push('/');
-        out.push_str(parts.path);
-    }
-    if let Some(query) = parts.query {
-        out.push('?');
-        out.push_str(query);
-    }
-    out
-}
-
-/// Redact userinfo before looking for query separators. Reserved characters
-/// such as `&` and `=` are legal in an unescaped password, so they cannot
-/// identify query options until the actual `@` boundary is handled.
-fn redact_userinfo_password(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
+        return redact_unqualified_query(url);
     };
-    let Some(at) = rest.rfind('@') else {
-        return url.to_owned();
+    let (without_fragment, fragment) = split_fragment(rest);
+    let (before_query, query) = match without_fragment.split_once('?') {
+        Some((before, query)) => (before, Some(query)),
+        None => (without_fragment, None),
     };
-    let Some(colon) = rest[..at].find(':') else {
-        return url.to_owned();
+    let (authority, path) = match before_query.find('/') {
+        Some(slash) => (&before_query[..slash], &before_query[slash..]),
+        None => (before_query, ""),
     };
-    format!("{scheme}://{}:***{}", &rest[..colon], &rest[at..])
+    let (userinfo, host) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(userinfo, host)| (Some(userinfo), host));
+
+    // If the authority cannot be separated safely (for example, an unescaped
+    // '?' in userinfo makes a nonnumeric port), hide the whole URI. Never let
+    // query or path delimiters retroactively create a userinfo boundary.
+    if !valid_authority(host) {
+        return format!("{scheme}://***");
+    }
+
+    let mut output = format!("{scheme}://");
+    if let Some(userinfo) = userinfo {
+        output.push_str(&redact_userinfo(userinfo));
+        output.push('@');
+    }
+    output.push_str(host);
+    if path.is_empty() && query.is_some() {
+        output.push('/');
+    } else {
+        output.push_str(path);
+    }
+    if let Some(query) = query {
+        output.push('?');
+        output.push_str(&redact_query_options(query));
+    }
+    output.push_str(fragment);
+    output
 }
 
-/// Mask secret options before parsing userinfo. A secret value extends through
-/// the next `&` or fragment boundary; `?` and `@` are ordinary value bytes.
-fn redact_secret_options(url: &str) -> String {
-    let mut output = String::with_capacity(url.len());
-    let mut cursor = 0;
-    while let Some(relative) = url[cursor..].find(['?', '&']) {
-        let delimiter = cursor + relative;
-        if url[cursor..delimiter].contains('#') {
-            break;
-        }
-        output.push_str(&url[cursor..=delimiter]);
-        let option_start = delimiter + 1;
-        let option_boundary = url[option_start..]
-            .find(['?', '&', '#'])
-            .map_or(url.len(), |index| option_start + index);
-        let equals = url[option_start..option_boundary]
-            .find('=')
-            .map(|index| option_start + index);
-        if let Some(equals) = equals {
-            let key = &url[option_start..equals];
-            if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) {
-                output.push_str(key);
-                output.push_str("=***");
-                cursor = url[equals + 1..]
-                    .find(['&', '#'])
-                    .map_or(url.len(), |index| equals + 1 + index);
-                continue;
-            }
-        }
-        cursor = option_start;
+/// Return a URI fragment, including its marker, without interpreting any of
+/// its contents as authority or query data.
+fn split_fragment(value: &str) -> (&str, &str) {
+    value
+        .find('#')
+        .map_or((value, ""), |marker| (&value[..marker], &value[marker..]))
+}
+
+/// A host authority may contain a hostname and optional numeric port, or a
+/// bracketed IPv6 address with an optional numeric port.
+fn valid_authority(authority: &str) -> bool {
+    !authority.is_empty() && authority.split(',').all(valid_host_port)
+}
+
+fn valid_host_port(authority: &str) -> bool {
+    if let Some(address) = authority.strip_prefix('[') {
+        let Some(end) = address.find(']') else {
+            return false;
+        };
+        let host = &address[..end];
+        let port = &address[end + 1..];
+        return !host.is_empty()
+            && (port.is_empty()
+                || port.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+                }));
     }
-    output.push_str(&url[cursor..]);
-    output
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) => {
+            if host.contains(':') || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            host
+        }
+        None => authority,
+    };
+    !host.is_empty()
+        && !host
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || b"@/?#&=".contains(&byte))
+}
+
+fn redact_userinfo(userinfo: &str) -> String {
+    match userinfo.split_once(':') {
+        Some((username, _)) => format!("{username}:***"),
+        None => userinfo.to_owned(),
+    }
+}
+
+/// Mask credential-valued query options. `?` and `@` are ordinary bytes in a
+/// query value, while `&` starts the next option and `#` ended the query above.
+fn redact_query_options(query: &str) -> String {
+    query
+        .split('&')
+        .map(|option| match option.split_once('=') {
+            Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
+                format!("{key}=***")
+            }
+            _ => option.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn redact_unqualified_query(url: &str) -> String {
+    let (without_fragment, fragment) = split_fragment(url);
+    match without_fragment.split_once('?') {
+        Some((prefix, query)) => {
+            format!("{prefix}?{}{fragment}", redact_query_options(query))
+        }
+        None => url.to_owned(),
+    }
 }
 
 impl fmt::Display for StorageConfig {

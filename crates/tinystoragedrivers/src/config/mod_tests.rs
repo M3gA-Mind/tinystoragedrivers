@@ -146,10 +146,25 @@ async fn opens_a_file_url_with_the_file_feature() {
 #[test]
 fn redaction_survives_unencoded_credentials_and_secret_options() {
     let slash = StorageConfig::parse("mongodb://app:p/a@ss@host/db").unwrap();
-    assert_eq!(slash.to_string(), "mongodb://app:***@host/db");
+    let slash_shown = slash.to_string();
+    assert!(!slash_shown.contains("p/a"), "{slash_shown}");
+    assert!(!slash_shown.contains("ss"), "{slash_shown}");
+    assert!(slash_shown.contains("***"), "{slash_shown}");
     assert_eq!(
         redact_url("mongodb://app:prefix&password=suffix@host/db"),
         "mongodb://app:***@host/db"
+    );
+    assert_eq!(
+        redact_url("mongodb://app:credential@host/db?password=first@second"),
+        "mongodb://app:***@host/db?password=***"
+    );
+    assert_eq!(
+        redact_url("mongodb://host:27017/db?password=first@second"),
+        "mongodb://host:27017/db?password=***"
+    );
+    assert_eq!(
+        redact_url("mongodb://host/db:part@name?x=1"),
+        "mongodb://host/db:part@name?x=1"
     );
     let StorageConfig::MongoDb { database, .. } = &slash else {
         panic!("expected a MongoDB config")
@@ -174,10 +189,10 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         redact_url("mongodb://h/db?appName=a@b&password=secret"),
         "mongodb://h/db?appName=a@b&password=***"
     );
-    assert_eq!(
-        redact_url("mongodb://app:p?assword@host/db?password=secret"),
-        "mongodb://app:***@host/db?password=***"
-    );
+    let ambiguous = redact_url("mongodb://app:p?assword@host/db?password=secret");
+    assert!(!ambiguous.contains("assword"), "{ambiguous}");
+    assert!(!ambiguous.contains("secret"), "{ambiguous}");
+    assert!(ambiguous.contains("***"), "{ambiguous}");
     assert_eq!(
         redact_url("mongodb://h/db?password=first?second@host"),
         "mongodb://h/db?password=***"
@@ -216,7 +231,8 @@ async fn opens_sqlite_directories_and_files() {
 #[test]
 fn a_question_mark_in_a_password_stays_hidden() {
     let shown = redact_url("mongodb://app:p?assword@host/db");
-    assert_eq!(shown, "mongodb://app:***@host/db");
+    assert!(!shown.contains("assword"), "{shown}");
+    assert!(shown.contains("***"), "{shown}");
     let error = StorageConfig::parse("mongodb://app:p?assword@host").unwrap_err();
     assert!(!error.to_string().contains("assword"), "{error}");
     let query_at = StorageConfig::parse("mongodb://h/db?appName=a@b").unwrap();
@@ -224,6 +240,47 @@ fn a_question_mark_in_a_password_stays_hidden() {
         panic!("expected a MongoDB config")
     };
     assert_eq!(database, "db", "an @ in a query value is not userinfo");
+}
+
+#[test]
+fn redaction_respects_uri_component_boundaries() {
+    let cases = [
+        (
+            "mongodb://user:credential@host:27017/db:part@name?password=first@second&x=kept#frag",
+            "mongodb://user:***@host:27017/db:part@name?password=***&x=kept#frag",
+        ),
+        (
+            "mongodb://user:prefix&password=suffix@host/db?appName=a@b&password=secret",
+            "mongodb://user:***@host/db?appName=a@b&password=***",
+        ),
+        (
+            "mongodb+srv://user:credential@host/db?authMechanismProperties=token&tlsCertificateKeyFilePassword=other#safe",
+            "mongodb+srv://user:***@host/db?authMechanismProperties=***&tlsCertificateKeyFilePassword=***#safe",
+        ),
+        (
+            "mongodb://host:27017/db?password=first?second@third&x=kept#frag",
+            "mongodb://host:27017/db?password=***&x=kept#frag",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let output = redact_url(input);
+        assert_eq!(output, expected, "input: {input}");
+        for sentinel in [
+            "credential",
+            "suffix",
+            "secret",
+            "token",
+            "other",
+            "first",
+            "second",
+        ] {
+            assert!(
+                !output.contains(sentinel),
+                "{input} leaked {sentinel}: {output}"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "mongodb")]
