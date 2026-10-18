@@ -46,6 +46,7 @@
 //!
 //! # Features
 //!
+//! - `migration-delivery`: confidential fragmented external transforms, without a bus dependency.
 //! - `blocking`: [`Blocking`], a bridge for synchronous callers.
 //! - `testkit`: the [`conformance`] suite drivers run in their tests.
 //! - `polling-watch`: explicit conservative `PollingWatch` invalidations;
@@ -125,7 +126,17 @@ pub use watch::{
 /// Pure schema declarations and transformation wire contracts.
 pub use tinystoragedrivers_schema as declarations;
 pub use tinystoragedrivers_schema::{
-    BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest, SchemaDeclaration,
-    StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
-    TransformError, TransformErrorKind, TransformKind, TransformResult,
+    BlobTargetRequest, BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest,
+    ExchangeErrorKind, MIGRATION_CHUNK_BYTES, MIGRATION_EXCHANGE_VERSION, MigrationExchangeReply,
+    MigrationExchangeRequest, MigrationPayload, MigrationPayloadReply, SchemaDeclaration,
+    StepDeclaration, StreamEntriesRequest, StreamMapMode, StreamPlan, StreamPlanRequest,
+    StreamTransformOutput, StreamTransformRequest, TransformDescriptor, TransformError,
+    TransformErrorKind, TransformKind, TransformResult,
+};
+
+#[cfg(feature = "migration-delivery")]
+pub use schema::delivery::{
+    CleanupGuard, DEFAULT_MAX_IN_FLIGHT, ExchangeClock, IDLE_TTL_MS, MigrationDeliveryClient,
+    MigrationExchangeServer, MigrationPayloadHandler, MigrationTransport, PeerIdentity,
+    TransferIds, TransformFuture,
 };

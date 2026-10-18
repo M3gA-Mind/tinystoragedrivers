@@ -18,7 +18,9 @@ mod capabilities;
 mod collection;
 mod declaration;
 mod error;
+mod migration;
 mod record;
+pub use migration::*;
 mod seal;
 mod transform;
 

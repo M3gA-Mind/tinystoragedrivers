@@ -25,3 +25,6 @@ See [`storage-ports.md`](storage-ports.md),
 [`write-fencing.md`](write-fencing.md) and
 [`generation-admission-errors.md`](generation-admission-errors.md) and
 [`schema-v2.md`](schema-v2.md), the uniform record schema.
+
+[Confidential migration delivery](migration-delivery.md) preserves full-payload
+migration semantics through bounded transport frames.

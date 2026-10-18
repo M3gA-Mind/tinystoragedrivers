@@ -21,3 +21,10 @@ Native document invalidation is optional through `DocumentStore::watch` and
 are conservative, payload-free reread hints. Select the `polling-watch` feature
 explicitly for `PollingWatch` over an admitted handle; it does not promise native
 history or add Watch support to a backend. See [the watch module](src/watch/README.md).
+
+The optional `migration-delivery` feature exports `MigrationDeliveryClient` and
+`MigrationExchangeServer` for confidential fragmented external transforms. It
+keeps storage writes in the existing runner and introduces no bus dependency.
+Adapters must retain a periodic cleanup guard and supply actual contextual peer
+identity and a confidential transport; see the
+[module README](src/schema/delivery/README.md).

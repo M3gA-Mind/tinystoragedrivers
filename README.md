@@ -46,6 +46,13 @@ Owners needing only declarations and wire contracts can use
 linking the storage runtime. Core and the facade reexport these shared types
 while keeping their existing executable schema and migration APIs.
 
+The optional `migration-delivery` feature adds transport-independent confidential
+fragmentation for external migration executors. Blob bytes and identity-stream
+entries stay local; document and independent-entry requests/replies use bounded
+frames without a new total size ceiling. See the
+[delivery contract](docs/specs/migration-delivery.md) and
+[runtime adapter requirements](crates/tinystoragedrivers-core/src/schema/delivery/README.md).
+
 Since v1.0.0, every record follows one uniform schema
 ([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
 

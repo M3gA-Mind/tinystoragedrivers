@@ -58,6 +58,9 @@
 //! the host, which records completion with [`Migrations::mark_done`].
 //! A stream's [`SealPolicy`](crate::SealPolicy) is applied by [`Registry::maintain`].
 
+#[cfg(feature = "migration-delivery")]
+pub mod delivery;
+
 mod compose;
 mod executor;
 mod metadata;
@@ -81,9 +84,12 @@ pub use types::{
 };
 
 pub use tinystoragedrivers_schema::{
-    BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest, SchemaDeclaration,
-    StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
-    TransformError, TransformErrorKind, TransformKind, TransformResult,
+    BlobTargetRequest, BlobTransformOutput, BlobTransformRequest, DocumentsTransformRequest,
+    ExchangeErrorKind, MIGRATION_CHUNK_BYTES, MIGRATION_EXCHANGE_VERSION, MigrationExchangeReply,
+    MigrationExchangeRequest, MigrationPayload, MigrationPayloadReply, SchemaDeclaration,
+    StepDeclaration, StreamEntriesRequest, StreamMapMode, StreamPlan, StreamPlanRequest,
+    StreamTransformOutput, StreamTransformRequest, TransformDescriptor, TransformError,
+    TransformErrorKind, TransformKind, TransformResult,
 };
 
 #[cfg(test)]

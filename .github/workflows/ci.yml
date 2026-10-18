@@ -166,6 +166,9 @@ jobs:
       - name: Check core feature closure without dev dependency unification
         run: cargo check -p tinystoragedrivers-core --lib --all-features --locked
 
+      - name: Check migration delivery without dev or testkit features
+        run: cargo check -p tinystoragedrivers-core --no-default-features --features migration-delivery --lib --locked
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
