@@ -228,14 +228,34 @@ tests. `conformance::run` therefore also covers, on every driver:
   re-run (drivers with `RecordMetadata`).
 - **Holder fences**: see [`write-fencing.md`](write-fencing.md).
 
-`conformance::run_shared(open)` takes a closure that opens independent backends
-on one store. A driver that reports `Capability::SharedAcrossProcesses`
-(SQLite and MongoDB) must show that handles see each other's writes at once,
-that racing lease acquires across handles have exactly one winner at epoch 1,
-and that racing version-guarded puts have exactly one winner. Every driver
-must show that a backend opened after another was dropped reads what it wrote
-and continues its versions, offsets and lease epochs. The memory driver (one
-heap) and the file driver (one process) do not report the capability.
+External drivers should call the public
+`conformance::run_with_process_capabilities(backend, single_scope,
+shared_across_processes, cross_process_cas)` entry point with their declared
+process guarantees. It checks both `StorageBackend::capabilities()` and the
+`DocumentStore::capabilities()` on the local handle and, for multi-scope
+drivers, the `conformance-b` handle. The declarations must match the supplied expectations
+on both surfaces; `SharedAcrossProcesses` requires `CrossProcessCas` on each.
+This catches a backend whose top-level declaration promises a guarantee that
+its scoped document port does not expose, or vice versa. Built-in native
+drivers use `conformance::run`, which supplies their fixed expectations.
+
+`conformance::run_shared(open)` takes a closure that opens independent
+backends on one store. A driver declaring `CrossProcessCas` must arbitrate
+racing document claims, version-guarded puts, create-only (`Absent`) puts and
+lease acquisitions across handles: each race has exactly one winner, and a
+fresh lease starts at epoch 1. When it also advertises `Fencing`, a fenced
+handle must reject a write after another handle changes its guard. CAS-only
+drivers make no immediate-visibility promise for the other storage ports.
+
+A driver declaring `SharedAcrossProcesses` promises all of those CAS and
+fencing guarantees, and also immediate cross-handle visibility: document
+creates, updates and deletes, stream appends and blob writes are visible to
+other handles. The suite verifies these reads after the corresponding writes
+and checks that all handles observe the winning claim, lease and version race.
+Every driver, including ones with neither process capability, must show that
+a backend opened after another was dropped reads the stored data and continues
+its document versions, stream offsets and lease epochs. The memory driver (one
+heap) and file driver (one process) do not report either process capability.
 `tinystoragedrivers_secrets::testkit::document_secrets_conformance` runs the
 secrets suite and the `enc2`-ciphertext-at-rest check over any driver's
 documents; the SQLite, file and MongoDB crates run it.

@@ -98,14 +98,16 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
 /// Built-in drivers should use [`run`], which binds expectations to their
 /// registered native driver identity. External drivers should use this entry
 /// point and state both declarations so they cannot accidentally bypass the
-/// capability conformance checks. [`Capability::SharedAcrossProcesses`]
+/// capability conformance checks. It validates the process flags on both the
+/// backend and its scoped document handles (`local`, and `conformance-b` for
+/// a multi-scope backend). [`Capability::SharedAcrossProcesses`]
 /// includes the guarantees of [`Capability::CrossProcessCas`], so declaring
 /// shared visibility without cross-process CAS is invalid.
 ///
 /// # Panics
 ///
-/// Panics when the backend capability flags do not match the supplied
-/// expectations or when any behavioral check fails.
+/// Panics when the backend or scoped document capability flags do not match
+/// the supplied expectations, or when any behavioral check fails.
 pub async fn run_with_process_capabilities(
     backend: &dyn StorageBackend,
     single_scope: bool,
@@ -134,8 +136,7 @@ pub async fn run_with_process_capabilities(
     let local = backend
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
-    run_ports(&local).await;
-    seal::run_host(&local).await;
+    check_document_process_capabilities(&local, shared_across_processes, cross_process_cas);
     if single_scope {
         let other = Scope::new("conformance-b").expect("valid scope");
         assert!(
@@ -143,6 +144,15 @@ pub async fn run_with_process_capabilities(
             "single-scope backend accepted a foreign scope"
         );
     } else {
+        let other_scope = Scope::new("conformance-b").expect("valid scope");
+        let other = backend
+            .for_scope(&other_scope)
+            .expect("multi-scope backend must accept conformance-b");
+        check_document_process_capabilities(&other, shared_across_processes, cross_process_cas);
+    }
+    run_ports(&local).await;
+    seal::run_host(&local).await;
+    if !single_scope {
         isolation::run(backend).await;
         isolation::nested(backend).await;
         validated::isolation(backend).await;
@@ -152,6 +162,32 @@ pub async fn run_with_process_capabilities(
     }
     migrations::run(backend).await;
     fencing::run(backend, single_scope).await;
+}
+
+fn check_document_process_capabilities(
+    storage: &ScopedStorage,
+    shared_across_processes: bool,
+    cross_process_cas: bool,
+) {
+    let capabilities = storage.documents().capabilities();
+    assert!(
+        !capabilities.contains(Capability::SharedAcrossProcesses)
+            || capabilities.contains(Capability::CrossProcessCas),
+        "{} scoped documents declare SharedAcrossProcesses without required CrossProcessCas",
+        storage.driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::SharedAcrossProcesses),
+        shared_across_processes,
+        "{} scoped documents shared_across_processes capability declaration",
+        storage.driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::CrossProcessCas),
+        cross_process_cas,
+        "{} scoped documents cross_process_cas capability declaration",
+        storage.driver()
+    );
 }
 
 /// Run the shared-handle checks against backends `open` yields: each call

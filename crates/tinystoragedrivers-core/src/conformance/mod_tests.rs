@@ -528,6 +528,197 @@ async fn conformance_rejects_shared_without_cross_process_cas() {
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProcessFlags {
+    shared: bool,
+    cas: bool,
+}
+
+#[derive(Debug)]
+struct ScopedProcessDeclarationMismatch {
+    storage: MemoryStorage,
+    backend: ProcessFlags,
+    local: ProcessFlags,
+    other: ProcessFlags,
+}
+
+#[async_trait::async_trait]
+impl StorageBackend for ScopedProcessDeclarationMismatch {
+    fn driver(&self) -> &'static str {
+        "scoped_process_declaration_mismatch"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        let capabilities = crate::Capabilities::none()
+            .with(crate::Capability::Fencing)
+            .with(crate::Capability::Maintenance)
+            .with(crate::Capability::ScopeEnumeration);
+        let capabilities = if self.backend.shared {
+            capabilities.with(crate::Capability::SharedAcrossProcesses)
+        } else {
+            capabilities.without(crate::Capability::SharedAcrossProcesses)
+        };
+        if self.backend.cas {
+            capabilities.with(crate::Capability::CrossProcessCas)
+        } else {
+            capabilities.without(crate::Capability::CrossProcessCas)
+        }
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        let storage = self.storage.for_scope(scope)?;
+        Ok(crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                None,
+                false,
+                if scope == &crate::Scope::local() {
+                    self.local.shared
+                } else {
+                    self.other.shared
+                },
+                if scope == &crate::Scope::local() {
+                    self.local.cas
+                } else {
+                    self.other.cas
+                },
+            )),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        ))
+    }
+    fn for_scope_fenced(
+        &self,
+        scope: &crate::Scope,
+        fence: &crate::Fence,
+    ) -> Result<crate::ScopedStorage> {
+        self.storage.for_scope_fenced(scope, fence)
+    }
+    async fn scopes(&self, prefix: &str) -> Result<Vec<crate::Scope>> {
+        self.storage.scopes(prefix).await
+    }
+    async fn maintain(&self, budget: crate::MaintenanceBudget) -> Result<crate::MaintenanceReport> {
+        self.storage.maintain(budget).await
+    }
+    async fn checkpoint(&self, checkpoint: crate::Checkpoint) -> Result<()> {
+        self.storage.checkpoint(checkpoint).await
+    }
+}
+
+#[tokio::test]
+async fn conformance_rejects_mismatched_backend_and_scoped_process_declarations() {
+    let cases = [
+        (
+            ProcessFlags {
+                shared: false,
+                cas: true,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            "cross_process_cas",
+        ),
+        (
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: true,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            "cross_process_cas",
+        ),
+        (
+            ProcessFlags {
+                shared: true,
+                cas: true,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: true,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: true,
+            },
+            "shared_across_processes",
+        ),
+        (
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            ProcessFlags {
+                shared: true,
+                cas: true,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            "shared_across_processes",
+        ),
+        (
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            ProcessFlags {
+                shared: false,
+                cas: false,
+            },
+            ProcessFlags {
+                shared: true,
+                cas: true,
+            },
+            "shared_across_processes",
+        ),
+    ];
+    for (backend, local, other, diagnostic) in cases {
+        assert_scoped_process_mismatch(backend, local, other, diagnostic).await;
+    }
+}
+
+async fn assert_scoped_process_mismatch(
+    backend: ProcessFlags,
+    local: ProcessFlags,
+    other: ProcessFlags,
+    diagnostic: &str,
+) {
+    let failure = tokio::spawn(async move {
+        let driver = ScopedProcessDeclarationMismatch {
+            storage: MemoryStorage::new(),
+            backend,
+            local,
+            other,
+        };
+        run_with_process_capabilities(&driver, false, backend.shared, backend.cas).await;
+    })
+    .await
+    .expect_err("backend and scoped document process declarations must agree");
+    let panic = failure.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains(&format!(
+            "scoped documents {diagnostic} capability declaration"
+        )),
+        "expected a scoped {diagnostic} declaration error, got {message:?}"
+    );
+}
 #[tokio::test]
 async fn handles_that_agree_pass_the_shared_checks() {
     let store = MemoryStorage::new();
@@ -554,7 +745,20 @@ impl StorageBackend for CasOnly {
             .with(crate::Capability::CrossProcessCas)
     }
     fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
-        self.0.for_scope(scope)
+        let storage = self.0.for_scope(scope)?;
+        Ok(crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                None,
+                false,
+                false,
+                true,
+            )),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        ))
     }
 }
 
@@ -567,15 +771,33 @@ struct UnconditionalDocs(
     Arc<dyn crate::DocumentStore>,
     Option<Arc<tokio::sync::Barrier>>,
     bool,
+    bool,
+    bool,
 );
 
 #[async_trait::async_trait]
 impl crate::DocumentStore for UnconditionalDocs {
     fn capabilities(&self) -> crate::Capabilities {
-        self.0.capabilities()
+        let capabilities = if self.3 {
+            self.0
+                .capabilities()
+                .with(crate::Capability::SharedAcrossProcesses)
+        } else {
+            self.0
+                .capabilities()
+                .without(crate::Capability::SharedAcrossProcesses)
+        };
+        if self.4 {
+            capabilities.with(crate::Capability::CrossProcessCas)
+        } else {
+            capabilities.without(crate::Capability::CrossProcessCas)
+        }
     }
     async fn ensure_collection(&self, spec: &crate::CollectionSpec) -> Result<()> {
         self.0.ensure_collection(spec).await
+    }
+    async fn validate_collection_spec(&self, spec: &crate::CollectionSpec) -> Result<()> {
+        self.0.validate_collection_spec(spec).await
     }
     async fn get(
         &self,
@@ -696,8 +918,29 @@ impl crate::DocumentStore for UnconditionalDocs {
         }
         self.0.claim(collection, filter, sort, patch).await
     }
+    async fn atomic_batch(&self, ops: Vec<crate::WriteOp>) -> Result<Vec<crate::WriteResult>> {
+        self.0.atomic_batch(ops).await
+    }
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<crate::ReadCheck>,
+        ops: Vec<crate::WriteOp>,
+    ) -> Result<Vec<crate::WriteResult>> {
+        self.0.atomic_batch_checked(checks, ops).await
+    }
+    async fn search(
+        &self,
+        collection: &str,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::SearchHit>> {
+        self.0.search(collection, text, limit).await
+    }
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         self.0.drop_collection(collection).await
+    }
+    async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
+        self.0.collections(prefix).await
     }
 }
 
@@ -719,6 +962,8 @@ impl StorageBackend for BrokenCasOnly {
             Arc::new(UnconditionalDocs(
                 Arc::clone(storage.documents()),
                 None,
+                true,
+                false,
                 true,
             )),
             Arc::clone(storage.streams()),
@@ -749,6 +994,8 @@ impl StorageBackend for BrokenClaimCas {
                 Arc::clone(storage.documents()),
                 Some(Arc::clone(&self.1)),
                 false,
+                false,
+                true,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
