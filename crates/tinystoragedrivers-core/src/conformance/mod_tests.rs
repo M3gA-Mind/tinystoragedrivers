@@ -566,6 +566,7 @@ struct BrokenCasOnly(MemoryStorage);
 struct UnconditionalDocs(
     Arc<dyn crate::DocumentStore>,
     Option<Arc<tokio::sync::Barrier>>,
+    bool,
 );
 
 #[async_trait::async_trait]
@@ -588,10 +589,19 @@ impl crate::DocumentStore for UnconditionalDocs {
         collection: &str,
         id: &str,
         doc: serde_json::Value,
-        _precondition: crate::Precondition,
+        precondition: crate::Precondition,
     ) -> Result<crate::Version> {
         self.0
-            .put(collection, id, doc, crate::Precondition::None)
+            .put(
+                collection,
+                id,
+                doc,
+                if self.2 {
+                    crate::Precondition::None
+                } else {
+                    precondition
+                },
+            )
             .await
     }
     async fn put_with(
@@ -599,11 +609,21 @@ impl crate::DocumentStore for UnconditionalDocs {
         collection: &str,
         id: &str,
         doc: serde_json::Value,
-        _precondition: crate::Precondition,
-        _options: crate::WriteOptions,
+        precondition: crate::Precondition,
+        options: crate::WriteOptions,
     ) -> Result<crate::Version> {
         self.0
-            .put(collection, id, doc, crate::Precondition::None)
+            .put_with(
+                collection,
+                id,
+                doc,
+                if self.2 {
+                    crate::Precondition::None
+                } else {
+                    precondition
+                },
+                options,
+            )
             .await
     }
     async fn delete(
@@ -696,7 +716,11 @@ impl StorageBackend for BrokenCasOnly {
         Ok(crate::ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(UnconditionalDocs(Arc::clone(storage.documents()), None)),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                None,
+                true,
+            )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
         ))
@@ -724,6 +748,7 @@ impl StorageBackend for BrokenClaimCas {
             Arc::new(UnconditionalDocs(
                 Arc::clone(storage.documents()),
                 Some(Arc::clone(&self.1)),
+                false,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
