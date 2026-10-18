@@ -19,16 +19,20 @@ use tinystoragedrivers_core::{
 /// must neither learn that others exist nor spend the host's I/O budget, so
 /// the contract has no selector for either and the host runs them natively.
 ///
+/// `SharedAcrossProcesses` describes how a host opens its own backends, which a
+/// module bound to one grant cannot do.
+///
 /// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
 /// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
 /// the module's own grant, so they are exposed.
-pub(crate) const HOST_ONLY: [Capability; 6] = [
+pub(crate) const HOST_ONLY: [Capability; 7] = [
     Capability::Fencing,
     Capability::ScopePurge,
     Capability::AtomicScopePurge,
     Capability::ExistingSchema,
     Capability::Maintenance,
     Capability::ScopeEnumeration,
+    Capability::SharedAcrossProcesses,
 ];
 
 /// Convert between types that share one serde shape (filters, sorts, specs,

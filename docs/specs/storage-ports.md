@@ -213,6 +213,33 @@ should become async.
   asserts this.
 - Every source file has at least 90% line coverage.
 
+## Host conformance
+
+A host that composes several scopes, shares one store between handles and
+migrates its own collections should not repeat the driver matrix in its own
+tests. `conformance::run` therefore also covers, on every driver:
+
+- **Nested scopes** (`isolation.rs`, `nested`): a tenant `S`, `S/agent:a` and
+  `S/module:m` hold the same collection, id, stream and blob key without
+  seeing each other, and collection and scope listings do not leak between
+  parent and child.
+- **Document migrations** (`migrations.rs`): a two-step chain over several
+  batches, a crash part way, a resume that writes no record twice, and a no-op
+  re-run (drivers with `RecordMetadata`).
+- **Holder fences**: see [`write-fencing.md`](write-fencing.md).
+
+`conformance::run_shared(open)` takes a closure that opens independent backends
+on one store. A driver that reports `Capability::SharedAcrossProcesses`
+(SQLite and MongoDB) must show that handles see each other's writes at once,
+that racing lease acquires across handles have exactly one winner at epoch 1,
+and that racing version-guarded puts have exactly one winner. Every driver
+must show that a backend opened after another was dropped reads what it wrote
+and continues its versions, offsets and lease epochs. The memory driver (one
+heap) and the file driver (one process) do not report the capability.
+`tinystoragedrivers_secrets::testkit::document_secrets_conformance` runs the
+secrets suite and the `enc2`-ciphertext-at-rest check over any driver's
+documents; the SQLite, file and MongoDB crates run it.
+
 
 ## Validated document batches
 

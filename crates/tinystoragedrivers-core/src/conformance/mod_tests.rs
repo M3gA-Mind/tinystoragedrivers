@@ -324,3 +324,65 @@ async fn time_ordered_checks_do_not_assume_a_clock_resolution() {
     schema::run(&scoped).await;
     seal::run(&scoped).await;
 }
+
+/// The memory driver reporting [`Capability::SharedAcrossProcesses`], so the
+/// shared-handle checks have a store whose handles do agree.
+#[derive(Debug, Clone)]
+struct Claims(MemoryStorage);
+
+impl StorageBackend for Claims {
+    fn driver(&self) -> &'static str {
+        "claims"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::SharedAcrossProcesses)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+}
+
+#[tokio::test]
+async fn handles_that_agree_pass_the_shared_checks() {
+    let store = MemoryStorage::new();
+    run_shared(|| {
+        let backend = Claims(store.clone());
+        async move { backend }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_driver_without_the_capability_gets_the_reopen_check_only() {
+    let store = MemoryStorage::new();
+    run_shared(|| {
+        let backend = store.clone();
+        async move { backend }
+    })
+    .await;
+
+    // Independent stores behind a driver that does not claim sharing still get
+    // the reopen check, and a fresh store is not a reopen.
+    let outcome = tokio::spawn(async {
+        run_shared(|| async { MemoryStorage::new() }).await;
+    })
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a reopen that finds an empty store fails the reopen check"
+    );
+}
+
+#[tokio::test]
+async fn handles_on_separate_stores_fail_the_shared_checks() {
+    let outcome = tokio::spawn(async {
+        run_shared(|| async { Claims(MemoryStorage::new()) }).await;
+    })
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a driver that claims sharing but keeps handles apart must fail"
+    );
+}

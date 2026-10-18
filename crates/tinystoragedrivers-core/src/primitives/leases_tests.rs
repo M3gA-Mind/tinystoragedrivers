@@ -647,3 +647,26 @@ fn the_body_wire_format_is_pinned() {
             .unwrap();
     assert_eq!(legacy, bare);
 }
+
+#[tokio::test]
+async fn the_holder_fence_checks_epoch_holder_and_release() {
+    let rig = rig();
+    let scope = rig.storage.scope().clone();
+    let a = rig
+        .leases
+        .acquire("host", "p1", "a", 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let fence = a.holder_fence(&scope);
+    assert_eq!(fence.collection(), LEASES);
+    assert_eq!(fence.id(), a.fence(&scope).id());
+    assert!(fence.validate().is_ok());
+    assert_ne!(fence.filter(), a.fence(&scope).filter());
+    assert_eq!(
+        fence.filter(),
+        &Filter::eq("epoch", 1_u64)
+            .and(Filter::eq("holder", "a"))
+            .and(Filter::exists("released", false))
+    );
+}

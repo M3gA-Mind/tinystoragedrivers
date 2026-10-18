@@ -179,6 +179,7 @@ impl StorageBackend for MemoryStorage {
             .without(crate::Capability::Watch)
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
+            .without(crate::Capability::SharedAcrossProcesses)
     }
 
     async fn prepare_schema(&self) -> Result<()> {
