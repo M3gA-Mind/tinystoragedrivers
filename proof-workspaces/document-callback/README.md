@@ -41,3 +41,17 @@ The broad monitor must receive public positive-control signals before and after
 the confidential requests. The after signal is an event barrier following the
 completed calls. Dead, lagged or timed-out observers fail; injected textual and
 byte-encoded private sentinels prove the leak oracle fails when it should.
+
+Every fixture relay member now authenticates its loading host independently of
+the requested route: the runner passes the callback binding's unique identity
+through immutable SDK initialization configuration. An ordinary confidential
+caller cannot borrow the module's storage capability. Authorized loading hosts
+may deliberately retarget a request for the lower callback-guard negative test;
+the relay does not mistake route.destination for its caller authorization.
+
+The lower-layer retarget test measures the module's real dispatch attempt and
+the native secret reader separately. A replacement read succeeds first; the old
+module's dispatched cross-instance call gets the SDK NotAttested category while
+the native read count stays unchanged, and the replacement stays usable. The
+outsider regression covers ScopedCall Secrets.Get with an existing key,
+ScopedPlainCall and NativeRoundtrip, with no dispatch or native side effects.

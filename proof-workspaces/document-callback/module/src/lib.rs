@@ -4,8 +4,9 @@ mod relay;
 // The canonical SDK owns native ABI unsafe code. No local raw ABI implementation.
 tinybus_module::module_export! {
     setup = relay::setup,
+    config = serde_json::Value,
     worker_threads = 1,
     provides = ["ai.tinyhumans.storage.DocumentProof1"],
-    methods = ["Get", "Put", "Delete", "ScopedCall", "ScopedPlainCall", "NativeRoundtrip"],
+    methods = ["Get", "Put", "Delete", "ScopedCall", "ScopedPlainCall", "NativeRoundtrip", "CallbackAttempts"],
     signals = [], requires = [], optional = [], lazy = false,
 }

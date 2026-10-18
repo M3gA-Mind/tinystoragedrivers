@@ -1,7 +1,8 @@
 # Scoped native callback validation
 
 Evidence was captured on macOS under target/scoped-storage-callback/. This is
-local validation; canonical review, hosted CI, merge and release remain pending.
+local validation; this revision still requires canonical review, hosted CI, merge
+and release.
 No consumer gitlink or released artifact was changed.
 
 RED: the metadata/CAS three-port regression failed to compile against the
@@ -87,3 +88,40 @@ suites and production coverage above were not unnecessarily repeated.
 This proves the canonical callback prerequisite. The owning MCP consumer still
 must adopt the public route/client and pass its ordinary retry acceptance; this
 repository does not claim MCP's native migration acceptance is complete.
+
+
+## Public review round 1 correction
+
+The frozen PR #60 round-1 feedback identified a fixture confused-deputy issue,
+not a production storage-profile defect. The actual outsider regression against
+an existing cache_key reproduced the finding before the fix: a confidential
+caller could ask ScopedCall to read the loader's secret through the module's
+admitted callback identity (review-round-1-red.log). No secret bytes were logged.
+
+The shared relay now captures the unique loading-host identity from immutable
+SDK init configuration and compares it with CallContext's authenticated sender
+before every fixture member. This is fixture caller authorization, independent
+of the supplied route; it introduces no production profile API or host policy.
+The runner supplies the identity when loading each SHA-admitted SDK artifact.
+
+The original authorized host can therefore still issue a deliberate same-broker
+cross-instance request. A test first reads the replacement's existing secret,
+then observes the original module's dispatch counter increase by one, the SDK's
+NotAttested error category, and no increase in the native secret-read counter.
+The replacement succeeds afterward. This proves that the lower callback guard,
+rather than the relay's new caller check, rejects that cross-instance attempt.
+
+The outsider's ScopedCall Secrets.Get, ScopedPlainCall and NativeRoundtrip all
+fail at caller authorization before dispatch, and leave the existing key,
+documents and audit stream unchanged. Eleven proof tests pass under Rust 1.99,
+including the two monitor-oracle controls. Explicit cargo +1.99 formatting,
+strict clippy, locked all-target/all-feature proof build and native runner tests
+pass. Evidence is in target/scoped-storage-callback/review-round-1-*.log.
+The prior Rust 1.99 lint correction is preserved. Production libraries and their
+API did not change, so unrelated full-workspace suites were not repeated.
+
+Current Rust 1.99 proof artifact SHA-256 values, superseding the earlier local
+fixture digests above:
+
+- module: 8679fdc650d287429193238c3f502fc2bacdc9b641b5234f19fcba54df793069
+- peer: f979391b8f3a17f283c2f43c168901ba0cc6669dfbcc27292350365e34cf2fad

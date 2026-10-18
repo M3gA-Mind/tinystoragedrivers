@@ -1,10 +1,13 @@
 //! A real SDK module that relays typed document requests to its exact caller.
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tinybus::{CallContext, Connection, Error, Interface, InterfaceName, MemberName, Result};
 use tinystoragedrivers_bus::{DeleteRequest, DocumentClient, GetRequest, PutRequest};
 struct Relay {
     connection: Connection,
+    loading_host: tinybus::BusName,
+    callback_attempts: AtomicU64,
     name: InterfaceName,
     members: Vec<MemberName>,
 }
@@ -32,6 +35,14 @@ impl Interface for Relay {
             .authenticated_sender()
             .filter(|_| context.is_confidential())
             .ok_or_else(|| Error::failed("authenticated confidential caller required"))?;
+        // This identity comes only from the loading host's immutable SDK init
+        // configuration, independently of any route selected by a test request.
+        if caller != &self.loading_host {
+            return Err(Error::failed("proof loading host required"));
+        }
+        if member.as_str() == "CallbackAttempts" {
+            return Ok(Value::from(self.callback_attempts.load(Ordering::Relaxed)));
+        }
         if matches!(member.as_str(), "ScopedCall" | "ScopedPlainCall") {
             let (route, object, selector, request): (
                 tinystoragedrivers_schema::ScopedStorageRoute,
@@ -44,6 +55,7 @@ impl Interface for Relay {
                 format!("{}/{}", route.object_root, object),
                 tinystoragedrivers_bus::STORAGE_INTERFACE,
             )?;
+            self.callback_attempts.fetch_add(1, Ordering::Relaxed);
             return if member.as_str() == "ScopedPlainCall" {
                 proxy.call(&selector, (request,)).await
             } else {
@@ -109,12 +121,23 @@ impl Interface for Relay {
         }
     }
 }
-pub(super) async fn setup(connection: Connection) -> Result<()> {
+pub(super) async fn setup(connection: Connection, config: Value) -> Result<()> {
+    let loading_host = config
+        .get("loading_host")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::failed("invalid proof loading host"))?;
+    let loading_host = tinybus::BusName::new(loading_host)
+        .map_err(|_| Error::failed("invalid proof loading host"))?;
+    if !loading_host.is_unique() {
+        return Err(Error::failed("invalid proof loading host"));
+    }
     connection
         .serve_at(
             "/proof".parse()?,
             Relay {
                 connection: connection.clone(),
+                loading_host,
+                callback_attempts: AtomicU64::new(0),
                 name: super::PROOF_INTERFACE.parse()?,
                 members: [
                     "Get",
@@ -123,6 +146,7 @@ pub(super) async fn setup(connection: Connection) -> Result<()> {
                     "ScopedCall",
                     "ScopedPlainCall",
                     "NativeRoundtrip",
+                    "CallbackAttempts",
                 ]
                 .iter()
                 .map(|member| MemberName::new(*member))

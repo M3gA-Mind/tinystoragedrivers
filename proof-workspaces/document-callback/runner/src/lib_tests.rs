@@ -97,9 +97,13 @@ impl Fixture {
             .await
             .unwrap();
         }
-        host.load_file_with_host_callbacks(staged, json!({}), &binding)
-            .await
-            .unwrap();
+        host.load_file_with_host_callbacks(
+            staged,
+            json!({"loading_host": binding.unique_name().as_str()}),
+            &binding,
+        )
+        .await
+        .unwrap();
         let attacker = Connection::connect(network.bus.connect().await.unwrap())
             .await
             .unwrap();
@@ -761,3 +765,6 @@ mod scoped_lifecycle_tests;
 #[path = "monitor_tests.rs"]
 mod monitor_tests;
 use monitor_tests::monitor_barrier;
+
+#[path = "relay_authorization_tests.rs"]
+mod relay_authorization_tests;
