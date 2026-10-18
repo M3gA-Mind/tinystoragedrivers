@@ -339,6 +339,28 @@ fn redaction_matches_percent_encoded_secret_option_names() {
 }
 
 #[test]
+fn proxy_password_is_redacted_from_every_public_url_representation() {
+    for key in ["proxyPassword", "PROXYPASSWORD", "proxy%50assword"] {
+        let input = format!("mongodb://h/db?{key}=proxySecretValue");
+        let output = redact_url(&input);
+        assert_eq!(output, format!("mongodb://h/db?{key}=***"));
+        assert!(!output.contains("proxySecretValue"), "{output}");
+
+        let config = StorageConfig::parse(&input).unwrap();
+        assert!(!config.to_string().contains("proxySecretValue"));
+        assert!(!format!("{config:?}").contains("proxySecretValue"));
+
+        let missing_database = format!("mongodb://h/?{key}=proxySecretValue");
+        let error = StorageConfig::parse(&missing_database).unwrap_err();
+        assert!(!error.to_string().contains("proxySecretValue"), "{error}");
+        assert!(
+            !format!("{error:?}").contains("proxySecretValue"),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn secret_query_scanning_has_linear_work_for_dense_query_markers() {
     let prefix = "mongodb://h/db";
     let input = format!("{prefix}{}password=linearSecret", "?".repeat(4_096));

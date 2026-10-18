@@ -478,6 +478,13 @@ impl StorageBackend for Claims {
     fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
         self.0.for_scope(scope)
     }
+    fn for_scope_fenced(
+        &self,
+        scope: &crate::Scope,
+        fence: &crate::Fence,
+    ) -> crate::Result<crate::ScopedStorage> {
+        self.0.for_scope_fenced(scope, fence)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -543,6 +550,7 @@ impl StorageBackend for CasOnly {
     fn capabilities(&self) -> crate::Capabilities {
         self.0
             .capabilities()
+            .without(crate::Capability::Fencing)
             .with(crate::Capability::CrossProcessCas)
     }
     fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
@@ -555,7 +563,10 @@ impl StorageBackend for CasOnly {
 struct BrokenCasOnly(MemoryStorage);
 
 #[derive(Debug)]
-struct UnconditionalDocs(Arc<dyn crate::DocumentStore>);
+struct UnconditionalDocs(
+    Arc<dyn crate::DocumentStore>,
+    Option<Arc<tokio::sync::Barrier>>,
+);
 
 #[async_trait::async_trait]
 impl crate::DocumentStore for UnconditionalDocs {
@@ -623,6 +634,46 @@ impl crate::DocumentStore for UnconditionalDocs {
         sort: &[crate::Sort],
         patch: &serde_json::Value,
     ) -> Result<Option<crate::Versioned<serde_json::Value>>> {
+        if let Some(barrier) = &self.1 {
+            let mut query = crate::Query::filter(filter.clone()).limit(1);
+            for order in sort {
+                query = query.sort(order.clone());
+            }
+            let Some(candidate) = self
+                .0
+                .query(collection, &query)
+                .await?
+                .items
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            barrier.wait().await;
+            let mut claimed = candidate.doc;
+            if let (Some(target), Some(changes)) = (claimed.as_object_mut(), patch.as_object()) {
+                target.extend(
+                    changes
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+            let version = self
+                .0
+                .put(
+                    collection,
+                    &candidate.id,
+                    claimed.clone(),
+                    crate::Precondition::None,
+                )
+                .await?;
+            return Ok(Some(crate::Versioned {
+                id: candidate.id,
+                version,
+                doc: claimed,
+                meta: candidate.meta,
+            }));
+        }
         self.0.claim(collection, filter, sort, patch).await
     }
     async fn drop_collection(&self, collection: &str) -> Result<()> {
@@ -637,6 +688,7 @@ impl StorageBackend for BrokenCasOnly {
     fn capabilities(&self) -> crate::Capabilities {
         self.0
             .capabilities()
+            .without(crate::Capability::Fencing)
             .with(crate::Capability::CrossProcessCas)
     }
     fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
@@ -644,10 +696,65 @@ impl StorageBackend for BrokenCasOnly {
         Ok(crate::ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(UnconditionalDocs(Arc::clone(storage.documents()))),
+            Arc::new(UnconditionalDocs(Arc::clone(storage.documents()), None)),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
         ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrokenClaimCas(MemoryStorage, Arc<tokio::sync::Barrier>);
+
+impl StorageBackend for BrokenClaimCas {
+    fn driver(&self) -> &'static str {
+        "broken_claim_cas"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .without(crate::Capability::Fencing)
+            .with(crate::Capability::CrossProcessCas)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        let storage = self.0.for_scope(scope)?;
+        Ok(crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                Some(Arc::clone(&self.1)),
+            )),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrokenFencedCas(MemoryStorage);
+
+impl StorageBackend for BrokenFencedCas {
+    fn driver(&self) -> &'static str {
+        "broken_fenced_cas"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::CrossProcessCas)
+            .with(crate::Capability::Fencing)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+    fn for_scope_fenced(
+        &self,
+        scope: &crate::Scope,
+        _fence: &crate::Fence,
+    ) -> Result<crate::ScopedStorage> {
+        // Broken implementation: returns an ordinary handle that never checks
+        // the guard as part of its writes.
+        self.0.for_scope(scope)
     }
 }
 
@@ -682,6 +789,55 @@ async fn cas_only_driver_that_ignores_preconditions_fails_conditional_race_check
     assert!(
         message.contains("exactly one racing version-guarded put must win"),
         "expected the conditional race check to fail, got {message:?}"
+    );
+}
+
+#[tokio::test]
+async fn cas_only_driver_with_non_atomic_claim_fails_conditional_race_checks() {
+    let store = MemoryStorage::new();
+    let barrier = Arc::new(tokio::sync::Barrier::new(super::shared::RACERS));
+    let outcome = tokio::spawn(async move {
+        run_shared(|| {
+            let backend = BrokenClaimCas(store.clone(), Arc::clone(&barrier));
+            async move { backend }
+        })
+        .await;
+    })
+    .await
+    .expect_err("non-atomic claims must fail CAS conformance");
+    let panic = outcome.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("exactly one racing document claim must win"),
+        "expected the document claim race check to fail, got {message:?}"
+    );
+}
+
+#[tokio::test]
+async fn cross_process_cas_rejects_a_stale_fence_from_another_backend_handle() {
+    let store = MemoryStorage::new();
+    let outcome = tokio::spawn(async move {
+        run_shared(|| {
+            let backend = BrokenFencedCas(store.clone());
+            async move { backend }
+        })
+        .await;
+    })
+    .await
+    .expect_err("stale cross-handle fences must be rejected");
+    let panic = outcome.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("cross-open stale fence: expected fenced"),
+        "expected the stale-fence check to fail, got {message:?}"
     );
 }
 

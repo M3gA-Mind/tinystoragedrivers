@@ -22,7 +22,7 @@ use crate::primitives::{self, Leases};
 use crate::scope::Scope;
 
 /// Handles opened for each race.
-const RACERS: usize = 6;
+pub(super) const RACERS: usize = 6;
 
 /// Rounds of each race, each on a fresh key.
 const ROUNDS: usize = 3;
@@ -39,6 +39,7 @@ where
         .capabilities()
         .contains(Capability::SharedAcrossProcesses);
     let cross_process_cas = first.capabilities().contains(Capability::CrossProcessCas);
+    let fencing = first.capabilities().contains(Capability::Fencing);
     if shared || cross_process_cas {
         let second = open().await;
         assert!(
@@ -46,9 +47,13 @@ where
                 .capabilities()
                 .contains(Capability::SharedAcrossProcesses)
                 == shared
-                && second.capabilities().contains(Capability::CrossProcessCas) == cross_process_cas,
+                && second.capabilities().contains(Capability::CrossProcessCas) == cross_process_cas
+                && second.capabilities().contains(Capability::Fencing) == fencing,
             "independently opened backends report different capabilities"
         );
+        if fencing {
+            stale_fence_race(&first, &second).await;
+        }
         if shared {
             visibility(&handle(&first), &handle(&second)).await;
         }
@@ -57,6 +62,7 @@ where
             racers.push(open().await);
         }
         let racers: Vec<ScopedStorage> = racers.iter().map(handle).collect();
+        claim_race(&racers, shared).await;
         lease_race(&racers, shared).await;
         version_races(&racers, shared).await;
     } else {
@@ -67,6 +73,93 @@ where
 
 fn handle(backend: &impl StorageBackend) -> ScopedStorage {
     ok(backend.for_scope(&Scope::local()), "shared handle")
+}
+
+/// A single candidate claimed concurrently is returned to exactly one handle.
+async fn claim_race(handles: &[ScopedStorage], shared: bool) {
+    let coll = unique("shared_claim");
+    let id = "candidate";
+    ok(
+        handles[0]
+            .documents()
+            .put(&coll, id, json!({"state": "ready"}), Precondition::Absent)
+            .await,
+        "claim race seed",
+    );
+    let tasks: Vec<_> = handles
+        .iter()
+        .map(|storage| {
+            let docs = std::sync::Arc::clone(storage.documents());
+            let coll = coll.clone();
+            tokio::spawn(async move {
+                docs.claim(
+                    &coll,
+                    &crate::Filter::eq("state", "ready"),
+                    &[],
+                    &json!({"state": "claimed"}),
+                )
+                .await
+            })
+        })
+        .collect();
+    let mut winners = Vec::new();
+    for task in tasks {
+        if let Some(claimed) = ok(
+            ok(task.await.map_err(join_error), "claim race task"),
+            "claim race",
+        ) {
+            winners.push(claimed);
+        }
+    }
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racing document claim must win: {winners:?}"
+    );
+    if shared {
+        for storage in handles {
+            let seen = ok(
+                storage.documents().get(&coll, id).await,
+                "shared claim re-read",
+            )
+            .expect("claimed document remains present");
+            assert_eq!(seen.doc["state"], "claimed");
+        }
+    }
+}
+
+/// A stale fence remains invalid when a different backend handle changes its guard.
+async fn stale_fence_race(first: &impl StorageBackend, second: &impl StorageBackend) {
+    let scope = Scope::local();
+    let guards = unique("shared_fence_guard");
+    let data = unique("shared_fence_data");
+    ok(
+        handle(first)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 1}), Precondition::Absent)
+            .await,
+        "fence race seed",
+    );
+    let fence = crate::Fence::epoch(scope.clone(), &guards, "lease", "epoch", 1);
+    let stale = ok(
+        first.for_scope_fenced(&scope, &fence),
+        "open first fenced handle",
+    );
+    ok(
+        handle(second)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 2}), Precondition::None)
+            .await,
+        "move fence through second handle",
+    );
+    fails(
+        stale
+            .documents()
+            .put(&data, "stale", json!({"write": true}), Precondition::Absent)
+            .await,
+        ErrorKind::Fenced,
+        "cross-open stale fence",
+    );
 }
 
 /// Each handle sees what the other wrote, deletions included.
