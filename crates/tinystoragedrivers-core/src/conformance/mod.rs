@@ -98,7 +98,9 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
 /// Built-in drivers should use [`run`], which binds expectations to their
 /// registered native driver identity. External drivers should use this entry
 /// point and state both declarations so they cannot accidentally bypass the
-/// capability conformance checks.
+/// capability conformance checks. [`Capability::SharedAcrossProcesses`]
+/// includes the guarantees of [`Capability::CrossProcessCas`], so declaring
+/// shared visibility without cross-process CAS is invalid.
 ///
 /// # Panics
 ///
@@ -111,6 +113,12 @@ pub async fn run_with_process_capabilities(
     cross_process_cas: bool,
 ) {
     let capabilities = backend.capabilities();
+    assert!(
+        !capabilities.contains(Capability::SharedAcrossProcesses)
+            || capabilities.contains(Capability::CrossProcessCas),
+        "{} declares SharedAcrossProcesses without required CrossProcessCas",
+        backend.document_driver()
+    );
     assert_eq!(
         capabilities.contains(Capability::SharedAcrossProcesses),
         shared_across_processes,

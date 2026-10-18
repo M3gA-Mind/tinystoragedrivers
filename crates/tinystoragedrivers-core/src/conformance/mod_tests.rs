@@ -473,10 +473,52 @@ impl StorageBackend for Claims {
         self.0
             .capabilities()
             .with(crate::Capability::SharedAcrossProcesses)
+            .with(crate::Capability::CrossProcessCas)
     }
     fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
         self.0.for_scope(scope)
     }
+}
+
+#[derive(Debug, Clone)]
+struct SharedWithoutCas(MemoryStorage);
+
+impl StorageBackend for SharedWithoutCas {
+    fn driver(&self) -> &'static str {
+        "shared_without_cas"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .without(crate::Capability::Fencing)
+            .with(crate::Capability::SharedAcrossProcesses)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> crate::Result<crate::ScopedStorage> {
+        if scope != &crate::Scope::local() {
+            return Err(StorageError::invalid_input("operator-only test backend"));
+        }
+        self.0.for_scope(scope)
+    }
+}
+
+#[tokio::test]
+async fn conformance_rejects_shared_without_cross_process_cas() {
+    let failure = tokio::spawn(async {
+        run_with_process_capabilities(&SharedWithoutCas(MemoryStorage::new()), true, true, false)
+            .await;
+    })
+    .await
+    .expect_err("SharedAcrossProcesses must include CrossProcessCas");
+    let panic = failure.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("declares SharedAcrossProcesses without required CrossProcessCas"),
+        "expected the capability implication diagnostic, got {message:?}"
+    );
 }
 
 #[tokio::test]
