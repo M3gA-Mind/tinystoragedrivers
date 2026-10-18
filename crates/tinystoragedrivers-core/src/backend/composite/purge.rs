@@ -21,6 +21,7 @@ enum PreparedPurge {
 }
 
 const COMPOSITE_PURGE_COLLECTION: &str = "__tsd_composite_purges";
+const TARGET_GENERATION_FIELD: &str = "target_generation";
 pub(super) const COMPOSITE_PURGE_SCOPE: &str = "__tsd_composite_purge_coordinator";
 
 pub(super) fn ensure_public_scope(scope: &Scope) -> Result<()> {
@@ -83,6 +84,21 @@ impl CompositePurge {
     fn receipt(value: &serde_json::Value) -> Option<PurgeReceipt> {
         serde_json::from_value(value.get("receipt")?.clone()).ok()
     }
+    fn target_generation(value: &serde_json::Value) -> Result<ScopeGeneration> {
+        let target = value
+            .get(TARGET_GENERATION_FIELD)
+            .and_then(serde_json::Value::as_u64)
+            .map(ScopeGeneration)
+            .ok_or_else(|| StorageError::backend("invalid composite purge target generation"))?;
+        let receipt = Self::receipt(value)
+            .ok_or_else(|| StorageError::backend("invalid composite purge coordinator record"))?;
+        if target.0.checked_add(1) != Some(receipt.generation.0) {
+            return Err(StorageError::backend(
+                "composite purge target does not match its issued generation",
+            ));
+        }
+        Ok(target)
+    }
     fn historical_receipt(value: &serde_json::Value, operation: &str) -> Result<PurgeReceipt> {
         let receipt = Self::receipt(value)
             .ok_or_else(|| StorageError::backend("invalid composite purge history record"))?;
@@ -121,6 +137,32 @@ impl CompositePurge {
         )
     }
 
+    fn generations(
+        generation: ScopeGeneration,
+        operation: &str,
+        native_status: Option<&PurgeReceipt>,
+    ) -> Result<(ScopeGeneration, ScopeGeneration)> {
+        match native_status {
+            Some(receipt) if receipt.operation_id != operation => Err(StorageError::backend(
+                "native purge status returned a different operation",
+            )),
+            Some(receipt) => {
+                let target =
+                    ScopeGeneration(receipt.generation.0.checked_sub(1).ok_or_else(|| {
+                        StorageError::backend("native purge receipt has no prior generation")
+                    })?);
+                Ok((target, receipt.generation))
+            }
+            None => {
+                let next = generation
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| StorageError::backend("scope generation space is exhausted"))?;
+                Ok((generation, ScopeGeneration(next)))
+            }
+        }
+    }
+
     async fn prepare(
         &self,
         request: &PurgeRequest,
@@ -140,6 +182,11 @@ impl CompositePurge {
                 &request.operation_id,
             )?));
         }
+        let (target_generation, receipt_generation) = Self::generations(
+            self.generation,
+            &request.operation_id,
+            native_status.as_ref(),
+        )?;
         let mut current = self.read().await?;
         let resuming = current.as_ref().is_some_and(|value| {
             Self::receipt(&value.doc).is_some_and(|prior| {
@@ -169,10 +216,11 @@ impl CompositePurge {
                     serde_json::json!({
                         "receipt": PurgeReceipt {
                             operation_id: request.operation_id.clone(),
-                            generation: prior.generation,
+                            generation: receipt_generation,
                             status: PurgeStatus::Pending,
                             stage: crate::PurgeStage::Blobs,
-                        }
+                        },
+                        (TARGET_GENERATION_FIELD): target_generation.0
                     }),
                 )
                 .await?;
@@ -184,10 +232,11 @@ impl CompositePurge {
                 serde_json::json!({
                     "receipt": PurgeReceipt {
                         operation_id: request.operation_id.clone(),
-                        generation: ScopeGeneration(0),
+                        generation: receipt_generation,
                         status: PurgeStatus::Pending,
                         stage: crate::PurgeStage::Blobs,
-                    }
+                    },
+                    (TARGET_GENERATION_FIELD): target_generation.0
                 }),
             )
             .await?;
@@ -213,13 +262,20 @@ impl CompositePurge {
     ) -> Result<PurgeReceipt> {
         let mut receipt = Self::receipt(&value.doc)
             .ok_or_else(|| StorageError::backend("invalid composite purge coordinator record"))?;
+        let target_generation = Self::target_generation(&value.doc)?;
         if receipt.stage == crate::PurgeStage::Blobs {
             self.blobs
-                .purge_scope_generation(&self.scope, self.generation)
+                .purge_scope_generation(&self.scope, target_generation)
                 .await?;
             receipt.stage = crate::PurgeStage::Records;
             if let Err(error) = self
-                .write(Some(&value), serde_json::json!({"receipt": receipt}))
+                .write(
+                    Some(&value),
+                    serde_json::json!({
+                        "receipt": receipt,
+                        (TARGET_GENERATION_FIELD): target_generation.0
+                    }),
+                )
                 .await
             {
                 if error.kind() == crate::ErrorKind::Conflict
@@ -247,7 +303,13 @@ impl CompositePurge {
             ));
         }
         if let Err(error) = self
-            .write(Some(current), serde_json::json!({"receipt": receipt}))
+            .write(
+                Some(current),
+                serde_json::json!({
+                    "receipt": receipt,
+                    (TARGET_GENERATION_FIELD): target_generation.0
+                }),
+            )
             .await
         {
             if error.kind() == crate::ErrorKind::Conflict

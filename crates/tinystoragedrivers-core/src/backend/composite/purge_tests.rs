@@ -1,5 +1,24 @@
 use super::*;
-use crate::{BackendBlobs, MemoryStorage, StorageBackend};
+use crate::{BackendBlobs, BlobBackend, CompositeStorage, MemoryStorage, StorageBackend};
+
+#[derive(Debug)]
+struct InvalidZeroGenerationReceipt;
+
+#[async_trait]
+impl ScopePurge for InvalidZeroGenerationReceipt {
+    async fn purge(&self, _request: &PurgeRequest) -> Result<PurgeReceipt> {
+        Err(StorageError::backend("unexpected native purge call"))
+    }
+
+    async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
+        Ok(Some(PurgeReceipt {
+            operation_id: operation_id.to_owned(),
+            generation: ScopeGeneration(0),
+            status: PurgeStatus::Complete,
+            stage: crate::PurgeStage::Complete,
+        }))
+    }
+}
 
 #[tokio::test]
 async fn malformed_coordinator_record_fails_closed_before_scope_erasure() {
@@ -126,17 +145,17 @@ async fn completed_history_replay_after_a_later_generation_preserves_replacement
         coordinator,
         purge_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
-    blobs
-        .for_scope_generation(&scope, first_receipt.generation)
-        .unwrap()
-        .put("replacement", vec![9], None)
-        .await
-        .unwrap();
     let second_receipt = second
         .purge(&PurgeRequest {
             operation_id: "history-replay-2".into(),
             mode: PurgeMode::Quiescent,
         })
+        .await
+        .unwrap();
+    blobs
+        .for_scope_generation(&scope, second_receipt.generation)
+        .unwrap()
+        .put("replacement", vec![9], None)
         .await
         .unwrap();
 
@@ -218,4 +237,151 @@ async fn composite_purge_reconciles_native_receipt_without_erasing_new_generatio
         [5]
     );
     assert_eq!(composite.status(operation_id).await.unwrap(), Some(receipt));
+}
+
+#[tokio::test]
+async fn public_composite_reconciliation_preserves_writes_after_native_purge() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs: Arc<dyn BlobBackend> = Arc::new(BackendBlobs::new(blob_storage));
+    let backend = CompositeStorage::new(records.clone(), blobs);
+    let scope = Scope::new("u:public-native-reconciliation").unwrap();
+    let request = PurgeRequest {
+        operation_id: "native-reset".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    backend
+        .for_scope(&scope)
+        .unwrap()
+        .blobs()
+        .put("legacy", vec![1], None)
+        .await
+        .unwrap();
+
+    let native_receipt = records
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&request)
+        .await
+        .unwrap();
+    let current = backend
+        .for_scope_generation(&scope, native_receipt.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put("replacement", vec![5], None)
+        .await
+        .unwrap();
+
+    let receipt = current.purge(&request).await.unwrap();
+    assert_eq!(receipt, native_receipt);
+    assert_eq!(
+        current
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        [5],
+        "reconciling an older native receipt must not erase generation-one writes"
+    );
+}
+
+#[tokio::test]
+async fn invalid_native_receipt_is_rejected_before_blob_deletion() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage.clone()));
+    let scope = Scope::new("u:invalid-native-receipt").unwrap();
+    let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
+    coordinator
+        .documents()
+        .ensure_collection(&crate::CollectionSpec::new(COMPOSITE_PURGE_COLLECTION))
+        .await
+        .unwrap();
+    let scoped_records = records
+        .for_scope(&scope)
+        .unwrap()
+        .with_purge(Arc::new(InvalidZeroGenerationReceipt));
+    let legacy_blobs = blobs.for_scope(&scope).unwrap();
+    legacy_blobs.put("preserve", vec![7], None).await.unwrap();
+    let composite = CompositePurge {
+        records: scoped_records,
+        blobs,
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator,
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let error = composite
+        .purge(&PurgeRequest {
+            operation_id: "invalid-receipt".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert_eq!(
+        legacy_blobs.get("preserve").await.unwrap().unwrap().bytes,
+        [7]
+    );
+}
+
+#[tokio::test]
+async fn corrupt_pending_target_generation_fails_closed_before_blob_deletion() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage.clone()));
+    let scope = Scope::new("u:corrupt-target-generation").unwrap();
+    let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
+    coordinator
+        .documents()
+        .ensure_collection(&crate::CollectionSpec::new(COMPOSITE_PURGE_COLLECTION))
+        .await
+        .unwrap();
+    coordinator
+        .documents()
+        .put(
+            COMPOSITE_PURGE_COLLECTION,
+            &coordinator_id(&scope).unwrap(),
+            serde_json::json!({
+                "receipt": PurgeReceipt {
+                    operation_id: "corrupt-target".into(),
+                    generation: ScopeGeneration(2),
+                    status: PurgeStatus::Pending,
+                    stage: crate::PurgeStage::Blobs,
+                },
+                (TARGET_GENERATION_FIELD): 0
+            }),
+            crate::Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let legacy = blobs.for_scope(&scope).unwrap();
+    legacy.put("legacy", vec![1], None).await.unwrap();
+    let next = blobs
+        .for_scope_generation(&scope, ScopeGeneration(1))
+        .unwrap();
+    next.put("next", vec![2], None).await.unwrap();
+    let composite = CompositePurge {
+        records: records.for_scope(&scope).unwrap(),
+        blobs,
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator,
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let error = composite
+        .purge(&PurgeRequest {
+            operation_id: "corrupt-target".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert_eq!(legacy.get("legacy").await.unwrap().unwrap().bytes, [1]);
+    assert_eq!(next.get("next").await.unwrap().unwrap().bytes, [2]);
 }
