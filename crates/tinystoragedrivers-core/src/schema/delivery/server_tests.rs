@@ -748,3 +748,51 @@ async fn completion_unwind_finalizer_reclaims_execution_after_converter_returns(
     }
     panic!("completion unwind must not strand admission");
 }
+
+#[test]
+fn stopped_runtime_submission_releases_admission_without_deadlocking() {
+    const CHILD: &str = "TINYSTORAGEDRIVERS_STOPPED_RUNTIME_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        handle.block_on(async {
+            let (server, _) = server(1);
+            let peer = PeerIdentity::new("a");
+            let id = uploaded(&server, &peer).await;
+            assert_eq!(
+                server
+                    .handle(&peer, MigrationExchangeRequest::Execute { transfer: id })
+                    .await,
+                error(ExchangeErrorKind::Unavailable)
+            );
+            assert!(server.state.lock().is_empty());
+            begin(&server, &peer, 1).await;
+        });
+        return;
+    }
+    // Runtime rejection drops the blocking closure synchronously. Isolate the
+    // regression in a killable child so a mutex deadlock cannot hang the suite.
+    let thread = std::thread::current();
+    let name = thread.name().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, "1")
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "stopped-runtime child failed: {status}");
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("stopped-runtime submission deadlocked; child killed and reaped");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

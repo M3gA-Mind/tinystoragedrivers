@@ -1,8 +1,8 @@
 //! Fragmentation and local blob/stream policies, without storage side effects.
 use super::{
-    BlobTargetRequest, MIGRATION_CHUNK_BYTES, MigrationExchangeReply, MigrationExchangeRequest,
-    MigrationPayload, MigrationPayloadReply, MigrationTransport, StreamEntriesRequest,
-    StreamMapMode, StreamPlanRequest, types,
+    BlobTargetRequest, ExchangeErrorKind, MIGRATION_CHUNK_BYTES, MigrationExchangeReply,
+    MigrationExchangeRequest, MigrationPayload, MigrationPayloadReply, MigrationTransport,
+    StreamEntriesRequest, StreamMapMode, StreamPlanRequest, types,
 };
 use crate::schema::{
     BlobTransformOutput, BlobTransformRequest, BoxFuture, DocumentsTransformRequest, Owner,
@@ -126,8 +126,9 @@ impl MigrationDeliveryClient {
     /// Deliver one complete payload and return its complete typed reply.
     ///
     /// # Errors
-    /// Returns a static Unavailable failure on transport, allocation, transform,
-    /// invalid reply or protocol ambiguity. The durable runner remains pending.
+    /// Returns a static `InvalidInput` failure when the owner conversion fails,
+    /// or `Unavailable` on transport, allocation, invalid reply or protocol
+    /// ambiguity. The durable runner remains pending.
     pub async fn transform(
         &self,
         owner: &str,
@@ -153,7 +154,7 @@ impl MigrationDeliveryClient {
         };
         self.upload(owner, &transfer, &bytes).await?;
         drop(bytes);
-        let MigrationExchangeReply::Ready { reply_len } = self
+        let reply_len = match self
             .exchange(
                 owner,
                 MigrationExchangeRequest::Execute {
@@ -161,8 +162,14 @@ impl MigrationDeliveryClient {
                 },
             )
             .await?
-        else {
-            return Err(unavailable());
+        {
+            MigrationExchangeReply::Ready { reply_len } => reply_len,
+            MigrationExchangeReply::Error {
+                kind: ExchangeErrorKind::TransformFailed,
+            } => {
+                return Err(StorageError::invalid_input("migration transform failed"));
+            }
+            _ => return Err(unavailable()),
         };
         let reply = self.download(owner, &transfer, reply_len).await?;
         let result: MigrationPayloadReply =

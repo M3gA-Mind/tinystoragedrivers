@@ -329,9 +329,10 @@ async fn late_group_failure_returns_no_partial_stream_and_sanitizes_owner_error(
         )
         .await
         .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::InvalidInput);
     assert_eq!(
         error.to_string(),
-        "unavailable: migration delivery unavailable"
+        "invalid input: migration transform failed"
     );
 }
 

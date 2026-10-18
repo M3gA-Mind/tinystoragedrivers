@@ -264,7 +264,7 @@ impl MigrationExchangeServer {
         if !types::valid_id(&id) {
             return error(ExchangeErrorKind::UnknownTransfer);
         }
-        let completion = {
+        let (runtime, handler, bytes, mut finalizer, tx, completion) = {
             let mut transfers = self.state.lock();
             let Some(t) = transfers.get_mut(&id).filter(|t| &t.peer == peer) else {
                 return error(ExchangeErrorKind::UnknownTransfer);
@@ -322,21 +322,23 @@ impl MigrationExchangeServer {
                     let (tx, rx) = oneshot::channel();
                     // Completion belongs to the server job, not the RPC waiter.
                     // Dropping the waiter cannot strand an Executing admission slot.
-                    let mut finalizer = ExecutionFinalizer {
+                    let finalizer = ExecutionFinalizer {
                         state,
                         id,
                         active: true,
                     };
-                    runtime.spawn_blocking(move || {
-                        run_conversion(&mut finalizer, handler.as_ref(), &bytes, tx);
-                    });
-                    rx
+                    (runtime, handler, bytes, finalizer, tx, rx)
                 }
                 MigrationExchangeRequest::Begin { .. } => {
                     return error(ExchangeErrorKind::InvalidRequest);
                 }
             }
         };
+        // Submission to a stopped runtime drops the closure synchronously.
+        // Release the transfers lock first: its finalizer also locks the state.
+        runtime.spawn_blocking(move || {
+            run_conversion(&mut finalizer, handler.as_ref(), &bytes, tx);
+        });
         completion
             .await
             .unwrap_or_else(|_| error(ExchangeErrorKind::Unavailable))
