@@ -15,7 +15,8 @@ async fn document_store_tracks_reentrancy_and_fences_after_expired_takeover() {
         "node-a",
         100,
     )
-    .unwrap();
+    .unwrap()
+    .with_endpoint(Some("https://node-a.example".to_owned()));
     let second = DocumentLeases::new(
         cluster.documents(),
         guard_scope.clone(),
@@ -23,7 +24,8 @@ async fn document_store_tracks_reentrancy_and_fences_after_expired_takeover() {
         "node-b",
         100,
     )
-    .unwrap();
+    .unwrap()
+    .with_endpoint(Some("https://node-b.example".to_owned()));
 
     let initial = first.acquire("alice", 1_000).await.unwrap();
     let reentrant = first.acquire("alice", 1_025).await.unwrap();
@@ -33,10 +35,11 @@ async fn document_store_tracks_reentrancy_and_fences_after_expired_takeover() {
         first.renew(&initial, 1_030).await,
         Err(LeaseError::Lost)
     ));
-    assert!(matches!(
-        second.acquire("alice", 1_050).await,
-        Err(LeaseError::Held(_))
-    ));
+    let held = second.acquire("alice", 1_050).await.unwrap_err();
+    let LeaseError::Held(record) = held else {
+        panic!("expected lease held")
+    };
+    assert_eq!(record.endpoint.as_deref(), Some("https://node-a.example"));
 
     let data_scope = Scope::new("profile-data").unwrap();
     let stale = for_scope_fenced(
@@ -55,6 +58,16 @@ async fn document_store_tracks_reentrancy_and_fences_after_expired_takeover() {
     let takeover = second.acquire("alice", 1_126).await.unwrap();
     assert_eq!(takeover.epoch, reentrant.epoch + 1);
     assert!(takeover.previous_unclean);
+    assert_eq!(
+        second
+            .inspect("alice")
+            .await
+            .unwrap()
+            .unwrap()
+            .endpoint
+            .as_deref(),
+        Some("https://node-b.example")
+    );
     assert_eq!(
         stale
             .documents()

@@ -26,6 +26,7 @@ pub struct DocumentLeases {
     guard_scope: Scope,
     owner: String,
     holder: String,
+    endpoint: Option<String>,
     ttl_ms: i64,
     now_ms: Arc<AtomicU64>,
     grants: Mutex<HashMap<String, (u64, Version)>>,
@@ -37,6 +38,7 @@ impl std::fmt::Debug for DocumentLeases {
             .field("guard_scope", &self.guard_scope)
             .field("owner", &self.owner)
             .field("holder", &self.holder)
+            .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
@@ -72,10 +74,18 @@ impl DocumentLeases {
             guard_scope,
             owner,
             holder,
+            endpoint: None,
             ttl_ms,
             now_ms,
             grants: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Set the endpoint written into lease records and returned to contenders.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     fn set_now(&self, now_ms: u64) {
@@ -111,7 +121,7 @@ impl LeaseStore for DocumentLeases {
                 key,
                 holder: &self.holder,
                 ttl_ms: self.ttl_ms,
-                endpoint: None,
+                endpoint: self.endpoint.as_deref(),
                 held_epoch,
             })
             .await?

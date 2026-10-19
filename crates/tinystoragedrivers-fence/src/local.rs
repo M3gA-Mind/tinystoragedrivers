@@ -6,7 +6,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -17,46 +17,39 @@ use tinystoragedrivers_core::{LeaseRecord, StorageError, Version};
 
 use crate::{LeaseError, LeaseGrant, LeaseStore};
 
+const LOCK_FILE: &str = ".lease";
+const RECORD_FILE: &str = ".lease.json";
+const RECORD_TMP_SUFFIX: &str = ".lease.json.tsd-tmp";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
-struct HeldLock {
+struct Holding {
     file: File,
+    record: LeaseRecord,
     version: Version,
 }
 
 /// Local lease store backed by portable advisory file locks.
 ///
-/// The lock is held for the lifetime of a grant, so it excludes other
-/// processes using the same directory even if the lease TTL expires. This is
-/// intentional: a local store cannot atomically fence writes performed by an
-/// arbitrary backend. `driver_fence` therefore returns `None`.
+/// It shares the `.lease` lock and `.lease.json` record format used by the
+/// existing host implementation. A lock is held until release or process
+/// exit; this store does not issue distributed storage fences.
 #[derive(Debug)]
 pub struct LocalLeases {
     root: PathBuf,
     holder: String,
-    ttl_ms: i64,
-    held: Mutex<HashMap<String, HeldLock>>,
+    endpoint: Option<String>,
+    held: Mutex<HashMap<String, Holding>>,
 }
 
 impl LocalLeases {
     /// Open a local lease store rooted at `root` for `holder`.
     ///
-    /// `ttl_ms` is the validity window reported to callers; the OS lock also
-    /// prevents takeover while this process still holds the grant.
-    ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` for an empty holder or non-positive TTL, or a
-    /// backend error when the directory cannot be created.
-    pub fn new(
-        root: impl AsRef<Path>,
-        holder: impl Into<String>,
-        ttl_ms: i64,
-    ) -> Result<Self, StorageError> {
-        if ttl_ms <= 0 {
-            return Err(StorageError::invalid_input("lease ttl must be positive"));
-        }
+    /// Returns `InvalidInput` for an empty holder or a backend error if the
+    /// root directory cannot be created.
+    pub fn new(root: impl AsRef<Path>, holder: impl Into<String>) -> Result<Self, StorageError> {
         let holder = holder.into();
         if holder.is_empty() {
             return Err(StorageError::invalid_input(
@@ -68,9 +61,22 @@ impl LocalLeases {
         Ok(Self {
             root,
             holder,
-            ttl_ms,
+            endpoint: None,
             held: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Set the endpoint recorded for this holder and returned to contenders.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
+    fn held(&self) -> MutexGuard<'_, HashMap<String, Holding>> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn directory(&self, key: &str) -> Result<PathBuf, StorageError> {
@@ -86,36 +92,63 @@ impl LocalLeases {
         Ok(self.root.join(hex))
     }
 
-    fn read_record(dir: &Path) -> Result<Option<LeaseRecord>, StorageError> {
-        let path = dir.join("lease.json");
-        let mut file = match File::open(path) {
+    fn open_lock(&self, key: &str) -> Result<File, StorageError> {
+        let dir = self.directory(key)?;
+        fs::create_dir_all(&dir).map_err(storage_io)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(LOCK_FILE))
+            .map_err(storage_io)
+    }
+
+    fn read_record(&self, key: &str) -> Result<Option<LeaseRecord>, StorageError> {
+        let path = self.directory(key)?.join(RECORD_FILE);
+        let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(storage_io(error)),
         };
         let mut contents = String::new();
         file.read_to_string(&mut contents).map_err(storage_io)?;
-        serde_json::from_str(&contents)
-            .map(Some)
-            .map_err(StorageError::from)
+        serde_json::from_str(&contents).map(Some).map_err(|error| {
+            StorageError::serialization(format!("lease record {}: {error}", path.display()))
+        })
     }
 
-    fn write_record(dir: &Path, record: &LeaseRecord) -> Result<(), StorageError> {
-        let destination = dir.join("lease.json");
+    fn write_record(&self, key: &str, record: &LeaseRecord) -> Result<(), StorageError> {
+        let dir = self.directory(key)?;
+        let destination = dir.join(RECORD_FILE);
+        // Keep the established host field names and non-expiring sentinel so
+        // old binaries can read records written during a rolling migration.
+        let wire = LegacyLocalRecord {
+            owner: &record.holder,
+            endpoint: &record.endpoint,
+            epoch: record.epoch,
+            expires_at_ms: u64::MAX,
+            released: record.released,
+        };
+        let bytes = serde_json::to_vec(&wire).map_err(StorageError::from)?;
         for _ in 0..16 {
             let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let temporary = dir.join(format!(".lease-{}-{sequence}.tmp", std::process::id()));
-            let opened = OpenOptions::new()
+            let temporary = dir.join(format!(
+                "{}-{}-{sequence}.tmp",
+                RECORD_TMP_SUFFIX,
+                std::process::id()
+            ));
+            let mut file = match OpenOptions::new()
                 .create_new(true)
                 .write(true)
-                .open(&temporary);
-            let mut file = match opened {
+                .open(&temporary)
+            {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(storage_io(error)),
             };
             let result = (|| {
-                serde_json::to_writer(&mut file, record).map_err(StorageError::from)?;
+                file.write_all(&bytes).map_err(storage_io)?;
                 file.flush().map_err(storage_io)?;
                 file.sync_all().map_err(storage_io)?;
                 drop(file);
@@ -131,105 +164,90 @@ impl LocalLeases {
         ))
     }
 
-    fn current_grant(&self, grant: &LeaseGrant, now_ms: u64) -> Result<LeaseRecord, LeaseError> {
-        if grant.holder != self.holder {
-            return Err(LeaseError::Lost);
-        }
-        let now = i64::try_from(now_ms).map_err(|_| LeaseError::Lost)?;
-        let held = self.held.lock().map_err(|_| LeaseError::Lost)?;
-        if held
-            .get(&grant.key)
-            .is_none_or(|entry| entry.version != grant.version)
-        {
-            return Err(LeaseError::Lost);
-        }
-        let record = Self::read_record(&self.directory(&grant.key)?)?.ok_or(LeaseError::Lost)?;
-        if record.holder != grant.holder
-            || record.epoch != grant.epoch
-            || record.released
-            || record.expires_ms <= now
-        {
-            return Err(LeaseError::Lost);
-        }
-        Ok(record)
+    fn is_contended(error: &std::io::Error) -> bool {
+        error.kind() == std::io::ErrorKind::WouldBlock
+            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
     }
+}
+
+#[derive(serde::Serialize)]
+struct LegacyLocalRecord<'a> {
+    owner: &'a str,
+    endpoint: &'a Option<String>,
+    epoch: u64,
+    expires_at_ms: u64,
+    released: bool,
 }
 
 #[async_trait::async_trait]
 impl LeaseStore for LocalLeases {
-    async fn acquire(&self, key: &str, now_ms: u64) -> Result<LeaseGrant, LeaseError> {
-        let now = i64::try_from(now_ms).map_err(|_| LeaseError::Lost)?;
-        let expires_ms = now.checked_add(self.ttl_ms).ok_or(LeaseError::Lost)?;
-        let dir = self.directory(key)?;
-        fs::create_dir_all(&dir).map_err(storage_io)?;
-        {
-            let mut held = self.held.lock().map_err(|_| LeaseError::Lost)?;
-            if let Some(entry) = held.get_mut(key) {
-                let mut record = Self::read_record(&dir)?.ok_or(LeaseError::Lost)?;
-                if record.holder == self.holder && !record.released && now < record.expires_ms {
-                    let version = entry.version.next().ok_or_else(|| {
-                        StorageError::backend("lease grant version space exhausted")
-                    })?;
-                    record.expires_ms = expires_ms;
-                    Self::write_record(&dir, &record)?;
-                    entry.version = version;
-                    return Ok(LeaseGrant {
-                        key: key.to_owned(),
-                        holder: record.holder,
-                        epoch: record.epoch,
-                        version,
-                        expires_ms: record.expires_ms,
-                        previous_unclean: false,
-                    });
+    async fn acquire(&self, key: &str, _now_ms: u64) -> Result<LeaseGrant, LeaseError> {
+        // This guard spans lookup, lock acquisition, record migration and
+        // insertion. A same-instance acquire cannot race a release/takeover.
+        let mut held = self.held();
+        if let Some(holding) = held.get(key) {
+            return Ok(LeaseGrant {
+                key: key.to_owned(),
+                holder: holding.record.holder.clone(),
+                epoch: holding.record.epoch,
+                version: holding.version,
+                expires_ms: holding.record.expires_ms,
+                previous_unclean: false,
+            });
+        }
+
+        let file = self.open_lock(key)?;
+        if let Err(error) = file.try_lock_exclusive() {
+            if !Self::is_contended(&error) {
+                return Err(LeaseError::Storage(storage_io(error)));
+            }
+            let record = self.read_record(key)?.unwrap_or(LeaseRecord {
+                holder: "unknown".to_owned(),
+                endpoint: None,
+                epoch: 0,
+                expires_ms: i64::MAX,
+                released: false,
+            });
+            return Err(LeaseError::Held(record));
+        }
+
+        let previous = match self.read_record(key) {
+            Ok(record) => record,
+            Err(error) => {
+                let _ = FileExt::unlock(&file);
+                return Err(LeaseError::Storage(error));
+            }
+        };
+        let epoch = match previous.as_ref() {
+            None => 1,
+            Some(record) => {
+                if let Some(epoch) = record.epoch.checked_add(1) {
+                    epoch
+                } else {
+                    let _ = FileExt::unlock(&file);
+                    return Err(LeaseError::Storage(StorageError::backend(
+                        "lease epoch space exhausted",
+                    )));
                 }
-                return Err(LeaseError::Held(record));
             }
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.join("lease.lock"))
-            .map_err(storage_io)?;
-        match lock.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                let found = Self::read_record(&dir)?.unwrap_or(LeaseRecord {
-                    holder: "unknown".into(),
-                    endpoint: None,
-                    epoch: 0,
-                    expires_ms: expires_ms.max(now),
-                    released: false,
-                });
-                return Err(LeaseError::Held(found));
-            }
-            Err(error) => return Err(LeaseError::Storage(storage_io(error))),
-        }
-        let mut held = self.held.lock().map_err(|_| LeaseError::Lost)?;
-        if held.contains_key(key) {
-            return Err(LeaseError::Lost);
-        }
-        let previous = Self::read_record(&dir)?;
-        let epoch = previous.as_ref().map_or(Ok(1), |record| {
-            record
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| StorageError::backend("lease epoch overflow"))
-        })?;
-        let previous_unclean = previous.is_some_and(|record| !record.released);
+        };
+        let previous_unclean = previous.as_ref().is_some_and(|record| !record.released);
         let record = LeaseRecord {
             holder: self.holder.clone(),
-            endpoint: None,
+            endpoint: self.endpoint.clone(),
             epoch,
-            expires_ms,
+            expires_ms: i64::MAX,
             released: false,
         };
-        Self::write_record(&dir, &record)?;
+        if let Err(error) = self.write_record(key, &record) {
+            let _ = FileExt::unlock(&file);
+            return Err(LeaseError::Storage(error));
+        }
         held.insert(
             key.to_owned(),
-            HeldLock {
-                file: lock,
+            Holding {
+                file,
+                record: record.clone(),
                 version: Version::FIRST,
             },
         );
@@ -237,71 +255,63 @@ impl LeaseStore for LocalLeases {
             key: key.to_owned(),
             holder: self.holder.clone(),
             epoch,
-            version: Version(1),
-            expires_ms,
+            version: Version::FIRST,
+            expires_ms: i64::MAX,
             previous_unclean,
         })
     }
 
-    async fn renew(&self, grant: &LeaseGrant, now_ms: u64) -> Result<LeaseGrant, LeaseError> {
-        let mut record = self.current_grant(grant, now_ms)?;
-        let now = i64::try_from(now_ms).map_err(|_| LeaseError::Lost)?;
-        record.expires_ms = now.checked_add(self.ttl_ms).ok_or(LeaseError::Lost)?;
-        Self::write_record(&self.directory(&grant.key)?, &record)?;
-        let mut renewed = grant.clone();
-        renewed.expires_ms = record.expires_ms;
-        renewed.version = grant
-            .version
-            .next()
-            .ok_or_else(|| StorageError::backend("lease grant version space exhausted"))?;
-        self.held
-            .lock()
-            .map_err(|_| LeaseError::Lost)?
-            .get_mut(&grant.key)
-            .ok_or(LeaseError::Lost)?
-            .version = renewed.version;
-        Ok(renewed)
-    }
-
-    async fn release(&self, grant: LeaseGrant) -> Result<(), LeaseError> {
-        if grant.holder != self.holder {
-            return Err(LeaseError::Lost);
-        }
-        let mut held = self.held.lock().map_err(|_| LeaseError::Lost)?;
-        if held
-            .get(&grant.key)
-            .is_none_or(|entry| entry.version != grant.version)
+    async fn renew(&self, grant: &LeaseGrant, _now_ms: u64) -> Result<LeaseGrant, LeaseError> {
+        // Validation, generation advance and holding update are one critical
+        // section. Exactly one concurrent renewal can consume a grant version.
+        let mut held = self.held();
+        let holding = held.get_mut(&grant.key).ok_or(LeaseError::Lost)?;
+        if grant.holder != self.holder
+            || holding.record.holder != grant.holder
+            || holding.record.epoch != grant.epoch
+            || holding.version != grant.version
         {
             return Err(LeaseError::Lost);
         }
-        let mut record =
-            Self::read_record(&self.directory(&grant.key)?)?.ok_or(LeaseError::Lost)?;
-        if record.holder != grant.holder || record.epoch != grant.epoch || record.released {
+        let next = holding.version.next().ok_or_else(|| {
+            LeaseError::Storage(StorageError::backend("lease version space exhausted"))
+        })?;
+        holding.version = next;
+        Ok(LeaseGrant {
+            version: next,
+            ..grant.clone()
+        })
+    }
+
+    async fn release(&self, grant: LeaseGrant) -> Result<(), LeaseError> {
+        let mut held = self.held();
+        let holding = held.get(&grant.key).ok_or(LeaseError::Lost)?;
+        if grant.holder != self.holder
+            || holding.record.holder != grant.holder
+            || holding.record.epoch != grant.epoch
+            || holding.version != grant.version
+        {
             return Err(LeaseError::Lost);
         }
-        record.released = true;
-        record.expires_ms = record.expires_ms.min(system_now_ms()?);
-        Self::write_record(&self.directory(&grant.key)?, &record)?;
-        let lock = held.remove(&grant.key).ok_or(LeaseError::Lost)?;
-        FileExt::unlock(&lock.file).map_err(storage_io)?;
+        let record = LeaseRecord {
+            released: true,
+            ..holding.record.clone()
+        };
+        self.write_record(&grant.key, &record)?;
+        if let Some(holding) = held.remove(&grant.key) {
+            let _ = FileExt::unlock(&holding.file);
+        }
         Ok(())
     }
 
     async fn inspect(&self, key: &str) -> Result<Option<LeaseRecord>, LeaseError> {
-        Ok(Self::read_record(&self.directory(key)?)?)
+        if let Some(holding) = self.held().get(key) {
+            return Ok(Some(holding.record.clone()));
+        }
+        Ok(self.read_record(key)?)
     }
 }
 
 fn storage_io(error: std::io::Error) -> StorageError {
     StorageError::backend("local lease file operation failed").with_source(error)
-}
-
-fn system_now_ms() -> Result<i64, StorageError> {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            StorageError::backend("system clock is before Unix epoch").with_source(error)
-        })?;
-    i64::try_from(duration.as_millis())
-        .map_err(|_| StorageError::backend("system clock exceeds lease timestamp range"))
 }
