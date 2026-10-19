@@ -309,3 +309,7 @@ impl fmt::Debug for ScopedStorage {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "blob_backend_tests.rs"]
+mod blob_backend_tests;
