@@ -207,56 +207,7 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
     let query: Vec<_> = url.query_pairs().into_owned().collect();
 
     let (status, body) = match method {
-        "GET" => {
-            state
-                .get_requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(target.to_owned());
-            if state.stall_get.load(Ordering::SeqCst) {
-                state.stalled_get_entered.notify_one();
-                state.release_stalled_get.notified().await;
-            }
-            let page = {
-                state
-                    .pages
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .pop_front()
-            };
-            if state.reject_get.load(Ordering::SeqCst) {
-                ("500 Internal Server Error", String::new())
-            } else if let Some(page) = page {
-                ("200 OK", page)
-            } else if let Some(objects) = &state.objects {
-                let prefix = query
-                    .iter()
-                    .find(|(key, _)| key == "prefix")
-                    .map_or("", |(_, value)| value.as_str());
-                let path = Path::parse(prefix.trim_end_matches('/')).ok();
-                let mut entries = Vec::new();
-                if let Some(path) = path.as_ref() {
-                    let mut listing = objects.list(Some(path));
-                    while let Ok(Some(meta)) = listing.try_next().await {
-                        entries.push(meta.location.to_string());
-                    }
-                }
-                let mut versions = String::new();
-                for key in &entries {
-                    versions.push_str("<Version><Key>");
-                    versions.push_str(key);
-                    versions.push_str("</Key><VersionId>current</VersionId></Version>");
-                }
-                (
-                    "200 OK",
-                    format!(
-                        "<ListVersionsResult><IsTruncated>false</IsTruncated>{versions}</ListVersionsResult>"
-                    ),
-                )
-            } else {
-                ("500 Internal Server Error", String::new())
-            }
-        }
+        "GET" => get_response(&state, target, &query).await,
         "DELETE" => {
             state
                 .delete_requests
@@ -280,6 +231,58 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
         _ => ("405 Method Not Allowed", String::new()),
     };
     write_response(&mut stream, status, &body).await;
+}
+
+async fn get_response(
+    state: &FixtureState,
+    target: &str,
+    query: &[(String, String)],
+) -> (&'static str, String) {
+    state
+        .get_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(target.to_owned());
+    if state.stall_get.load(Ordering::SeqCst) {
+        state.stalled_get_entered.notify_one();
+        state.release_stalled_get.notified().await;
+    }
+    let page = state
+        .pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop_front();
+    if state.reject_get.load(Ordering::SeqCst) {
+        return ("500 Internal Server Error", String::new());
+    }
+    if let Some(page) = page {
+        return ("200 OK", page);
+    }
+    let Some(objects) = &state.objects else {
+        return ("500 Internal Server Error", String::new());
+    };
+    let prefix = query
+        .iter()
+        .find(|(key, _)| key == "prefix")
+        .map_or("", |(_, value)| value.as_str());
+    let path = Path::parse(prefix.trim_end_matches('/')).ok();
+    let mut entries = Vec::new();
+    if let Some(path) = path.as_ref() {
+        let mut listing = objects.list(Some(path));
+        while let Ok(Some(meta)) = listing.try_next().await {
+            entries.push(meta.location.to_string());
+        }
+    }
+    let versions = entries
+        .iter()
+        .map(|key| format!("<Version><Key>{key}</Key><VersionId>current</VersionId></Version>"))
+        .collect::<String>();
+    (
+        "200 OK",
+        format!(
+            "<ListVersionsResult><IsTruncated>false</IsTruncated>{versions}</ListVersionsResult>"
+        ),
+    )
 }
 
 async fn write_response(stream: &mut TcpStream, status: &str, body: &str) {

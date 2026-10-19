@@ -90,15 +90,15 @@ async fn backend_blobs_requires_a_bootstrapped_mapping_schema() {
         scope_digest(&scope)
     ))
     .unwrap();
-    assert!(
+    assert_eq!(
         storage
             .for_scope(&physical)
             .unwrap()
             .blobs()
             .list("")
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        []
     );
 }
 
