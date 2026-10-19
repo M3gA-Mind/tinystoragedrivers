@@ -309,7 +309,21 @@ impl FileStorage {
     ///
     /// A filesystem error.
     pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        let scope_for_state = scope.clone();
+        let generation = self
+            .db
+            .run(move |db| {
+                let state = db.purge_state(&scope_for_state)?;
+                if state.pending.is_some() {
+                    return Err(StorageError::scope_generation_rejected(
+                        "scope purge is pending",
+                    ));
+                }
+                Ok(ScopeGeneration(state.generation))
+            })
+            .await?;
         FileBlobs::new(Arc::clone(&self.db), scope.clone(), None)
+            .with_generation(generation)
             .sweep_expired()
             .await
     }
@@ -331,6 +345,22 @@ struct FilePurge {
 
 #[async_trait::async_trait]
 impl ScopePurge for FilePurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        let fence = self.fence.clone();
+        self.db
+            .run(move |db| {
+                crate::documents::guard(db, fence.as_deref())?;
+                db.check_generation(&scope, generation)
+            })
+            .await
+    }
+
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
         if request.mode == PurgeMode::Atomic {
@@ -422,6 +452,10 @@ impl StorageBackend for FileStorage {
 
     fn capabilities(&self) -> Capabilities {
         CAPABILITIES
+    }
+
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        true
     }
 
     /// Lists the scopes that have a stored file by walking `scopes/`. A walk

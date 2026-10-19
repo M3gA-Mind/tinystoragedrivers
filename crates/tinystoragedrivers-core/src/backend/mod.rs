@@ -47,6 +47,35 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// Optional abilities every handle from this backend has.
     fn capabilities(&self) -> Capabilities;
 
+    /// Whether scope-purge handles can validate their bound generation and
+    /// native fence before a composite driver admits access to independent
+    /// ports. Defaults to false for compatibility with existing backends.
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        false
+    }
+
+    /// Number of composite record layers above the native storage owner.
+    #[doc(hidden)]
+    fn composite_depth(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    /// Open an internal composite coordinator scope without composing its
+    /// blob ports or applying public-scope admission rules.
+    #[doc(hidden)]
+    fn for_composite_internal_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        if scope.as_str() != "__tsd_composite_purge_coordinator"
+            && !scope
+                .as_str()
+                .starts_with("__tsd_composite_purge_coordinator/")
+        {
+            return Err(StorageError::invalid_input(
+                "invalid internal composite storage scope",
+            ));
+        }
+        self.for_scope(scope)
+    }
+
     /// Return native handles that use existing schema without declaring or repairing it.
     ///
     /// The restriction survives named databases and native fenced construction.
@@ -320,6 +349,27 @@ impl ScopedStorage {
                 "this driver cannot read purge status",
             )),
         }
+    }
+
+    /// Check that this handle's native generation and fence are still admitted.
+    ///
+    /// # Errors
+    /// Unsupported without a native purge port, or a stale/pending binding.
+    #[doc(hidden)]
+    pub async fn validate_purge_binding(&self) -> Result<()> {
+        match &self.purge {
+            Some(port) => port.validate_binding().await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot validate a scope purge binding",
+            )),
+        }
+    }
+
+    pub(crate) fn supports_purge_binding_validation(&self) -> bool {
+        self.purge
+            .as_ref()
+            .is_some_and(|purge| purge.supports_binding_validation())
     }
 
     /// The scope every handle is bound to.

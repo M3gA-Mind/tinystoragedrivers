@@ -13,6 +13,7 @@ pub(super) struct GenerationBlobs {
     pub(super) inner: Arc<dyn BlobStore>,
     pub(super) records: ScopedStorage,
     pub(super) coordinator: Option<ScopedStorage>,
+    pub(super) validate_generation: bool,
 }
 
 impl GenerationBlobs {
@@ -24,10 +25,9 @@ impl GenerationBlobs {
                 "scope purge is pending",
             ));
         }
-        self.records
-            .documents()
-            .get("__tsd_admission", "probe")
-            .await?;
+        if self.validate_generation {
+            self.records.validate_purge_binding().await?;
+        }
         Ok(())
     }
 }

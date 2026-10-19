@@ -24,9 +24,28 @@ const COMPOSITE_PURGE_COLLECTION: &str = "__tsd_composite_purges";
 const TARGET_GENERATION_FIELD: &str = "target_generation";
 pub(super) const COMPOSITE_PURGE_SCOPE: &str = "__tsd_composite_purge_coordinator";
 
+async fn validate_coordinator_schema(coordinator: &ScopedStorage) -> Result<()> {
+    let spec = crate::CollectionSpec::new(COMPOSITE_PURGE_COLLECTION);
+    let documents = coordinator.documents();
+    if documents
+        .capabilities()
+        .contains(Capability::ExistingSchema)
+    {
+        documents.validate_collection_spec(&spec).await
+    } else {
+        documents.ensure_collection(&spec).await
+    }
+}
+
 pub(super) fn ensure_public_scope(scope: &Scope) -> Result<()> {
     if scope.as_str() == COMPOSITE_PURGE_SCOPE
+        || scope
+            .as_str()
+            .starts_with(&format!("{COMPOSITE_PURGE_SCOPE}/"))
         || scope.as_str() == super::backend_blobs::RESERVED_MAP_SCOPE
+        || scope
+            .as_str()
+            .starts_with(&format!("{}/", super::backend_blobs::RESERVED_MAP_SCOPE))
         || scope
             .as_str()
             .starts_with(&format!("{}/", super::backend_blobs::RESERVED_SCOPE_PREFIX))
@@ -46,6 +65,19 @@ pub(super) fn coordinator_scope() -> Result<Scope> {
     Scope::new(COMPOSITE_PURGE_SCOPE)
 }
 
+pub(super) fn coordinator_scope_for_layer(depth: usize) -> Result<Scope> {
+    if depth > 32 {
+        return Err(StorageError::invalid_input(
+            "composite storage nesting is too deep",
+        ));
+    }
+    if depth == 0 {
+        coordinator_scope()
+    } else {
+        Scope::new(format!("{COMPOSITE_PURGE_SCOPE}/{depth}"))
+    }
+}
+
 pub(super) fn coordinator_id(scope: &Scope) -> Result<String> {
     crate::Key::of(["scope-purge", scope.as_str()]).map(|key| key.to_string())
 }
@@ -55,10 +87,7 @@ pub(super) fn coordinator_operation_id(scope: &Scope, operation: &str) -> Result
 
 impl CompositePurge {
     async fn read(&self) -> Result<Option<crate::Versioned<serde_json::Value>>> {
-        self.coordinator
-            .documents()
-            .ensure_collection(&crate::CollectionSpec::new(COMPOSITE_PURGE_COLLECTION))
-            .await?;
+        validate_coordinator_schema(&self.coordinator).await?;
         self.coordinator
             .documents()
             .get(COMPOSITE_PURGE_COLLECTION, &coordinator_id(&self.scope)?)
@@ -108,6 +137,18 @@ impl CompositePurge {
             ));
         }
         Ok(receipt)
+    }
+    async fn historical(&self, operation: &str) -> Result<Option<PurgeReceipt>> {
+        validate_coordinator_schema(&self.coordinator).await?;
+        self.coordinator
+            .documents()
+            .get(
+                COMPOSITE_PURGE_COLLECTION,
+                &coordinator_operation_id(&self.scope, operation)?,
+            )
+            .await?
+            .map(|history| Self::historical_receipt(&history.doc, operation))
+            .transpose()
     }
     async fn save_history(&self, receipt: &PurgeReceipt) -> Result<()> {
         let docs = self.coordinator.documents();
@@ -168,37 +209,12 @@ impl CompositePurge {
         request: &PurgeRequest,
         native_status: Option<PurgeReceipt>,
     ) -> Result<PreparedPurge> {
-        if let Some(history) = self
-            .coordinator
-            .documents()
-            .get(
-                COMPOSITE_PURGE_COLLECTION,
-                &coordinator_operation_id(&self.scope, &request.operation_id)?,
-            )
-            .await?
-        {
-            return Ok(PreparedPurge::Replay(Self::historical_receipt(
-                &history.doc,
-                &request.operation_id,
-            )?));
-        }
         let (target_generation, receipt_generation) = Self::generations(
             self.generation,
             &request.operation_id,
             native_status.as_ref(),
         )?;
         let mut current = self.read().await?;
-        let resuming = current.as_ref().is_some_and(|value| {
-            Self::receipt(&value.doc).is_some_and(|prior| {
-                prior.operation_id == request.operation_id && prior.status == PurgeStatus::Pending
-            })
-        });
-        if !resuming && native_status.is_none() {
-            self.records
-                .documents()
-                .get("__tsd_composite_purge_admission", "probe")
-                .await?;
-        }
         if let Some(value) = &current {
             let prior = Self::receipt(&value.doc).ok_or_else(|| {
                 StorageError::backend("invalid composite purge coordinator record")
@@ -328,6 +344,7 @@ impl CompositePurge {
 }
 
 pub(super) async fn pending(coordinator: &ScopedStorage, scope: &Scope) -> Result<bool> {
+    validate_coordinator_schema(coordinator).await?;
     let Some(value) = coordinator
         .documents()
         .get(COMPOSITE_PURGE_COLLECTION, &coordinator_id(scope)?)
@@ -342,6 +359,20 @@ pub(super) async fn pending(coordinator: &ScopedStorage, scope: &Scope) -> Resul
 
 #[async_trait]
 impl ScopePurge for CompositePurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        self.records.validate_purge_binding().await?;
+        if pending(&self.coordinator, &self.scope).await? {
+            return Err(StorageError::scope_generation_rejected(
+                "scope purge is pending",
+            ));
+        }
+        Ok(())
+    }
+
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         let _guard = Arc::clone(&self.purge_lock).lock_owned().await;
         request.validate()?;
@@ -351,7 +382,7 @@ impl ScopePurge for CompositePurge {
                 "independent record and blob stores cannot be purged atomically",
             ));
         }
-        if self.scope == coordinator_scope()? {
+        if ensure_public_scope(&self.scope).is_err() {
             return Err(StorageError::invalid_input(
                 "reserved composite purge coordinator scope",
             ));
@@ -360,6 +391,20 @@ impl ScopePurge for CompositePurge {
         // has already completed. Keep historical replay semantics, but never
         // let a stale fenced handle reach coordinator/blob mutations.
         let native_status = self.records.purge_status(&request.operation_id).await?;
+        if native_status
+            .as_ref()
+            .is_some_and(|receipt| receipt.operation_id != request.operation_id)
+        {
+            return Err(StorageError::backend(
+                "native purge status returned a different operation",
+            ));
+        }
+        if let Some(receipt) = self.historical(&request.operation_id).await? {
+            return Ok(receipt);
+        }
+        if native_status.is_none() {
+            self.records.validate_purge_binding().await?;
+        }
         match self.prepare(request, native_status).await? {
             PreparedPurge::Replay(receipt) => Ok(receipt),
             PreparedPurge::Pending(value) => self.execute(request, value).await,
@@ -369,11 +414,17 @@ impl ScopePurge for CompositePurge {
     async fn status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
         // Even a coordinator-only receipt must honor the records backend's
         // native fence; otherwise stale fenced handles can inspect history.
-        if self.records.purge_status(operation_id).await?.is_none() {
-            self.records
-                .documents()
-                .get("__tsd_composite_purge_admission", "probe")
-                .await?;
+        let native_status = self.records.purge_status(operation_id).await?;
+        if native_status
+            .as_ref()
+            .is_some_and(|receipt| receipt.operation_id != operation_id)
+        {
+            return Err(StorageError::backend(
+                "native purge status returned a different operation",
+            ));
+        }
+        if native_status.is_none() {
+            self.records.validate_purge_binding().await?;
         }
         let Some(value) = self.read().await? else {
             return Ok(None);

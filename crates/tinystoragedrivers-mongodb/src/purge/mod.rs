@@ -442,6 +442,26 @@ impl MongoPurge {
 
 #[async_trait]
 impl ScopePurge for MongoPurge {
+    fn supports_binding_validation(&self) -> bool {
+        self.shared.transactions && !self.fenced
+    }
+
+    async fn validate_binding(&self) -> Result<()> {
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "public reset capabilities are disabled",
+            ));
+        }
+        if self.fenced {
+            return Err(StorageError::unsupported(
+                Capability::Fencing,
+                "fenced GridFS reset is unsupported",
+            ));
+        }
+        check(&self.shared, &self.scope, self.generation, None).await
+    }
+
     async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
         request.validate()?;
         if !self.shared.transactions {

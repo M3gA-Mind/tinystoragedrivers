@@ -70,7 +70,9 @@ fn every_composite_scope_constructor_rejects_internal_scopes() {
     let fence = Fence::epoch(Scope::local(), "leases", "lease", "epoch", 1);
     for name in [
         purge::COMPOSITE_PURGE_SCOPE,
+        "__tsd_composite_purge_coordinator/1",
         "__tsd_composite_blob_scope_map",
+        "__tsd_composite_blob_scope_map/private",
         "__tsd_composite_blob_generation",
         "__tsd_composite_blob_generation/deadbeef/1",
     ] {

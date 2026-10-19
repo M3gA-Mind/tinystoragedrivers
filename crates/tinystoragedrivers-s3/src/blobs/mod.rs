@@ -27,6 +27,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// User metadata holding a blob's expiry as epoch milliseconds. S3 prefixes it
 /// with `x-amz-meta-` on the wire.
 const EXPIRES_AT: &str = "tsd-expires-at-ms";
+mod versions;
 
 fn hex_scope(scope: &Scope) -> String {
     scope
@@ -216,38 +217,28 @@ impl S3Storage {
     }
 
     async fn purge_prefix(&self, prefix: &str) -> Result<()> {
-        let root = Path::parse(prefix.trim_end_matches('/'))
-            .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
-        let mut objects = self.store.list(Some(&root));
-        while let Some(object) = objects.try_next().await.map_err(map_error)? {
-            self.store
-                .delete(&object.location)
-                .await
-                .map_err(map_error)?;
-        }
-        Ok(())
+        versions::purge_prefix(self.signer.as_ref(), prefix).await
     }
 }
 
 #[async_trait]
 impl BlobBackend for S3Storage {
     fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::none()
+        let mut caps = Capabilities::none()
             .with(Capability::StreamingBlobs)
             .with(Capability::BlobTtl);
         if self.signer.is_some() {
-            caps.with(Capability::PresignedUrls)
-        } else {
-            caps
+            caps = caps
+                .with(Capability::PresignedUrls)
+                .with(Capability::ScopePurge);
         }
-        .with(Capability::ScopePurge)
-        .with(Capability::ScopeEnumeration)
+        caps.with(Capability::ScopeEnumeration)
     }
     fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
         self.for_scope_generation(scope, ScopeGeneration(0))
     }
     fn supports_generation_purge(&self) -> bool {
-        true
+        self.signer.is_some()
     }
     fn for_scope_generation(
         &self,
@@ -291,11 +282,20 @@ impl BlobBackend for S3Storage {
             format!("{base}scopes/"),
             format!("{base}scope-generations/"),
         ] {
-            let path = Path::parse(root.trim_end_matches('/'))
-                .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
-            let mut objects = self.store.list(Some(&path));
-            while let Some(object) = objects.try_next().await.map_err(map_error)? {
-                let Some(rest) = object.location.as_ref().strip_prefix(&root) else {
+            let keys = if self.signer.is_some() {
+                versions::list_keys(self.signer.as_ref(), &root).await?
+            } else {
+                let path = Path::parse(root.trim_end_matches('/'))
+                    .map_err(|_| StorageError::invalid_input("invalid scope prefix"))?;
+                let mut objects = self.store.list(Some(&path));
+                let mut keys = Vec::new();
+                while let Some(object) = objects.try_next().await.map_err(map_error)? {
+                    keys.push(object.location.to_string());
+                }
+                keys
+            };
+            for key in keys {
+                let Some(rest) = key.strip_prefix(&root) else {
                     continue;
                 };
                 let Some((encoded, _)) = rest.split_once('/') else {

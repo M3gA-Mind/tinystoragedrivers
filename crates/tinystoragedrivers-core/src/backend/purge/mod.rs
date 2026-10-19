@@ -99,6 +99,25 @@ pub struct PurgeReceipt {
 /// deny all generations while pending and require trusted writer quiescence.
 #[async_trait]
 pub trait ScopePurge: Send + Sync + fmt::Debug {
+    /// Whether this bound handle implements generation and fence validation.
+    /// Defaults to false for existing purge ports that predate this contract.
+    fn supports_binding_validation(&self) -> bool {
+        false
+    }
+
+    /// Validate that the bound generation is still admitted and that its
+    /// native fence (when present) remains current, without changing state.
+    ///
+    /// # Errors
+    /// Unsupported validation, a pending/revoked generation, stale fence or
+    /// backend failure.
+    async fn validate_binding(&self) -> Result<()> {
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "this driver cannot validate a scope purge binding",
+        ))
+    }
+
     /// Erase the bound scope and revoke its old handles. On success, the receipt
     /// carries the next generation, exactly one greater than the generation
     /// bound to this purge operation.

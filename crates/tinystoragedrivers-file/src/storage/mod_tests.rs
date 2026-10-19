@@ -284,6 +284,56 @@ async fn stale_fenced_purge_and_status_refuse_without_erasing_data() {
 }
 
 #[tokio::test]
+async fn root_sweeper_reclaims_expired_blobs_from_the_current_generation() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tinystoragedrivers_core::{PurgeMode, PurgeRequest, ScopeGeneration};
+
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(10_000));
+    let clock_now = Arc::clone(&now);
+    let storage = FileStorage::open_with_clock(
+        dir.path(),
+        Arc::new(move || clock_now.load(Ordering::SeqCst)),
+    )
+    .unwrap();
+    let scope = Scope::new("sweeper-after-purge").unwrap();
+    let first = storage.for_scope(&scope).unwrap();
+    let receipt = first
+        .purge(&PurgeRequest {
+            operation_id: "sweeper-generation-reset".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.generation, ScopeGeneration(1));
+
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put_expiring(
+            "expired-in-current-generation",
+            vec![9],
+            None,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+    now.fetch_add(2, Ordering::SeqCst);
+
+    assert_eq!(storage.sweep_expired_blobs(&scope).await.unwrap(), 1);
+    assert!(
+        current
+            .blobs()
+            .get("expired-in-current-generation")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn maximum_scope_has_bounded_durable_purge_metadata_path() {
     let dir = tempfile::tempdir().unwrap();
     let root = FileStorage::open(dir.path()).unwrap();

@@ -80,11 +80,26 @@ async fn backend_blobs_refuses_reserved_scopes_and_legacy_namespace_collisions()
     let blobs = BackendBlobs::new(storage.clone());
     for reserved in [
         "__tsd_composite_blob_scope_map",
+        "__tsd_composite_blob_scope_map/private",
         "__tsd_composite_blob_generation",
         "__tsd_composite_blob_generation/legacy-user-data",
         "__tsd_composite_purge_coordinator",
+        "__tsd_composite_purge_coordinator/private",
     ] {
-        assert!(blobs.for_scope(&Scope::new(reserved).unwrap()).is_err());
+        let scope = Scope::new(reserved).unwrap();
+        assert!(blobs.for_scope(&scope).is_err());
+        assert!(
+            blobs
+                .for_scope_generation(&scope, ScopeGeneration(1))
+                .is_err()
+        );
+        assert!(blobs.purge_scope(&scope).await.is_err());
+        assert!(
+            blobs
+                .purge_scope_generation(&scope, ScopeGeneration(1))
+                .await
+                .is_err()
+        );
     }
 
     let logical = Scope::new("u:preexisting-collision").unwrap();

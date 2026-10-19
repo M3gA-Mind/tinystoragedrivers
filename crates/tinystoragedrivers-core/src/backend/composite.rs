@@ -12,7 +12,7 @@ mod pending_ports;
 mod purge;
 use admission::{FencedBlobs, GenerationBlobs};
 use pending_ports::{PendingDocuments, PendingStreams};
-use purge::{CompositePurge, coordinator_scope, ensure_public_scope, is_public_scope};
+use purge::{CompositePurge, coordinator_scope_for_layer, ensure_public_scope, is_public_scope};
 
 /// A connected backend that provides only scoped blob handles.
 #[async_trait]
@@ -130,10 +130,24 @@ impl CompositeStorage {
             ));
         };
         let can_purge = self.records.capabilities().contains(Capability::ScopePurge)
+            && self.records.supports_scope_purge_binding_validation()
+            && records.supports_purge_binding_validation()
             && self.blobs.supports_generation_purge()
             && self.blobs.capabilities().contains(Capability::ScopePurge);
+        if generation != ScopeGeneration(0) && !can_purge {
+            return Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "composite backend cannot validate scope generation bindings",
+            ));
+        }
         let coordinator = can_purge
-            .then(|| self.records.for_scope(&coordinator_scope()?))
+            .then(|| {
+                let depth = self.records.composite_depth().ok_or_else(|| {
+                    StorageError::backend("composite storage nesting depth overflowed")
+                })?;
+                self.records
+                    .for_composite_internal_scope(&coordinator_scope_for_layer(depth)?)
+            })
             .transpose()?;
         let blobs: Arc<dyn BlobStore> = Arc::new(GenerationBlobs {
             inner: if fenced {
@@ -143,6 +157,7 @@ impl CompositeStorage {
             },
             records: records.clone(),
             coordinator: coordinator.clone(),
+            validate_generation: coordinator.is_some(),
         });
         let mut combined = ScopedStorage::new(
             scope,
@@ -214,6 +229,7 @@ impl StorageBackend for CompositeStorage {
             }
         }
         if self.records.capabilities().contains(Capability::ScopePurge)
+            && self.records.supports_scope_purge_binding_validation()
             && self.blobs.supports_generation_purge()
             && self.blobs.capabilities().contains(Capability::ScopePurge)
         {
@@ -231,6 +247,26 @@ impl StorageBackend for CompositeStorage {
             caps = caps.with(Capability::ScopeEnumeration);
         }
         caps
+    }
+    fn composite_depth(&self) -> Option<usize> {
+        self.records
+            .composite_depth()
+            .and_then(|depth| depth.checked_add(1))
+    }
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        self.capabilities().contains(Capability::ScopePurge)
+    }
+    fn for_composite_internal_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        if scope.as_str() != "__tsd_composite_purge_coordinator"
+            && !scope
+                .as_str()
+                .starts_with("__tsd_composite_purge_coordinator/")
+        {
+            return Err(StorageError::invalid_input(
+                "invalid internal composite storage scope",
+            ));
+        }
+        self.records.for_composite_internal_scope(scope)
     }
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
         ensure_public_scope(scope)?;
@@ -250,10 +286,11 @@ impl StorageBackend for CompositeStorage {
         generation: ScopeGeneration,
     ) -> Result<ScopedStorage> {
         ensure_public_scope(scope)?;
-        if !self.records.capabilities().contains(Capability::ScopePurge)
-            || !self.blobs.supports_generation_purge()
-            || !self.blobs.capabilities().contains(Capability::ScopePurge)
-        {
+        let can_purge = self.records.capabilities().contains(Capability::ScopePurge)
+            && self.records.supports_scope_purge_binding_validation()
+            && self.blobs.supports_generation_purge()
+            && self.blobs.capabilities().contains(Capability::ScopePurge);
+        if !can_purge && generation != ScopeGeneration(0) {
             let _ = (scope, generation);
             return Err(StorageError::unsupported(
                 Capability::ScopePurge,
@@ -273,10 +310,11 @@ impl StorageBackend for CompositeStorage {
         fence: &Fence,
     ) -> Result<ScopedStorage> {
         ensure_public_scope(scope)?;
-        if !self.records.capabilities().contains(Capability::ScopePurge)
-            || !self.blobs.supports_generation_purge()
-            || !self.blobs.capabilities().contains(Capability::ScopePurge)
-        {
+        let can_purge = self.records.capabilities().contains(Capability::ScopePurge)
+            && self.records.supports_scope_purge_binding_validation()
+            && self.blobs.supports_generation_purge()
+            && self.blobs.capabilities().contains(Capability::ScopePurge);
+        if !can_purge && generation != ScopeGeneration(0) {
             let _ = (scope, generation, fence);
             return Err(StorageError::unsupported(
                 Capability::ScopePurge,

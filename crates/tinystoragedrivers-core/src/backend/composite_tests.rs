@@ -94,6 +94,117 @@ impl BlobBackend for NoPurgeBlobs {
     }
 }
 
+#[derive(Debug)]
+struct NoPurgeRecords(MemoryStorage);
+
+impl StorageBackend for NoPurgeRecords {
+    fn driver(&self) -> &'static str {
+        self.0.driver()
+    }
+    fn document_driver(&self) -> &'static str {
+        self.0.document_driver()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities().without(Capability::ScopePurge)
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        self.0.for_scope_fenced(scope, fence)
+    }
+}
+
+#[derive(Debug)]
+struct LegacyPurgeRecords(MemoryStorage);
+
+#[derive(Debug)]
+struct LegacyNativePurge;
+
+#[async_trait]
+impl crate::ScopePurge for LegacyNativePurge {
+    async fn purge(&self, request: &PurgeRequest) -> Result<crate::PurgeReceipt> {
+        Ok(crate::PurgeReceipt {
+            operation_id: request.operation_id.clone(),
+            generation: ScopeGeneration(1),
+            status: PurgeStatus::Complete,
+            stage: crate::PurgeStage::Complete,
+        })
+    }
+}
+
+impl StorageBackend for LegacyPurgeRecords {
+    fn driver(&self) -> &'static str {
+        self.0.driver()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        Ok(self
+            .0
+            .for_scope(scope)?
+            .with_purge(Arc::new(LegacyNativePurge)))
+    }
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        Ok(self
+            .0
+            .for_scope_fenced(scope, fence)?
+            .with_purge(Arc::new(LegacyNativePurge)))
+    }
+}
+
+#[tokio::test]
+async fn composite_does_not_advertise_purge_for_legacy_native_purge_ports() {
+    let composite = CompositeStorage::new(
+        Arc::new(LegacyPurgeRecords(MemoryStorage::new())),
+        Arc::new(MemoryGenerationBlobs(Arc::new(MemoryStorage::new()))),
+    );
+    let scope = Scope::new("u:legacy-purge-validation").unwrap();
+    assert!(!composite.capabilities().contains(Capability::ScopePurge));
+    let scoped = composite.for_scope(&scope).unwrap();
+    assert!(!scoped.capabilities().contains(Capability::ScopePurge));
+    assert_eq!(
+        scoped
+            .purge(&PurgeRequest {
+                operation_id: "legacy-validator".into(),
+                mode: PurgeMode::Quiescent,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+}
+
+#[tokio::test]
+async fn native_records_purge_revokes_external_blob_handles_without_composite_purge() {
+    let records = Arc::new(MemoryStorage::new());
+    let external_blobs = Arc::new(MemoryStorage::new());
+    let composite = CompositeStorage::new(
+        records.clone(),
+        Arc::new(NoPurgeBlobs(BackendBlobs::new(external_blobs))),
+    );
+    let scope = Scope::new("u:native-purge-external-blobs").unwrap();
+    let old = composite.for_scope(&scope).unwrap();
+    old.blobs().put("object", vec![7], None).await.unwrap();
+
+    records
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&PurgeRequest {
+            operation_id: "native-record-purge".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        old.blobs().get("object").await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+}
+
 #[tokio::test]
 async fn blob_backends_without_optional_scope_ports_refuse_them() {
     let backend = NoPurgeBlobs(BackendBlobs::new(Arc::new(MemoryStorage::new())));
@@ -139,6 +250,7 @@ async fn blob_backends_without_optional_scope_ports_refuse_them() {
         crate::ErrorKind::Unsupported(Capability::ScopePurge)
     );
 }
+
 #[async_trait]
 impl BlobBackend for FailPurgeOnce {
     fn capabilities(&self) -> Capabilities {
@@ -400,6 +512,9 @@ fn blob_backend_cannot_invent_document_watch_or_transaction_capabilities() {
 
 #[path = "composite_purge_tests.rs"]
 mod purge_tests;
+
+#[path = "composite_scope_tests.rs"]
+mod scope_tests;
 
 #[test]
 fn composite_document_driver_preserves_record_identity_instead_of_blob_or_wrapper_name() {

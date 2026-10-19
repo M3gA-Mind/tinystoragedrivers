@@ -148,7 +148,11 @@ impl BackendBlobs {
 
     fn internal_scope(scope: &Scope) -> bool {
         scope.as_str() == MAP_SCOPE
+            || scope.as_str().starts_with(&format!("{MAP_SCOPE}/"))
             || scope.as_str() == super::purge::COMPOSITE_PURGE_SCOPE
+            || scope
+                .as_str()
+                .starts_with(&format!("{}/", super::purge::COMPOSITE_PURGE_SCOPE))
             || scope.as_str() == INTERNAL_PREFIX
             || scope.as_str().starts_with(&format!("{INTERNAL_PREFIX}/"))
     }

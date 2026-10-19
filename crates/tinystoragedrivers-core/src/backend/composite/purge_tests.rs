@@ -6,6 +6,10 @@ struct InvalidZeroGenerationReceipt;
 
 #[async_trait]
 impl ScopePurge for InvalidZeroGenerationReceipt {
+    async fn validate_binding(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
     async fn purge(&self, _request: &PurgeRequest) -> Result<PurgeReceipt> {
         Err(StorageError::backend("unexpected native purge call"))
     }
@@ -25,6 +29,10 @@ struct MismatchedOperationReceipt;
 
 #[async_trait]
 impl ScopePurge for MismatchedOperationReceipt {
+    async fn validate_binding(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
     async fn purge(&self, _request: &PurgeRequest) -> Result<PurgeReceipt> {
         Err(StorageError::backend("unexpected native purge call"))
     }
