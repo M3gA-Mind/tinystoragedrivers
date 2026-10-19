@@ -1,7 +1,7 @@
 //! Optional `MinIO` conformance and a large streaming roundtrip.
 //! Set `TSD_S3_URL` plus `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` to a local test bucket.
 
-use tinystoragedrivers_core::{BlobBackend, BlobStore as _, Scope};
+use tinystoragedrivers_core::{BlobBackend, Scope};
 use tinystoragedrivers_s3::{S3Config, S3Storage};
 use tokio::io::AsyncReadExt;
 

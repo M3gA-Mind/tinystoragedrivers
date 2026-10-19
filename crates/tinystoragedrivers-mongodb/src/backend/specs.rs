@@ -25,9 +25,7 @@ use futures_util::TryStreamExt;
 use mongodb::IndexModel;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::IndexOptions;
-use tinystoragedrivers_core::{
-    Capability, CollectionSpec, Result, Scope, SearchSpec, StorageError,
-};
+use tinystoragedrivers_core::{Capability, CollectionSpec, Result, SearchSpec, StorageError};
 
 use super::Shared;
 use crate::documents::stored::{Stored, bury, expired_filter, not_deleted, visible};

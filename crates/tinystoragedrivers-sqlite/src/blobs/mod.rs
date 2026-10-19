@@ -63,21 +63,18 @@ impl SqliteBlobs {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
         let tables = Arc::clone(&self.tables);
-        let scope = self.scope.clone();
         let fencing = self.fencing.clone();
         self.db
             .run(move |conn| fence::write(conn, fencing.as_deref(), &tables, |tx| f(tx)))
             .await
     }
 
-    /// Read generation and data in one native snapshot.
+    /// Read data in one native snapshot.
     async fn read<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
-        let tables = Arc::clone(&self.tables);
-        let scope = self.scope.clone();
         self.db
             .run(move |conn| {
                 let tx = conn
