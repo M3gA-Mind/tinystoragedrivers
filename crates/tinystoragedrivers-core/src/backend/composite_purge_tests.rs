@@ -211,23 +211,48 @@ async fn successive_composite_purges_preserve_each_completed_history_receipt() {
     };
     let second = second_scope.purge(&second_request).await.unwrap();
     assert_eq!(second.generation, ScopeGeneration(2));
+    let current = backend
+        .for_scope_generation(&scope, second.generation)
+        .unwrap();
+    current
+        .blobs()
+        .put("generation-two", vec![2], None)
+        .await
+        .unwrap();
+    let sibling = Scope::new("u:successive-reset-sibling").unwrap();
+    let sibling_store = backend.for_scope(&sibling).unwrap();
+    sibling_store
+        .blobs()
+        .put("sibling", vec![3], None)
+        .await
+        .unwrap();
     assert_eq!(
-        backend
-            .for_scope_generation(&scope, second.generation)
-            .unwrap()
+        current
             .purge_status(&first_request.operation_id)
             .await
             .unwrap(),
         Some(first.clone())
     );
+    assert_eq!(current.purge(&first_request).await.unwrap(), first);
     assert_eq!(
-        backend
-            .for_scope_generation(&scope, second.generation)
-            .unwrap()
-            .purge(&first_request)
+        current
+            .blobs()
+            .get("generation-two")
             .await
-            .unwrap(),
-        first
+            .unwrap()
+            .unwrap()
+            .bytes,
+        [2]
+    );
+    assert_eq!(
+        sibling_store
+            .blobs()
+            .get("sibling")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        [3]
     );
 }
 
