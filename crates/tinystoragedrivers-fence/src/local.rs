@@ -310,6 +310,30 @@ impl LeaseStore for LocalLeases {
         }
         Ok(self.read_record(key)?)
     }
+
+    async fn holder(&self, key: &str) -> Result<Option<LeaseRecord>, LeaseError> {
+        if let Some(holding) = self.held().get(key) {
+            return Ok(Some(holding.record.clone()));
+        }
+        let Some(mut record) = self.read_record(key)? else {
+            return Ok(None);
+        };
+        if !record.released {
+            let lock = self.open_lock(key)?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => {
+                    let _ = FileExt::unlock(&lock);
+                    // This is an observation only. Keep the returned record's
+                    // identity and durable epoch while exposing that the OS
+                    // ownership lock is currently free.
+                    record.expires_ms = 0;
+                }
+                Err(error) if Self::is_contended(&error) => {}
+                Err(error) => return Err(storage_io(error).into()),
+            }
+        }
+        Ok(Some(record))
+    }
 }
 
 fn storage_io(error: std::io::Error) -> StorageError {

@@ -10,6 +10,9 @@ async fn a_local_lock_excludes_an_independent_store_until_release() {
     let second = LocalLeases::new(root.path(), "node-b").unwrap();
 
     let grant = first.acquire("alice", 1_000).await.unwrap();
+    let live = second.holder("alice").await.unwrap().unwrap();
+    assert!(is_live(&live, 1_000));
+    assert_eq!(live.epoch, grant.epoch);
     assert!(matches!(
         second.acquire("alice", 1_000).await,
         Err(LeaseError::Held(_))
@@ -42,6 +45,52 @@ async fn local_lock_excludes_a_separate_process() {
         .unwrap();
     assert!(result.success());
     first.release(grant).await.unwrap();
+}
+
+#[cfg(feature = "file")]
+#[tokio::test]
+async fn local_holder_observes_a_dead_process_without_erasing_its_epoch() {
+    if std::env::var_os("TSD_LOCAL_LOCK_OWNER_CHILD").is_some() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "tests::local_lock_child_exits_while_holding",
+        ])
+        .env("TSD_LOCAL_LOCK_OWNER_CHILD", "1")
+        .env("TSD_LOCAL_LOCK_ROOT", root.path())
+        .status()
+        .unwrap();
+    assert!(result.success());
+
+    let observer = LocalLeases::new(root.path(), "observer").unwrap();
+    let raw = observer.inspect("alice").await.unwrap().unwrap();
+    assert!(is_live(&raw, 1_001));
+    assert_eq!(raw.epoch, 1);
+
+    let holder_view = observer.holder("alice").await.unwrap().unwrap();
+    assert!(!is_live(&holder_view, 1_001));
+    assert_eq!(holder_view.epoch, 1);
+    assert_eq!(holder_view.holder, "child");
+    assert!(!holder_view.released);
+
+    let takeover = observer.acquire("alice", 1_002).await.unwrap();
+    assert_eq!(takeover.epoch, 2);
+    assert!(takeover.previous_unclean);
+    assert_eq!(observer.inspect("alice").await.unwrap().unwrap().epoch, 2);
+}
+
+#[cfg(feature = "file")]
+#[tokio::test]
+#[ignore = "invoked as a child process by local_holder_observes_a_dead_process_without_erasing_its_epoch"]
+async fn local_lock_child_exits_while_holding() {
+    let root = std::path::PathBuf::from(std::env::var_os("TSD_LOCAL_LOCK_ROOT").unwrap());
+    let child = LocalLeases::new(root, "child").unwrap();
+    let grant = child.acquire("alice", 1_000).await.unwrap();
+    assert_eq!(grant.epoch, 1);
 }
 
 #[cfg(feature = "file")]

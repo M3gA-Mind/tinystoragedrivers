@@ -52,6 +52,15 @@ pub trait LeaseStore: Send + Sync {
     /// Inspect the stored record, including expired and released records.
     async fn inspect(&self, key: &str) -> Result<Option<StoredLeaseRecord>, LeaseError>;
 
+    /// Observe the current holder when the backend can distinguish a live
+    /// owner from a durable record left behind by a dead process.
+    ///
+    /// Stores without a separate liveness signal return their stored record.
+    /// This does not mutate or erase the durable record.
+    async fn holder(&self, key: &str) -> Result<Option<StoredLeaseRecord>, LeaseError> {
+        self.inspect(key).await
+    }
+
     /// Return the driver's atomic write fence when this store keeps lease
     /// records in the same storage backend as protected writes.
     fn driver_fence(&self, _key: &str, _holder: &str, _epoch: u64) -> Option<Fence> {

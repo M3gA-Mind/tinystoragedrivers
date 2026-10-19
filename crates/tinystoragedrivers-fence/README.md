@@ -9,7 +9,7 @@ TTL. Its fencing token is enforced by `StorageBackend::for_scope_fenced` in
 the same atomic step as protected document, stream and blob writes.
 
 Enable the `file` feature for `LocalLeases`, which holds a portable advisory
-file lock for each key. The lock excludes other processes until release or
-process exit, including after the reported TTL expires. This backend-less
-store does not issue a driver fence; a local lock cannot atomically protect
-writes in an unrelated backend.
+file lock for each key until release or process exit. `inspect` returns the
+durable record, while `holder` also checks whether the process lock is still
+held. This backend-less store does not issue a driver fence; a local lock
+cannot atomically protect writes in an unrelated backend.
