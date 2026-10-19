@@ -123,6 +123,29 @@ async fn status_for_an_unseen_operation_returns_none() {
 }
 
 #[tokio::test]
+async fn conflict_recovery_without_a_current_receipt_is_not_completion() {
+    let records = Arc::new(MemoryStorage::new());
+    let scope = Scope::new("u:disappeared-purge-coordinator").unwrap();
+    let composite = CompositePurge {
+        records: records.for_scope(&scope).unwrap(),
+        blobs: Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator: records.for_scope(&coordinator_scope().unwrap()).unwrap(),
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    assert_eq!(
+        composite
+            .completed_after_conflict("concurrent-operation")
+            .await
+            .unwrap(),
+        None,
+        "a missing coordinator receipt cannot confirm a concurrent completion"
+    );
+}
+
+#[tokio::test]
 async fn revoked_coordinator_handle_fails_closed_before_blob_erasure() {
     let records = Arc::new(MemoryStorage::new());
     let blob_storage = Arc::new(MemoryStorage::new());
