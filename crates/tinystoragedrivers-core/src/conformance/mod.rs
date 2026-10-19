@@ -95,13 +95,71 @@ pub async fn run_queue(queue: &dyn crate::queue::QueueStore) {
 /// # Panics
 ///
 /// On the first check the driver fails, naming it. That is the suite's
-/// purpose: it is called from a driver's tests.
+/// purpose: it is called from a driver's tests. Also panics if
+/// [`StorageBackend::driver`] is not a registered native driver;
+/// external drivers should call [`run_with_process_capabilities`] instead.
 pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
+    // These expectations cover every built-in native record driver. A new
+    // driver must choose its guarantees explicitly instead of silently
+    // skipping the declaration checks.
+    let expected = match backend.driver() {
+        "memory" | "file" => Some((false, false)),
+        "sqlite" | "mongodb" => Some((true, true)),
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        panic!(
+            "unregistered backend driver {:?}; call run_with_process_capabilities with its expected declarations",
+            backend.driver()
+        )
+    });
+    run_with_process_capabilities(backend, single_scope, expected.0, expected.1).await;
+}
+
+/// Run the behavioral suite with explicit process capability expectations.
+///
+/// Built-in drivers should use [`run`], which binds expectations to their
+/// registered native driver identity. External drivers should use this entry
+/// point and state both declarations so they cannot accidentally bypass the
+/// capability conformance checks. It validates the process flags on both the
+/// backend and its scoped document handles (`local`, and `conformance-b` for
+/// a multi-scope backend). [`Capability::SharedAcrossProcesses`]
+/// includes the guarantees of [`Capability::CrossProcessCas`], so declaring
+/// shared visibility without cross-process CAS is invalid.
+///
+/// # Panics
+///
+/// Panics when the backend or scoped document capability flags do not match
+/// the supplied expectations, or when any behavioral check fails.
+pub async fn run_with_process_capabilities(
+    backend: &dyn StorageBackend,
+    single_scope: bool,
+    shared_across_processes: bool,
+    cross_process_cas: bool,
+) {
+    let capabilities = backend.capabilities();
+    assert!(
+        !capabilities.contains(Capability::SharedAcrossProcesses)
+            || capabilities.contains(Capability::CrossProcessCas),
+        "{} declares SharedAcrossProcesses without required CrossProcessCas",
+        backend.document_driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::SharedAcrossProcesses),
+        shared_across_processes,
+        "{} shared_across_processes capability declaration",
+        backend.document_driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::CrossProcessCas),
+        cross_process_cas,
+        "{} cross_process_cas capability declaration",
+        backend.document_driver()
+    );
     let local = backend
         .for_scope(&Scope::local())
         .expect("for_scope(local) must succeed");
-    run_ports(&local).await;
-    seal::run_host(&local).await;
+    check_document_process_capabilities(&local, shared_across_processes, cross_process_cas);
     if single_scope {
         let other = Scope::new("conformance-b").expect("valid scope");
         assert!(
@@ -109,6 +167,15 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
             "single-scope backend accepted a foreign scope"
         );
     } else {
+        let other_scope = Scope::new("conformance-b").expect("valid scope");
+        let other = backend
+            .for_scope(&other_scope)
+            .expect("multi-scope backend must accept conformance-b");
+        check_document_process_capabilities(&other, shared_across_processes, cross_process_cas);
+    }
+    run_ports(&local).await;
+    seal::run_host(&local).await;
+    if !single_scope {
         isolation::run(backend).await;
         isolation::nested(backend).await;
         validated::isolation(backend).await;
@@ -120,6 +187,32 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     fencing::run(backend, single_scope).await;
 }
 
+fn check_document_process_capabilities(
+    storage: &ScopedStorage,
+    shared_across_processes: bool,
+    cross_process_cas: bool,
+) {
+    let capabilities = storage.documents().capabilities();
+    assert!(
+        !capabilities.contains(Capability::SharedAcrossProcesses)
+            || capabilities.contains(Capability::CrossProcessCas),
+        "{} scoped documents declare SharedAcrossProcesses without required CrossProcessCas",
+        storage.driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::SharedAcrossProcesses),
+        shared_across_processes,
+        "{} scoped documents shared_across_processes capability declaration",
+        storage.driver()
+    );
+    assert_eq!(
+        capabilities.contains(Capability::CrossProcessCas),
+        cross_process_cas,
+        "{} scoped documents cross_process_cas capability declaration",
+        storage.driver()
+    );
+}
+
 /// Run the shared-handle checks against backends `open` yields: each call
 /// opens a new, independent backend on the same store (another connection to
 /// one SQLite file or one `MongoDB` database, a directory reopened).
@@ -127,10 +220,13 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
 /// A driver that reports [`Capability::SharedAcrossProcesses`] must show that
 /// handles see each other's writes at once and arbitrate races between them:
 /// racing lease acquires have exactly one winner (at epoch 1 for a fresh
-/// key) and racing version-guarded puts do too. Every driver, with or
-/// without the capability, must show that a backend opened after another one
-/// was dropped reads what it wrote and continues its versions, offsets and
-/// lease epochs.
+/// key), and racing version-guarded puts do too. A driver that reports
+/// [`Capability::CrossProcessCas`] must also arbitrate racing claims,
+/// version-guarded puts and create-only puts, even if it does not promise
+/// immediate visibility across all storage ports. Drivers with neither
+/// capability get only the reopen check. Every driver, with or without either
+/// capability, must show that a backend opened after another one was dropped
+/// reads what it wrote and continues its versions, offsets and lease epochs.
 ///
 /// `open` is called many times; it must not clear the store.
 ///

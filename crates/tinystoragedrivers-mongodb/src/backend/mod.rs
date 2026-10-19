@@ -464,8 +464,9 @@ impl StorageBackend for MongoStorage {
             .with(Capability::CollectionValidation)
             .with(Capability::BlobTtl)
             .with(Capability::ScopeEnumeration)
+            .with(Capability::StreamSeal)
             .with(Capability::SharedAcrossProcesses)
-            .with(Capability::StreamSeal);
+            .with(Capability::CrossProcessCas);
         let base = if self.shared.physical_transactions {
             base.with(Capability::Watch)
         } else {

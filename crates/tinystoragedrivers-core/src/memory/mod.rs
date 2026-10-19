@@ -180,6 +180,7 @@ impl StorageBackend for MemoryStorage {
             .without(crate::Capability::PresignedUrls)
             .without(crate::Capability::StreamingBlobs)
             .without(crate::Capability::SharedAcrossProcesses)
+            .without(crate::Capability::CrossProcessCas)
     }
 
     fn supports_scope_purge_binding_validation(&self) -> bool {

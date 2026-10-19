@@ -22,7 +22,7 @@ use crate::primitives::{self, Leases};
 use crate::scope::Scope;
 
 /// Handles opened for each race.
-const RACERS: usize = 6;
+pub(super) const RACERS: usize = 6;
 
 /// Rounds of each race, each on a fresh key.
 const ROUNDS: usize = 3;
@@ -38,22 +38,33 @@ where
     let shared = first
         .capabilities()
         .contains(Capability::SharedAcrossProcesses);
-    if shared {
+    let cross_process_cas = first.capabilities().contains(Capability::CrossProcessCas);
+    let fencing = first.capabilities().contains(Capability::Fencing);
+    if shared || cross_process_cas {
         let second = open().await;
         assert!(
             second
                 .capabilities()
-                .contains(Capability::SharedAcrossProcesses),
+                .contains(Capability::SharedAcrossProcesses)
+                == shared
+                && second.capabilities().contains(Capability::CrossProcessCas) == cross_process_cas
+                && second.capabilities().contains(Capability::Fencing) == fencing,
             "independently opened backends report different capabilities"
         );
-        visibility(&handle(&first), &handle(&second)).await;
+        if fencing {
+            stale_fence_race(&first, &second).await;
+        }
+        if shared {
+            visibility(&handle(&first), &handle(&second)).await;
+        }
         let mut racers = vec![first, second];
         while racers.len() < RACERS {
             racers.push(open().await);
         }
         let racers: Vec<ScopedStorage> = racers.iter().map(handle).collect();
-        lease_race(&racers).await;
-        version_races(&racers).await;
+        claim_race(&racers, shared).await;
+        lease_race(&racers, shared).await;
+        version_races(&racers, shared).await;
     } else {
         drop(first);
     }
@@ -62,6 +73,161 @@ where
 
 fn handle(backend: &impl StorageBackend) -> ScopedStorage {
     ok(backend.for_scope(&Scope::local()), "shared handle")
+}
+
+/// A single candidate claimed concurrently is returned to exactly one handle.
+async fn claim_race(handles: &[ScopedStorage], shared: bool) {
+    let coll = unique("shared_claim");
+    let id = "candidate";
+    ok(
+        handles[0]
+            .documents()
+            .put(&coll, id, json!({"state": "ready"}), Precondition::Absent)
+            .await,
+        "claim race seed",
+    );
+    let tasks: Vec<_> = handles
+        .iter()
+        .map(|storage| {
+            let docs = std::sync::Arc::clone(storage.documents());
+            let coll = coll.clone();
+            tokio::spawn(async move {
+                docs.claim(
+                    &coll,
+                    &crate::Filter::eq("state", "ready"),
+                    &[],
+                    &json!({"state": "claimed"}),
+                )
+                .await
+            })
+        })
+        .collect();
+    let mut winners = Vec::new();
+    for task in tasks {
+        if let Some(claimed) = ok(
+            ok(task.await.map_err(join_error), "claim race task"),
+            "claim race",
+        ) {
+            winners.push(claimed);
+        }
+    }
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racing document claim must win: {winners:?}"
+    );
+    if shared {
+        for storage in handles {
+            let seen = ok(
+                storage.documents().get(&coll, id).await,
+                "shared claim re-read",
+            )
+            .expect("claimed document remains present");
+            assert_eq!(seen.doc["state"], "claimed");
+        }
+    }
+}
+
+/// A stale fence remains invalid when a different backend handle changes its guard.
+async fn stale_fence_race(first: &impl StorageBackend, second: &impl StorageBackend) {
+    let scope = Scope::local();
+    let guards = unique("shared_fence_guard");
+    let data = unique("shared_fence_data");
+    ok(
+        handle(first)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 1}), Precondition::Absent)
+            .await,
+        "fence race seed",
+    );
+    let fence = crate::Fence::epoch(scope.clone(), &guards, "lease", "epoch", 1);
+    let stale = ok(
+        first.for_scope_fenced(&scope, &fence),
+        "open first fenced handle",
+    );
+    ok(
+        handle(second)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 2}), Precondition::None)
+            .await,
+        "move fence through second handle",
+    );
+    fails(
+        stale
+            .documents()
+            .put(&data, "stale", json!({"write": true}), Precondition::Absent)
+            .await,
+        ErrorKind::Fenced,
+        "cross-open stale fence",
+    );
+
+    // Race an already-started old-holder write against takeover. Either the
+    // old write linearizes before takeover or it is fenced afterward; once
+    // the new holder writes, the old value must never become final.
+    ok(
+        handle(first)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 1}), Precondition::None)
+            .await,
+        "reset fence for in-flight race",
+    );
+    let old = ok(
+        first.for_scope_fenced(&scope, &fence),
+        "open in-flight old holder",
+    );
+    let old_docs = old.documents().clone();
+    let old_data = data.clone();
+    let old_write = old_docs.put(&old_data, "race", json!({"by": "old"}), Precondition::None);
+    tokio::pin!(old_write);
+    // Poll once before takeover. A backend may already have read the old
+    // guard and be waiting to commit under only its per-open lock.
+    let first_poll =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(old_write.as_mut().poll(cx))).await;
+    let (old_result, ()) = tokio::join!(
+        async {
+            match first_poll {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => old_write.await,
+            }
+        },
+        async {
+            ok(
+                handle(second)
+                    .documents()
+                    .put(&guards, "lease", json!({"epoch": 2}), Precondition::None)
+                    .await,
+                "take over during old write",
+            );
+            let new_fence = crate::Fence::epoch(scope.clone(), &guards, "lease", "epoch", 2);
+            let new_holder = ok(
+                second.for_scope_fenced(&scope, &new_fence),
+                "open new holder",
+            );
+            ok(
+                new_holder
+                    .documents()
+                    .put(&data, "race", json!({"by": "new"}), Precondition::None)
+                    .await,
+                "new holder write after takeover",
+            );
+        }
+    );
+    assert!(
+        old_result.is_ok()
+            || old_result
+                .as_ref()
+                .is_err_and(|error| error.kind() == ErrorKind::Fenced),
+        "in-flight old-holder write must succeed before takeover or be fenced afterward: {old_result:?}"
+    );
+    let final_doc = ok(
+        handle(first).documents().get(&data, "race").await,
+        "read final fenced race value",
+    )
+    .expect("new-holder value remains present");
+    assert_eq!(
+        final_doc.doc["by"], "new",
+        "stale in-flight write overwrote the new holder's value"
+    );
 }
 
 /// Each handle sees what the other wrote, deletions included.
@@ -147,7 +313,7 @@ async fn visibility(a: &ScopedStorage, b: &ScopedStorage) {
 }
 
 /// Handles racing to acquire one lease get exactly one winner, at epoch 1.
-async fn lease_race(handles: &[ScopedStorage]) {
+async fn lease_race(handles: &[ScopedStorage], shared: bool) {
     ok(primitives::ensure(&handles[0]).await, "shared primitives");
     let owner = unique("shared_lease");
     for round in 0..ROUNDS {
@@ -180,23 +346,26 @@ async fn lease_race(handles: &[ScopedStorage]) {
         );
         let winner = &granted[0];
         assert_eq!(winner.epoch, 1, "a fresh lease starts at epoch 1");
-        // Every handle agrees on who holds it.
-        for storage in handles {
-            let seen = ok(
-                Leases::new(storage.documents()).current(&owner, &key).await,
-                "shared lease current",
-            );
-            assert_eq!(
-                seen.as_ref(),
-                Some(winner),
-                "handles disagree on the holder"
-            );
+        // General shared visibility is a separate promise from CAS. When it
+        // is declared, every handle must also observe the winning claim.
+        if shared {
+            for storage in handles {
+                let seen = ok(
+                    Leases::new(storage.documents()).current(&owner, &key).await,
+                    "shared lease current",
+                );
+                assert_eq!(
+                    seen.as_ref(),
+                    Some(winner),
+                    "handles disagree on the holder"
+                );
+            }
         }
     }
 }
 
 /// Version-guarded and create-only writes from racing handles: one winner.
-async fn version_races(handles: &[ScopedStorage]) {
+async fn version_races(handles: &[ScopedStorage], shared: bool) {
     let coll = unique("shared_cas");
     for round in 0..ROUNDS {
         let id = format!("d{round}");
@@ -243,14 +412,16 @@ async fn version_races(handles: &[ScopedStorage]) {
         );
         let (index, version) = winners[0];
         assert!(version > seed, "the winner's version moves on");
-        for storage in handles {
-            let read =
-                ok(storage.documents().get(&coll, &id).await, "cas re-read").expect("document");
-            assert_eq!(
-                (read.version, &read.doc["by"]),
-                (version, &json!(index)),
-                "every handle sees the winner's write"
-            );
+        if shared {
+            for storage in handles {
+                let read =
+                    ok(storage.documents().get(&coll, &id).await, "cas re-read").expect("document");
+                assert_eq!(
+                    (read.version, &read.doc["by"]),
+                    (version, &json!(index)),
+                    "every handle sees the winner's write"
+                );
+            }
         }
     }
 

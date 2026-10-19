@@ -219,8 +219,18 @@ Carried (additive; every new field is optional and defaulted):
   the backend has them.
 
 Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
-keeps `maintenance`, `scope_enumeration` and `shared_across_processes` out of every
-capability list):
+keeps `maintenance`, `scope_enumeration`, `shared_across_processes` and
+`cross_process_cas` out of every capability list):
+
+- `shared_across_processes` means independently opened backends on the same
+  store observe one another's writes and agree on the compare-and-swap rules:
+  version preconditions, `Absent` creates, claims and fences arbitrate between
+  processes, so racing handles get one winner. `cross_process_cas` names that
+  conditional-write guarantee explicitly for policy that needs to query it
+  separately; it does not weaken or replace the broader shared-store contract.
+  SQLite and MongoDB declare both; memory and file declare neither. These
+  describe host-side storage coordination, so they have no bus selector and
+  are not exposed to modules.
 
 - `StorageBackend::maintain` and `checkpoint` run vacuum, WAL checkpoints and
   the seal and retention policies across the whole database. A module could
