@@ -307,6 +307,34 @@ fn a_quarantine_name_collision_preserves_both_files() {
 }
 
 #[tokio::test]
+async fn a_source_replaced_before_quarantine_remains_active() {
+    let dir = TempDir::new("quarantine-precheck-replacement");
+    let path = dir.0.join("secrets.enc");
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"credential").await.unwrap();
+    let healthy = fs::read(&path).unwrap();
+    write_atomic(&path, b"corrupt bytes").unwrap();
+
+    let replacement = path.clone();
+    let healthy_bytes = healthy.clone();
+    let retained = path.with_file_name("replaced-corrupt");
+    let _pause = quarantine_pause::Guard::install(move |_| {
+        fs::rename(&replacement, retained).unwrap();
+        fixture_write(&replacement, healthy_bytes).unwrap();
+    });
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+
+    assert_eq!(fs::read(&path).unwrap(), healthy);
+    assert_eq!(
+        store.get("healthy").await.unwrap().unwrap().as_slice(),
+        b"credential"
+    );
+}
+
+#[tokio::test]
 async fn a_replaced_healthy_file_remains_available_after_quarantine_race() {
     let dir = TempDir::new("quarantine-source-replacement");
     let path = dir.0.join("secrets.enc");
@@ -314,7 +342,7 @@ async fn a_replaced_healthy_file_remains_available_after_quarantine_race() {
         .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
     store.set("healthy", b"credential").await.unwrap();
     let healthy = fs::read(&path).unwrap();
-    fixture_write(&path, b"corrupt bytes").unwrap();
+    write_atomic(&path, b"corrupt bytes").unwrap();
 
     let replacement_bytes = healthy.clone();
     let source_path = path.clone();
@@ -337,6 +365,45 @@ async fn a_replaced_healthy_file_remains_available_after_quarantine_race() {
         "a later read must not mistake the moved healthy source for an empty store"
     );
     assert_eq!(fs::read(&path).unwrap(), healthy);
+}
+
+#[tokio::test]
+async fn a_later_writer_wins_over_quarantine_source_restoration() {
+    let dir = TempDir::new("quarantine-later-writer");
+    let path = dir.0.join("secrets.enc");
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"first writer").await.unwrap();
+    let first_writer = fs::read(&path).unwrap();
+    write_atomic(&path, b"corrupt bytes").unwrap();
+
+    let later_dir = TempDir::new("quarantine-later-writer-source");
+    let later_path = later_dir.0.join("secrets.enc");
+    let later_store = EncryptedFileSecrets::new(&later_dir.0, fixture_key());
+    later_store.set("later", b"last writer").await.unwrap();
+    let later_writer = fs::read(later_path).unwrap();
+
+    let first_path = path.clone();
+    let first_bytes = first_writer;
+    let _source_pause = quarantine_source_pause::Guard::install(move || {
+        let displaced = first_path.with_file_name("displaced-corrupt");
+        fs::rename(&first_path, displaced).unwrap();
+        fixture_write(&first_path, first_bytes).unwrap();
+    });
+    let later_path = path.clone();
+    let expected_later_writer = later_writer.clone();
+    let _restore_pause = quarantine_restore_pause::Guard::install(move || {
+        fixture_write(later_path, later_writer).unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    assert!(store.inner.read_map_in(&lock.namespace).is_err());
+    drop(lock);
+    assert_eq!(fs::read(&path).unwrap(), expected_later_writer);
+    assert_eq!(
+        store.get("later").await.unwrap().unwrap().as_slice(),
+        b"last writer"
+    );
 }
 
 #[tokio::test]
@@ -673,6 +740,17 @@ fn guarded_names_reject_root_parent_and_multiple_components() {
         assert!(secure::leaf(Path::new(name)).is_err());
     }
     assert!(secure::file_name(Path::new("/")).is_err());
+}
+
+#[test]
+fn locked_debug_redacts_admitted_paths() {
+    let dir = TempDir::new("lock-debug");
+    let path = dir.0.join("private-secrets.lock");
+    let lock = lock_file(&path).unwrap();
+    let debug = format!("{lock:?}");
+
+    assert_eq!(debug, "Locked { .. }");
+    assert!(!debug.contains(path.to_str().unwrap()));
 }
 
 #[cfg(unix)]
@@ -1035,12 +1113,44 @@ mod quarantine_source_pause {
     }
 }
 
+mod quarantine_restore_pause {
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce()>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce() + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run() {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
 }
 
 pub(super) fn after_quarantine_source_check() {
     quarantine_source_pause::run();
+}
+
+pub(super) fn after_quarantine_mismatch() {
+    quarantine_restore_pause::run();
 }
 
 pub(super) fn after_staged_publication_identity() {

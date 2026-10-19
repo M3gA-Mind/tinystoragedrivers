@@ -1,7 +1,9 @@
 //! Small filesystem helpers: atomic replacement, optional reads, directory
-//! listings, and the mapping from [`std::io::Error`] to [`StorageError`].
+//! listings, and the mapping from [`std::io::Error`] to
+//! [`tinystoragedrivers_core::StorageError`].
 //!
-//! Every write that replaces a whole file goes through [`write_atomic`]: the
+//! Every write that replaces a whole file goes through
+//! [`crate::fsio::write_atomic`]: the
 //! bytes land in a temporary file in the same directory, are flushed to disk,
 //! and are renamed over the target, so a reader (or a crash) sees the old file
 //! or the new one, never a torn mix. Temporary files start with `.`, which no
