@@ -239,7 +239,7 @@ impl DocumentQueue {
             .map_err(|_| StorageError::backend("queue spec cache poisoned"))
     }
 
-    async fn spec(&self, queue: &str) -> Result<QueueSpec> {
+    pub(super) async fn spec(&self, queue: &str) -> Result<QueueSpec> {
         if let Some(spec) = self.lock_specs()?.get(queue) {
             return Ok(*spec);
         }

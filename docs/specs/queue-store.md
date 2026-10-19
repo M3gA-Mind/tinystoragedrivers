@@ -71,6 +71,31 @@ pub trait QueueStore: Send + Sync + Debug {
   ago, returns `Enqueued { duplicate: true }` with the held message's id and
   stores nothing.
 
+### Queue manifest
+
+Queues are declared in a JSON file, not in code, so people and agents add or
+tune one by editing a file. `QueueManifest::load(path)` (or `from_json`) reads
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/tinyhumansai/tinystoragedrivers/main/schemas/queues.schema.json",
+  "version": 1,
+  "queues": [
+    {"name": "inbound.ingress", "description": "...", "owner": "tinyeventqueues",
+     "max_attempts": 8, "dedupe_window_ms": 2592000000, "visibility_ms": 30000}
+  ]
+}
+```
+
+and `apply(&dyn QueueStore)` declares every queue it lists. Only `name` is
+required; `max_attempts` and `dedupe_window_ms` default to `QueueSpec`'s
+defaults, and `visibility_ms` is a hint for consumers. Parsing is strict:
+unknown fields, an unsupported `version`, invalid or duplicate names and
+invalid values fail with `InvalidInput` naming the entry (`queues[1] ("Bad")`)
+or the line and column. `schemas/queues.schema.json` describes the format for
+editors and agents, and a test keeps it in step with `QueueDeclaration`.
+[`docs/examples/queues.json`](../examples/queues.json) is a working example.
+
 ## Invariants and constraints
 
 - A message is leased to at most one receipt at a time.

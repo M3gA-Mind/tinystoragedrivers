@@ -21,6 +21,11 @@
 //!   a restart is recognized;
 //! - **priorities** and **delay**.
 //!
+//! Queues are declared in a JSON file, not in code: [`QueueManifest`] loads
+//! `queues.json` (format in `schemas/queues.schema.json`) and
+//! [`apply`](QueueManifest::apply) declares every queue it lists, so people
+//! and agents add or tune a queue by editing the file.
+//!
 //! [`DocumentQueue`] implements every feature over any
 //! [`DocumentStore`](crate::DocumentStore), so every document driver (memory,
 //! `SQLite`, file, `MongoDB`) is a queue backend. A broker driver implements
@@ -45,6 +50,7 @@
 //! ```
 
 mod document;
+mod manifest;
 mod types;
 
 use async_trait::async_trait;
@@ -52,6 +58,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 
 pub use document::{DocumentQueue, GROUPS, MESSAGES, SPECS, collection_specs, ensure};
+pub use manifest::{QUEUE_MANIFEST_VERSION, QueueDeclaration, QueueManifest};
 pub use types::{
     DeadLetter, Delivery, Enqueued, MAX_PRIORITY, MAX_QUEUE_NAME_LEN, NewMessage, QueueFeatures,
     QueueSpec, QueueStats, Receipt, Retry, validate_queue_name,

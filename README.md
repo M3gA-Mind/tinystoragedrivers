@@ -42,7 +42,9 @@ mongodb://db.example/openhuman?retryWrites=true&blobs=s3%3A%2F%2Fbucket%2Fattach
 - **`QueueStore`** holds durable at-least-once message queues: leases with a
   visibility window, retries, dead letters, priorities, delays, per-group
   serialization and dedupe keys. `queue::DocumentQueue` runs one on any
-  `DocumentStore`, so every document driver is a queue backend.
+  `DocumentStore`, so every document driver is a queue backend. Queues are
+  declared in an editable `queues.json` manifest (`queue::QueueManifest`,
+  format in `schemas/queues.schema.json`).
 
 A `StorageBackend` hands out a `ScopedStorage` for each `Scope`, the tenant key
 every record carries. Two scopes on one backend never see each other's data.

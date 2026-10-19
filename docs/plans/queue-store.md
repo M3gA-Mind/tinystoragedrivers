@@ -11,6 +11,9 @@ Specification: [`../specs/queue-store.md`](../specs/queue-store.md).
    `tsd.queue`, `tsd.queue_groups` and `tsd.queue_specs`.
 3. [x] Conformance checks (`conformance/queue.rs`) wired into `run_ports`, so
    memory, SQLite, file and the bus client loopback run them.
+3a. [x] Queue manifest: `queue/manifest.rs` (`QueueManifest`,
+   `QueueDeclaration`), `schemas/queues.schema.json`,
+   `docs/examples/queues.json`.
 4. [x] MongoDB live job passes the queue checks.
 5. [ ] Storage bus: a `Queues` object and selectors in
    `tinystoragedrivers-bus` (contract version bump), client and busproxy
