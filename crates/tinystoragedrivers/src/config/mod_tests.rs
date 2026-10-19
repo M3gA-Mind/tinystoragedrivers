@@ -106,8 +106,8 @@ fn nested_blob_parse_errors_do_not_echo_credentials() {
     let blobs = percent_encode("mongodb://nested-user:nested-secret@blob-host");
     let error = StorageConfig::parse(&format!("memory?blobs={blobs}")).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    assert!(error.message().contains("names no database"), "{error}");
     assert!(!error.to_string().contains("nested-secret"), "{error}");
+    assert!(error.message().contains("names no database"), "{error}");
 }
 
 #[cfg(feature = "file")]
