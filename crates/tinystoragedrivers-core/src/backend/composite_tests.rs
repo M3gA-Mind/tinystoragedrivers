@@ -23,6 +23,49 @@ struct PauseFirstPurge {
 #[derive(Debug, Clone)]
 struct MemoryGenerationBlobs(Arc<MemoryStorage>);
 
+#[derive(Debug)]
+struct LegacyBlobBackend;
+
+#[async_trait]
+impl BlobBackend for LegacyBlobBackend {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
+
+    fn for_scope(&self, scope: &Scope) -> Result<Arc<dyn BlobStore>> {
+        Ok(MemoryStorage::new().for_scope(scope)?.blobs().clone())
+    }
+}
+
+#[tokio::test]
+async fn legacy_blob_backend_defaults_refuse_generation_purge_and_enumeration() {
+    let backend = LegacyBlobBackend;
+    let scope = Scope::local();
+    assert_eq!(
+        backend
+            .for_scope_generation(&scope, ScopeGeneration(1))
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        backend
+            .purge_scope_generation(&scope, ScopeGeneration(1))
+            .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        backend.purge_scope(&scope).await.unwrap_err().kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(
+        backend.scopes("").await.unwrap_err().kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopeEnumeration)
+    );
+}
+
 impl MemoryGenerationBlobs {
     fn physical_scope(scope: &Scope, generation: ScopeGeneration) -> Scope {
         use std::fmt::Write as _;
@@ -229,6 +272,18 @@ async fn composite_with_binding_only_records_does_not_advertise_generation_purge
             .unwrap_err()
             .kind(),
         crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+    assert_eq!(composite.driver(), "composite");
+    assert_eq!(composite.document_driver(), "memory");
+    assert_eq!(composite.composite_depth(), Some(1));
+    assert!(!composite.supports_scope_purge_binding_validation());
+    assert!(!composite.supports_scope_purge_generation_validation());
+    assert_eq!(
+        composite
+            .for_composite_internal_scope(&Scope::new("u:ordinary").unwrap())
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::InvalidInput
     );
 }
 

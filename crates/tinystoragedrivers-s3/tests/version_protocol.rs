@@ -35,6 +35,9 @@ struct LoopbackSigner(String);
 #[derive(Debug)]
 struct LeakyFailureSigner;
 
+#[derive(Debug)]
+struct DeleteFailureSigner(LoopbackSigner);
+
 #[async_trait]
 impl Signer for LoopbackSigner {
     async fn signed_url(
@@ -86,6 +89,33 @@ impl Signer for LeakyFailureSigner {
     }
 }
 
+#[async_trait]
+impl Signer for DeleteFailureSigner {
+    async fn signed_url(
+        &self,
+        method: Method,
+        path: &Path,
+        expires_in: Duration,
+    ) -> object_store::Result<Url> {
+        self.0.signed_url(method, path, expires_in).await
+    }
+
+    async fn signed_url_opts(
+        &self,
+        method: Method,
+        path: &Path,
+        expires_in: Duration,
+        options: &SignedUrlOptions,
+    ) -> object_store::Result<Url> {
+        if method == Method::DELETE {
+            return Err(leaky_signing_error());
+        }
+        self.0
+            .signed_url_opts(method, path, expires_in, options)
+            .await
+    }
+}
+
 fn leaky_signing_error() -> object_store::Error {
     object_store::Error::Generic {
         store: "test signer",
@@ -101,6 +131,8 @@ struct FixtureState {
     pages: Mutex<VecDeque<String>>,
     get_requests: Mutex<Vec<String>>,
     delete_requests: Mutex<Vec<String>>,
+    reject_get: AtomicBool,
+    reject_delete: AtomicBool,
     pause_first_delete: AtomicBool,
     delete_entered: Notify,
     release_delete: Notify,
@@ -185,7 +217,9 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
             };
-            if let Some(page) = page {
+            if state.reject_get.load(Ordering::SeqCst) {
+                ("500 Internal Server Error", String::new())
+            } else if let Some(page) = page {
                 ("200 OK", page)
             } else if let Some(objects) = &state.objects {
                 let prefix = query
@@ -226,6 +260,9 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
                 state.delete_entered.notify_one();
                 state.release_delete.notified().await;
             }
+            if state.reject_delete.load(Ordering::SeqCst) {
+                return write_response(&mut stream, "500 Internal Server Error", "").await;
+            }
             if let Some(objects) = &state.objects
                 && let Ok(path) = Path::parse(&path)
             {
@@ -235,6 +272,10 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
         }
         _ => ("405 Method Not Allowed", String::new()),
     };
+    write_response(&mut stream, status, &body).await;
+}
+
+async fn write_response(stream: &mut TcpStream, status: &str, body: &str) {
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -351,6 +392,170 @@ async fn signed_url_failure_does_not_expose_credentials_or_query_values()
     };
     assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
     assert!(!format!("{error:?}").contains("secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn version_listing_refuses_http_errors_and_unreachable_signed_urls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new(FixtureState {
+        reject_get: AtomicBool::new(true),
+        ..FixtureState::default()
+    })
+    .await?;
+    let scope = Scope::new("protocol-list-http-error")?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    let error = storage
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert!(format!("{error}").contains("version-list request was rejected"));
+
+    let unreachable = S3Storage::with_store(
+        Arc::new(InMemory::new()),
+        Some(Arc::new(LoopbackSigner("http://127.0.0.1:1/".into()))),
+        "test",
+    )?;
+    let error = unreachable
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap_err();
+    assert!(format!("{error}").contains("version-list request failed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn version_delete_http_failure_keeps_the_purge_incomplete()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-delete-http-error")?;
+    let prefix = format!("test/scopes/{}/", scope_hex(&scope));
+    let fixture = Fixture::new(FixtureState {
+        pages: Mutex::new(VecDeque::from([page(
+            &prefix,
+            false,
+            None,
+            "<Version><Key>{{prefix}}one</Key><VersionId>v1</VersionId></Version>",
+        )])),
+        reject_delete: AtomicBool::new(true),
+        ..FixtureState::default()
+    })
+    .await?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    let error = storage
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap_err();
+    assert!(format!("{error}").contains("version-delete request was rejected"));
+    assert_eq!(
+        fixture
+            .state
+            .delete_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn version_delete_signing_failure_is_sanitized() -> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-delete-signing-error")?;
+    let prefix = format!("test/scopes/{}/", scope_hex(&scope));
+    let fixture = Fixture::new(FixtureState {
+        pages: Mutex::new(VecDeque::from([page(
+            &prefix,
+            false,
+            None,
+            "<Version><Key>{{prefix}}one</Key><VersionId>v1</VersionId></Version>",
+        )])),
+        ..FixtureState::default()
+    })
+    .await?;
+    let signer = Arc::new(DeleteFailureSigner(LoopbackSigner(fixture.base.clone())));
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(signer), "test")?;
+    let error = storage
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert!(!format!("{error:?}").contains("secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn purge_rejects_a_version_listing_that_crosses_the_scope_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-prefix-isolation")?;
+    let prefix = format!("test/scopes/{}/", scope_hex(&scope));
+    let fixture = Fixture::new(FixtureState {
+        pages: Mutex::new(VecDeque::from([page(
+            &prefix,
+            false,
+            None,
+            "<Version><Key>test/scopes/another-tenant/key</Key><VersionId>v1</VersionId></Version>",
+        )])),
+        ..FixtureState::default()
+    })
+    .await?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    let error = storage
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert_eq!(
+        fixture
+            .state
+            .delete_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn scope_enumeration_decodes_legacy_and_generation_roots_across_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-enumeration")?;
+    let encoded = scope_hex(&scope);
+    let pages = VecDeque::from([
+        page("test/scopes/", true, Some(("cursor", "version")), ""),
+        page(
+            "test/scopes/",
+            false,
+            None,
+            &format!(
+                "<Version><Key>test/scopes/{encoded}/legacy</Key><VersionId>v1</VersionId></Version>"
+            ),
+        ),
+        page(
+            "test/scope-generations/",
+            false,
+            None,
+            &format!(
+                "<Version><Key>test/scope-generations/{encoded}/2/current</Key><VersionId>v2</VersionId></Version>"
+            ),
+        ),
+    ]);
+    let fixture = Fixture::new(FixtureState {
+        pages: Mutex::new(pages),
+        ..FixtureState::default()
+    })
+    .await?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    assert_eq!(storage.scopes("").await?, vec![scope]);
+    let requests = fixture
+        .state
+        .get_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].contains("key-marker=cursor"));
+    assert!(requests[1].contains("version-id-marker=version"));
     Ok(())
 }
 

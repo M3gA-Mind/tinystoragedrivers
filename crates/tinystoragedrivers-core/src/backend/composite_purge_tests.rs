@@ -217,6 +217,26 @@ async fn composite_purge_records_pending_external_stage_and_replay_preserves_new
     let reopened = backend
         .for_scope_generation(&scope, ScopeGeneration(0))
         .unwrap();
+    assert_eq!(
+        old.validate_purge_generation().await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        reopened
+            .validate_purge_generation()
+            .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        old.validate_purge_binding().await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        reopened.validate_purge_binding().await.unwrap_err().kind(),
+        crate::ErrorKind::ScopeGenerationRejected
+    );
     for error in [
         old.documents().get("items", "x").await.unwrap_err(),
         reopened.documents().get("items", "x").await.unwrap_err(),

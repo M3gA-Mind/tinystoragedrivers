@@ -405,3 +405,73 @@ async fn corrupt_purge_receipt_fails_closed_without_erasing_scope_data() {
         "corrupt receipt metadata must preserve the persisted tenant document"
     );
 }
+
+#[tokio::test]
+async fn blob_sweep_refuses_a_scope_while_its_purge_is_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("pending-sweep-scope").unwrap();
+    let target = root.for_scope(&scope).unwrap();
+    target.blobs().put("keep", vec![7], None).await.unwrap();
+    root.db
+        .save_purge_state(
+            &scope,
+            &FilePurgeState {
+                generation: 0,
+                pending: Some(PurgeReceipt {
+                    operation_id: "pending-sweep".into(),
+                    generation: ScopeGeneration(1),
+                    status: PurgeStatus::Pending,
+                    stage: PurgeStage::Records,
+                }),
+                receipts: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        root.sweep_expired_blobs(&scope).await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        target.blobs().get("keep").await.unwrap().unwrap().bytes,
+        [7]
+    );
+}
+
+#[tokio::test]
+async fn completed_purge_replay_preserves_a_later_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = FileStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("purge-replay-after-reopen").unwrap();
+    let first = root.for_scope(&scope).unwrap();
+    let request = PurgeRequest {
+        operation_id: "first-reset".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let first_receipt = first.purge(&request).await.unwrap();
+    let second = root
+        .for_scope_generation(&scope, first_receipt.generation)
+        .unwrap();
+    second
+        .blobs()
+        .put("replacement", vec![9], None)
+        .await
+        .unwrap();
+
+    assert_eq!(first.purge(&request).await.unwrap(), first_receipt);
+    assert_eq!(
+        first.purge_status("first-reset").await.unwrap(),
+        Some(first_receipt)
+    );
+    assert_eq!(
+        second
+            .blobs()
+            .get("replacement")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        [9]
+    );
+}

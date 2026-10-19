@@ -51,6 +51,21 @@ fn truncated_version_list_requires_advancing_complete_markers() {
     )
     .unwrap();
     assert!(next_markers(&repeating_marker, Some("k"), Some("v")).is_err());
+
+    let same_key_advanced_version = parse_page(
+        "<ListVersionsResult><IsTruncated>true</IsTruncated><NextKeyMarker>k</NextKeyMarker><NextVersionIdMarker>v2</NextVersionIdMarker></ListVersionsResult>",
+    )
+    .unwrap();
+    assert_eq!(
+        next_markers(&same_key_advanced_version, Some("k"), Some("v1")).unwrap(),
+        ("k".to_owned(), Some("v2".to_owned()))
+    );
+
+    let empty_marker = parse_page(
+        "<ListVersionsResult><IsTruncated>true</IsTruncated><NextKeyMarker></NextKeyMarker></ListVersionsResult>",
+    )
+    .unwrap();
+    assert!(next_markers(&empty_marker, None, None).is_err());
 }
 
 #[test]
@@ -88,6 +103,15 @@ fn rejects_a_version_without_an_id() {
 fn rejects_a_version_with_an_empty_id() {
     let error = parse_page(
         "<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>scope/key</Key><VersionId></VersionId></Version></ListVersionsResult>",
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+}
+
+#[test]
+fn rejects_a_version_with_an_empty_key() {
+    let error = parse_page(
+        "<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key></Key><VersionId>v1</VersionId></Version></ListVersionsResult>",
     )
     .unwrap_err();
     assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
