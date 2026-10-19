@@ -31,18 +31,24 @@ interval. New staging, key, data and lock files are private before bytes.
 default. A host that wants desktop recovery can opt into
 `CorruptFilePolicy::QuarantineAndContinue`: the driver moves the corrupt file
 to a unique `.corrupt.*` sibling under the same held lock and syncs the
-directory on Unix before continuing with an empty store. It never removes the
-archived bytes. Permission, namespace and other I/O failures remain errors.
+directory on Unix before continuing with an empty store. Windows uses a
+no-replace `MoveFileExW` write-through move. It never removes archived bytes.
+An incorrect key is indistinguishable from damaged ciphertext and is also
+quarantined under this opt-in policy. Permission, namespace and other I/O
+failures remain errors.
+
+Hosts that need to atomically write plaintext secrets can use the public
+`write_atomic_private` helper. Its staging file is owner-only before bytes are
+written and publication is durably flushed on the supported platforms.
 Publication flushes staged content, publishes, then verifies the actual
 published identity and content. Unix also syncs the admitted directory.
-Windows uses same-volume native replacement through `std::fs::rename`, whose
-access-denied fallback preserves open destination handles with POSIX replacement
-semantics. Full paths resolve within the pinned namespace; this does not provide
+Windows uses same-volume native replacement with `MOVEFILE_WRITE_THROUGH`.
+Full paths resolve within the pinned namespace; this does not provide
 descriptor-relative source selection against uncoordinated same-user changes.
 Namespace verification surrounds replacement. Published FileID verification,
 explicit file flush and exact byte readback precede acknowledgment. Unsupported
 extended replacement fails closed, potentially reporting the original access
-denial. Replacement does not request native write-through.
+denial.
 These acknowledgments describe native APIs; they do not prove physical
 power-loss survival. A failure after publication may leave visible state.
 Failed staging cleanup is attempted and can itself fail; private leftovers

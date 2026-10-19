@@ -84,9 +84,15 @@ on every call:
 - By default, a `secrets.enc` that does not decrypt or parse fails the call
   (`ErrorKind::Crypto` / `Serialization`) and is left untouched. Hosts may
   explicitly select `CorruptFilePolicy::QuarantineAndContinue`; that mode
-  durably renames the corrupt bytes to a unique `secrets.enc.corrupt.*` sibling
-  before treating the store as empty. Quarantine failures and non-corruption
-  I/O errors still fail closed.
+  durably moves the corrupt bytes to a unique `secrets.enc.corrupt.*` sibling
+  before treating the store as empty. On Unix it syncs the directory; on
+  Windows it uses a no-replace, write-through native move. An incorrect key is
+  indistinguishable from damaged ciphertext and is also quarantined under this
+  opt-in policy. Quarantine failures and non-corruption I/O errors still fail
+  closed.
+- Hosts that write plaintext secrets can use `write_atomic_private`, which
+  creates owner-only staging files before writing secret bytes. Generic file
+  storage writes remain available separately.
 - `KeyringSecrets` cannot enumerate (`enumerable() == false`, `list` fails with
   `ErrorKind::Backend`). A locked store is `ErrorKind::Unavailable`.
   `load_or_create_key` creates a key only when the entry is genuinely absent,

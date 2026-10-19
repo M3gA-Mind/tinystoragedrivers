@@ -292,7 +292,7 @@ impl Drop for SecretMap {
 
 impl Inner {
     fn read_map_in(&self, namespace: &secure::Namespace) -> Result<SecretMap> {
-        let blob = match read_private(namespace, &self.path) {
+        let (blob, source_identity) = match read_private(namespace, &self.path) {
             Ok(blob) => blob,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SecretMap::default()),
             Err(e) => return Err(io_error("read the secrets file", e)),
@@ -303,7 +303,7 @@ impl Inner {
         let json = match crypto::decrypt(&self.key, &blob) {
             Ok(json) => json,
             Err(_error) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace)?;
+                self.quarantine_corrupt_in(namespace, source_identity)?;
                 return Ok(SecretMap::default());
             }
             Err(error) => return Err(error),
@@ -313,7 +313,7 @@ impl Inner {
         match serde_json::from_slice(&json) {
             Ok(map) => Ok(SecretMap(map)),
             Err(_) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
-                self.quarantine_corrupt_in(namespace)?;
+                self.quarantine_corrupt_in(namespace, source_identity)?;
                 Ok(SecretMap::default())
             }
             Err(_) => Err(StorageError::serialization(
@@ -322,7 +322,11 @@ impl Inner {
         }
     }
 
-    fn quarantine_corrupt_in(&self, namespace: &secure::Namespace) -> Result<()> {
+    fn quarantine_corrupt_in(
+        &self,
+        namespace: &secure::Namespace,
+        corrupt_identity: secure::Identity,
+    ) -> Result<()> {
         static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
         let name =
             secure::file_name(&self.path).map_err(|e| io_error("admit the secret name", e))?;
@@ -340,9 +344,35 @@ impl Inner {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io_error("inspect the corruption archive", error)),
             }
-            namespace
-                .replace(name, &archived)
-                .map_err(|error| io_error("quarantine the corrupt secrets file", error))?;
+            #[cfg(test)]
+            tests::after_quarantine_absence_check(&archived);
+            let source = namespace
+                .open_file(name, false)
+                .map_err(|error| io_error("revalidate the corrupt secrets file", error))?;
+            if secure::identity(&source)
+                .map_err(|error| io_error("identify the corrupt secrets file", error))?
+                != corrupt_identity
+            {
+                return Err(StorageError::conflict(
+                    "secrets file changed before corruption quarantine",
+                ));
+            }
+            match namespace.move_noreplace(name, &archived) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io_error("quarantine the corrupt secrets file", error)),
+            }
+            let archived_file = namespace
+                .open_file(&archived, false)
+                .map_err(|error| io_error("verify the corruption archive", error))?;
+            if secure::identity(&archived_file)
+                .map_err(|error| io_error("identify the corruption archive", error))?
+                != corrupt_identity
+            {
+                return Err(StorageError::conflict(
+                    "quarantined secrets file identity changed",
+                ));
+            }
             #[cfg(unix)]
             namespace
                 .sync()
@@ -412,17 +442,29 @@ fn create_parent(path: &Path) -> Result<()> {
     open_parent(path, true).map(|_| ())
 }
 
-fn read_private(namespace: &secure::Namespace, path: &Path) -> std::io::Result<Vec<u8>> {
+fn read_private(
+    namespace: &secure::Namespace,
+    path: &Path,
+) -> std::io::Result<(Vec<u8>, secure::Identity)> {
     let mut file = namespace.open_file(secure::file_name(path)?, false)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    let identity = secure::identity(&file)?;
     namespace.verify()?;
-    Ok(bytes)
+    Ok((bytes, identity))
 }
 
 /// Replace a private object and verify the published identity and bytes.
-#[cfg(test)]
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// The staged file is owner-only before any payload bytes are written, and the
+/// containing directory is synced on Unix. Windows uses write-through native
+/// replacement for the publication barrier.
+///
+/// # Errors
+///
+/// Returns an error if the path is unsafe, the parent cannot be admitted, the
+/// private staging file cannot be written or synced, publication fails, or
+/// the visible file fails identity/content verification.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let namespace = open_parent(path, true)?;
     write_atomic_in(&namespace, path, bytes)
 }

@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
 
-use rustix::fs::{self, AtFlags, Mode, OFlags};
+use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
 
 use super::secure::{Identity, denied};
 
@@ -115,6 +115,18 @@ impl Namespace {
         self.verify()?;
         fs::renameat(self.directory()?, source, self.directory()?, target)?;
         Ok(())
+    }
+
+    pub(super) fn move_noreplace(&self, source: &Path, target: &Path) -> io::Result<()> {
+        self.verify()?;
+        fs::renameat_with(
+            self.directory()?,
+            source,
+            self.directory()?,
+            target,
+            RenameFlags::NOREPLACE,
+        )?;
+        self.verify()
     }
 
     pub(super) fn link(&self, source: &Path, target: &Path) -> io::Result<()> {

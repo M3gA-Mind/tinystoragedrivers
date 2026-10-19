@@ -77,6 +77,7 @@ pub use file::{
     FileTransactionPhase, FileTransactionResource, FileTransactionResult, HexKeyFileSource,
     KEY_FILE_NAME, Locked, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile, PublicationBoundary,
     SECRETS_FILE_NAME, VerifiedFileImport, load_or_create_key_file, lock_file,
+    write_atomic as write_atomic_private,
 };
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;

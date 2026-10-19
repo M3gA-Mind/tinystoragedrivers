@@ -174,6 +174,24 @@ async fn corrupt_files_fail_closed_by_default() {
     }));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_no_replace_move_preserves_the_existing_destination() {
+    let dir = TempDir::new("windows-no-replace");
+    let source = dir.0.join("source");
+    let target = dir.0.join("archive");
+    fixture_write(&source, b"source bytes").unwrap();
+    fixture_write(&target, b"existing archive").unwrap();
+    let namespace = open_parent(&source, false).unwrap();
+
+    let error = namespace
+        .move_noreplace(Path::new("source"), Path::new("archive"))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(source).unwrap(), b"source bytes");
+    assert_eq!(fs::read(target).unwrap(), b"existing archive");
+}
+
 #[tokio::test]
 async fn opt_in_corrupt_file_recovery_quarantines_and_continues() {
     let dir = TempDir::new("corrupt-recovery");
@@ -247,6 +265,45 @@ async fn opt_in_recovery_does_not_quarantine_non_corruption_io_errors() {
             .to_string_lossy()
             .contains(".corrupt.")
     }));
+}
+
+#[test]
+fn a_quarantine_name_collision_preserves_both_files() {
+    let dir = TempDir::new("quarantine-collision");
+    let path = dir.0.join("secrets.enc");
+    fixture_write(&path, b"corrupt bytes").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    let sentinel = b"pre-existing archive";
+    let sentinel_bytes = sentinel.to_vec();
+    let archive_dir = dir.0.clone();
+    let _pause = quarantine_pause::Guard::install(move |candidate| {
+        fixture_write(archive_dir.join(candidate), &sentinel_bytes).unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    assert!(
+        store
+            .inner
+            .read_map_in(&lock.namespace)
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    assert!(!path.exists());
+    let mut archives = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".corrupt.")
+        })
+        .map(|path| fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    archives.sort();
+    assert_eq!(archives, [b"corrupt bytes".to_vec(), sentinel.to_vec()]);
 }
 
 #[tokio::test]
@@ -880,6 +937,45 @@ mod publication_pause {
             callback();
         }
     }
+}
+
+mod quarantine_pause {
+    use super::Path;
+    use std::cell::RefCell;
+
+    type Callback = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Guard;
+
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce(&Path) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    pub(super) fn after_absence_check(candidate: &Path) {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(candidate);
+        }
+    }
+}
+
+pub(super) fn after_quarantine_absence_check(candidate: &Path) {
+    quarantine_pause::after_absence_check(candidate);
 }
 
 pub(super) fn after_staged_publication_identity() {
