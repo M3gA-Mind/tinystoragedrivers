@@ -46,18 +46,22 @@ fn is_false(value: &bool) -> bool {
 
 /// The stored state of one lease, live or not, as [`Leases::inspect`] reads
 /// it. [`Lease`] is a holder's proof; this is an observer's view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRecord {
     /// Who holds (or last held) the lease.
+    #[serde(alias = "owner")]
     pub holder: String,
     /// Where the holder can be reached, when it said so at acquisition.
+    #[serde(default)]
     pub endpoint: Option<String>,
     /// The fencing epoch of the holder's tenure.
     pub epoch: u64,
     /// Unix epoch milliseconds at which the lease lapses.
+    #[serde(alias = "expires_at_ms")]
     pub expires_ms: i64,
     /// The holder let go cleanly. A released record is never live; a record
     /// that is merely past `expires_ms` was abandoned (crash, partition).
+    #[serde(default)]
     pub released: bool,
 }
 
