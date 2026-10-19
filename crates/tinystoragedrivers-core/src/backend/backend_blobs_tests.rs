@@ -1,6 +1,10 @@
 //! Generation-isolated `BackendBlobs` contracts.
 use super::*;
 use sha2::{Digest, Sha256};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 fn scope_digest(scope: &Scope) -> String {
     use std::fmt::Write as _;
@@ -10,6 +14,146 @@ fn scope_digest(scope: &Scope) -> String {
         write!(&mut digest, "{byte:02x}").unwrap();
     }
     digest
+}
+
+fn memory_with_clock() -> (Arc<MemoryStorage>, Arc<AtomicU64>) {
+    let now = Arc::new(AtomicU64::new(1_000));
+    let reading = Arc::clone(&now);
+    (
+        Arc::new(MemoryStorage::with_clock(Arc::new(move || {
+            reading.load(Ordering::SeqCst)
+        }))),
+        now,
+    )
+}
+
+async fn put_expired_blob(store: &dyn BlobStore, value: u8) -> crate::Result<()> {
+    store
+        .put_expiring("expired", vec![value], None, Duration::from_millis(1))
+        .await?;
+    Ok(())
+}
+
+fn physical_generation(
+    storage: &MemoryStorage,
+    scope: &Scope,
+    generation: u64,
+) -> crate::Result<Arc<dyn BlobStore>> {
+    let physical = Scope::new(format!(
+        "__tsd_composite_blob_generation/{}/{}",
+        scope_digest(scope),
+        generation
+    ))?;
+    Ok(storage.for_scope(&physical)?.blobs().clone())
+}
+
+#[tokio::test]
+async fn backend_blobs_reuses_predeclared_mapping_schema() {
+    let setup = MemoryStorage::new();
+    setup
+        .for_scope(&Scope::new("__tsd_composite_blob_scope_map").unwrap())
+        .unwrap()
+        .documents()
+        .ensure_collection(&crate::CollectionSpec::new("scopes"))
+        .await
+        .unwrap();
+    let backend = BackendBlobs::new(setup.existing_schema().unwrap());
+    let scope = Scope::new("u:existing-schema-blob-map").unwrap();
+    let generation = backend
+        .for_scope_generation(&scope, ScopeGeneration(1))
+        .unwrap();
+
+    generation.put("object", vec![4], None).await.unwrap();
+    assert_eq!(generation.get("object").await.unwrap().unwrap().bytes, [4]);
+    backend
+        .purge_scope_generation(&scope, ScopeGeneration(1))
+        .await
+        .unwrap();
+    assert!(generation.get("object").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn backend_blobs_requires_a_bootstrapped_mapping_schema() {
+    let storage = MemoryStorage::new();
+    let backend = BackendBlobs::new(storage.existing_schema().unwrap());
+    let scope = Scope::new("u:missing-existing-schema-blob-map").unwrap();
+    let error = backend
+        .for_scope_generation(&scope, ScopeGeneration(1))
+        .unwrap()
+        .put("object", vec![4], None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind(), crate::ErrorKind::NotFound);
+    let physical = Scope::new(format!(
+        "__tsd_composite_blob_generation/{}/1",
+        scope_digest(&scope)
+    ))
+    .unwrap();
+    assert!(
+        storage
+            .for_scope(&physical)
+            .unwrap()
+            .blobs()
+            .list("")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn backend_blobs_purges_expired_bytes_in_legacy_mapped_and_unmapped_namespaces()
+-> crate::Result<()> {
+    let (storage, now) = memory_with_clock();
+    let backend = BackendBlobs::new(storage.clone());
+
+    let legacy_scope = Scope::new("u:expired-legacy-purge").unwrap();
+    let legacy = storage.for_scope(&legacy_scope).unwrap().blobs().clone();
+    put_expired_blob(legacy.as_ref(), 1).await?;
+
+    let generation_scope = Scope::new("u:expired-generation-purge").unwrap();
+    let generation = backend
+        .for_scope_generation(&generation_scope, ScopeGeneration(1))
+        .unwrap();
+    put_expired_blob(generation.as_ref(), 2).await?;
+    let generation_bytes = physical_generation(&storage, &generation_scope, 1)?;
+
+    let whole_scope = Scope::new("u:expired-whole-scope-purge").unwrap();
+    let whole_legacy = storage.for_scope(&whole_scope).unwrap().blobs().clone();
+    put_expired_blob(whole_legacy.as_ref(), 3).await?;
+    let whole_generation = backend
+        .for_scope_generation(&whole_scope, ScopeGeneration(1))
+        .unwrap();
+    put_expired_blob(whole_generation.as_ref(), 4).await?;
+    let whole_generation_bytes = physical_generation(&storage, &whole_scope, 1)?;
+
+    let unmapped_scope = Scope::new("u:expired-unmapped-generation").unwrap();
+    let unmapped_bytes = physical_generation(&storage, &unmapped_scope, 7)?;
+    put_expired_blob(unmapped_bytes.as_ref(), 5).await?;
+
+    now.fetch_add(2, Ordering::SeqCst);
+    backend
+        .purge_scope_generation(&legacy_scope, ScopeGeneration(0))
+        .await
+        .unwrap();
+    backend
+        .purge_scope_generation(&generation_scope, ScopeGeneration(1))
+        .await
+        .unwrap();
+    backend.purge_scope(&whole_scope).await.unwrap();
+    backend
+        .purge_scope_generation(&unmapped_scope, ScopeGeneration(7))
+        .await
+        .unwrap();
+
+    let remaining = legacy.sweep_expired().await?
+        + generation_bytes.sweep_expired().await?
+        + whole_legacy.sweep_expired().await?
+        + whole_generation_bytes.sweep_expired().await?
+        + unmapped_bytes.sweep_expired().await?;
+    assert_eq!(remaining, 0, "purge must reclaim expired physical bytes");
+    Ok(())
 }
 
 #[tokio::test]

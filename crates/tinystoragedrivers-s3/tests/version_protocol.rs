@@ -132,6 +132,9 @@ struct FixtureState {
     get_requests: Mutex<Vec<String>>,
     delete_requests: Mutex<Vec<String>>,
     reject_get: AtomicBool,
+    stall_get: AtomicBool,
+    stalled_get_entered: Notify,
+    release_stalled_get: Notify,
     reject_delete: AtomicBool,
     pause_first_delete: AtomicBool,
     delete_entered: Notify,
@@ -210,6 +213,10 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(target.to_owned());
+            if state.stall_get.load(Ordering::SeqCst) {
+                state.stalled_get_entered.notify_one();
+                state.release_stalled_get.notified().await;
+            }
             let page = {
                 state
                     .pages
@@ -421,6 +428,46 @@ async fn version_listing_refuses_http_errors_and_unreachable_signed_urls()
         .purge_scope_generation(&scope, ScopeGeneration(0))
         .await
         .unwrap_err();
+    assert!(format!("{error}").contains("version-list request failed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_version_listing_returns_a_bounded_backend_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new(FixtureState {
+        stall_get: AtomicBool::new(true),
+        ..FixtureState::default()
+    })
+    .await?;
+    let scope = Scope::new("protocol-stalled-version-list")?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    let request = tokio::spawn(async move {
+        storage
+            .purge_scope_generation(&scope, ScopeGeneration(0))
+            .await
+    });
+    fixture.state.stalled_get_entered.notified().await;
+
+    let completion = tokio::time::timeout(Duration::from_secs(12), request).await;
+    fixture.state.release_stalled_get.notify_waiters();
+    let result = match completion {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => {
+            return Err(std::io::Error::other(
+                "stalled version-list request did not reach its configured timeout",
+            )
+            .into());
+        }
+    };
+    let error = match result {
+        Ok(()) => {
+            return Err(std::io::Error::other("stalled listing unexpectedly succeeded").into());
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
     assert!(format!("{error}").contains("version-list request failed"));
     Ok(())
 }
