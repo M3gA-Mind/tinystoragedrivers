@@ -842,6 +842,13 @@ impl crate::DocumentStore for UnconditionalDocs {
         if self.6.as_ref().is_some_and(|(_, yield_old)| *yield_old)
             && doc.get("by").and_then(serde_json::Value::as_str) == Some("old")
         {
+            if let Some((control, _)) = &self.6 {
+                // Earlier setup writes may have used epoch 2. Discard their
+                // permits before this old write waits for its own takeover.
+                while let Ok(permit) = control.takeover_started.try_acquire() {
+                    permit.forget();
+                }
+            }
             tokio::task::yield_now().await;
             if let Some((control, _)) = &self.6 {
                 control
