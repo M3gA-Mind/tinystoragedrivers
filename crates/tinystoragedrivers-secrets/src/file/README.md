@@ -39,10 +39,10 @@ failures remain errors.
 
 Hosts that need to atomically write plaintext secrets can use the public
 `write_atomic_private` helper. Its staging file is owner-only before bytes are
-written and publication is durably flushed on the supported platforms.
-Publication flushes staged content, publishes, then verifies the actual
-published identity and content. Unix also syncs the admitted directory.
-Windows uses same-volume native replacement with `MOVEFILE_WRITE_THROUGH`.
+written. Publication flushes staged content, publishes, then verifies the
+actual published identity and content. Unix also syncs the admitted directory.
+Windows uses `std::fs::rename`, including its POSIX replacement fallback. The
+write-through, no-replace move is used only for corruption quarantine.
 Full paths resolve within the pinned namespace; this does not provide
 descriptor-relative source selection against uncoordinated same-user changes.
 Namespace verification surrounds replacement. Published FileID verification,
