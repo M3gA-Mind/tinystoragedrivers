@@ -97,6 +97,74 @@ async fn malformed_coordinator_record_fails_closed_before_scope_erasure() {
     );
 }
 
+#[test]
+fn composite_nesting_rejects_a_layer_beyond_the_supported_depth() {
+    assert_eq!(
+        coordinator_scope_for_layer(33).unwrap_err().kind(),
+        crate::ErrorKind::InvalidInput
+    );
+    assert!(coordinator_scope_for_layer(32).is_ok());
+}
+
+#[tokio::test]
+async fn status_for_an_unseen_operation_returns_none() {
+    let records = Arc::new(MemoryStorage::new());
+    let scope = Scope::new("u:unseen-composite-operation").unwrap();
+    let composite = CompositePurge {
+        records: records.for_scope(&scope).unwrap(),
+        blobs: Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator: records.for_scope(&coordinator_scope().unwrap()).unwrap(),
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    assert_eq!(composite.status("never-started").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn revoked_coordinator_handle_fails_closed_before_blob_erasure() {
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let blobs = Arc::new(BackendBlobs::new(blob_storage));
+    let scope = Scope::new("u:revoked-purge-coordinator").unwrap();
+    let coordinator_scope = coordinator_scope().unwrap();
+    let coordinator = records.for_scope(&coordinator_scope).unwrap();
+    let tenant_blobs = blobs.for_scope(&scope).unwrap();
+    tenant_blobs.put("preserve", vec![9], None).await.unwrap();
+
+    records
+        .for_scope(&coordinator_scope)
+        .unwrap()
+        .purge(&PurgeRequest {
+            operation_id: "reset-coordinator-state".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+    let composite = CompositePurge {
+        records: records.for_scope(&scope).unwrap(),
+        blobs,
+        scope,
+        generation: ScopeGeneration(0),
+        coordinator,
+        purge_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    let error = composite
+        .purge(&PurgeRequest {
+            operation_id: "must-not-delete".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::ScopeGenerationRejected);
+    assert_eq!(
+        tenant_blobs.get("preserve").await.unwrap().unwrap().bytes,
+        [9]
+    );
+}
+
 #[tokio::test]
 async fn maximum_scope_and_operation_ids_have_bounded_coordinator_keys() {
     let records = Arc::new(MemoryStorage::new());
