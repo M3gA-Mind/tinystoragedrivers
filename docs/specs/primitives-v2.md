@@ -56,6 +56,11 @@ queues report `QueueFeatures`. A handle returned by
 `StorageBackend::for_scope` is already bound to a scope; individual port calls
 never accept a scope argument. Engines report optional behavior through
 `Capabilities`; a missing capability returns `ErrorKind::Unsupported`.
+`Capability` also has primitive-availability markers `Documents`, `Streams`,
+`Kv`, `Blobs`, `Queues`, and `Secrets`. An unconfigured handle in the stable
+`Storage` bundle returns `Unsupported` with its matching marker for every
+operation; optional operations on a configured handle continue to report
+their operation-specific capability.
 
 ### Bundle and scope
 

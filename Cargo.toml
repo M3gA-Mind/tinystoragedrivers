@@ -21,6 +21,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
+tinystoragedrivers-types = { version = "1.0.0", path = "crates/tinystoragedrivers-types" }
+tinystoragedrivers-api = { version = "1.0.0", path = "crates/tinystoragedrivers-api" }
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
@@ -75,6 +77,8 @@ lapin = { version = "4.12", default-features = false, features = ["tokio", "rust
 # The ports are object-safe async traits (`Arc<dyn DocumentStore>`), which
 # native `async fn` in traits cannot express on the declared MSRV.
 async-trait = "0.1"
+futures-core = "0.3"
+zeroize = "1"
 # Derive macros for `StorageError`.
 thiserror = "2"
 # Time-sortable 26-character entity ids (`Key::ulid`); the only id generator the

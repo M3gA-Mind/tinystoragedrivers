@@ -12,6 +12,8 @@ categories = ["database"]
 publish = false
 
 [dependencies]
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
 # Reexport shared pure declarations while retaining the legacy core API.
 tinystoragedrivers-schema = { workspace = true }
 async-trait = { workspace = true }

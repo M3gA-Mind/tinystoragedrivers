@@ -72,6 +72,15 @@ mod stream;
 pub mod value;
 mod watch;
 
+/// Temporary namespaced access to the primitives-v2 contracts while existing
+/// engines transition to the standalone vocabulary and port crates.
+pub mod v2 {
+    /// The runtime-neutral v2 storage ports.
+    pub use tinystoragedrivers_api as api;
+    /// The serialized values shared by v2 storage ports.
+    pub use tinystoragedrivers_types as types;
+}
+
 #[cfg(any(test, feature = "blocking"))]
 mod blocking;
 #[cfg(any(test, feature = "testkit"))]
