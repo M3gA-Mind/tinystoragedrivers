@@ -1,5 +1,7 @@
 # Write fencing
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until fencing is removed.
+
 **Status:** Implemented. **Owner:** storage ports.
 
 ## Problem

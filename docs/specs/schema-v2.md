@@ -1,5 +1,7 @@
 # Uniform schema (v2)
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until the schema implementation is removed.
+
 Status: Implemented (v1.0.0). Owner: TinyStorageDrivers. Host integration: OpenHuman.
 Implementation order: [`../plans/schema-v2.md`](../plans/schema-v2.md).
 

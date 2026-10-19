@@ -1,5 +1,7 @@
 # Native scope purge
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until the purge implementation is removed.
+
 Status: Implementation candidate; publication and hosted gates remain in progress.
 Owner: TinyStorageDrivers. Host integration: OpenHuman issue #7432.
 

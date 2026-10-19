@@ -1,5 +1,7 @@
 # Restricted secret-file publication
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until the host-owned file formats are moved.
+
 Accepted owner contract for the Task 10 prerequisite. The encrypted JSON blob,
 `enc2:` values and hex `.secret_key` formats remain unchanged.
 
