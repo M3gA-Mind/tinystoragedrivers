@@ -278,15 +278,9 @@ async fn stale_fenced_purge_and_status_refuse_without_erasing_data() {
         serde_json::json!({"alive": true})
     );
     assert_eq!(
-        target.blobs().get("keep").await.unwrap_err().kind(),
-        ErrorKind::ScopeGenerationRejected
+        target.blobs().get("keep").await.unwrap().unwrap().bytes,
+        [7]
     );
-    let data_path = root
-        .db
-        .scope_dir(&scope)
-        .join("blobs")
-        .join(crate::encode::file_stem("keep"));
-    assert_eq!(std::fs::read(data_path).unwrap(), [7]);
 }
 
 #[tokio::test]
@@ -440,9 +434,15 @@ async fn blob_sweep_refuses_a_scope_while_its_purge_is_pending() {
         ErrorKind::ScopeGenerationRejected
     );
     assert_eq!(
-        target.blobs().get("keep").await.unwrap().unwrap().bytes,
-        [7]
+        target.blobs().get("keep").await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
     );
+    let data_path = root
+        .db
+        .scope_dir(&scope)
+        .join("blobs")
+        .join(crate::encode::file_stem("keep"));
+    assert_eq!(std::fs::read(data_path).unwrap(), [7]);
 }
 
 #[tokio::test]
