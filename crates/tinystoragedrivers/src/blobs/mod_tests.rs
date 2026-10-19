@@ -1,6 +1,28 @@
 //! Blob URL validation and missing-feature failures.
 use super::*;
-use crate::ErrorKind;
+use crate::{ErrorKind, StorageConfig};
+use tinystoragedrivers_core::{Capability, Scope};
+
+#[tokio::test]
+async fn opening_a_backend_blob_port_preserves_scope_and_capability_behavior() {
+    let blobs = open_blobs(&BlobConfig::Backend(StorageConfig::Memory))
+        .await
+        .unwrap();
+    let first = blobs.for_scope(&Scope::new("first").unwrap()).unwrap();
+    let second = blobs.for_scope(&Scope::new("second").unwrap()).unwrap();
+
+    first.put("item", b"first".to_vec(), None).await.unwrap();
+    second.put("item", b"second".to_vec(), None).await.unwrap();
+    assert_eq!(first.get("item").await.unwrap().unwrap().bytes, b"first");
+    assert_eq!(second.get("item").await.unwrap().unwrap().bytes, b"second");
+
+    let caps = blobs.capabilities();
+    assert!(caps.contains(Capability::BlobTtl));
+    assert!(!caps.contains(Capability::Transactions));
+    assert!(!caps.contains(Capability::Fencing));
+    assert!(!caps.contains(Capability::PresignedUrls));
+    assert!(!caps.contains(Capability::StreamingBlobs));
+}
 
 #[test]
 fn s3_configuration_requires_its_feature() {
