@@ -60,6 +60,7 @@ pub use transaction::{
 };
 
 mod secure;
+pub use secure::Locked;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -71,6 +72,17 @@ pub const SECRETS_FILE_NAME: &str = "secrets.enc";
 /// The key file name OpenHuman's `SecretStore` keeps beside its config: the
 /// 32-byte key as 64 hex characters.
 pub const KEY_FILE_NAME: &str = ".secret_key";
+
+/// Policy for a secrets file that cannot be decrypted or parsed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CorruptFilePolicy {
+    /// Return the corruption error and preserve the file. This is the default.
+    #[default]
+    FailClosed,
+    /// Move corrupt bytes to a unique sibling archive and continue with an
+    /// empty store. The archive is never deleted by the driver.
+    QuarantineAndContinue,
+}
 
 /// Distinguishes concurrent temp files written by one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -94,9 +106,11 @@ pub struct EncryptedFileSecrets {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
 struct Inner {
     path: PathBuf,
     key: Zeroizing<[u8; KEY_LEN]>,
+    corrupt_file_policy: CorruptFilePolicy,
 }
 
 impl EncryptedFileSecrets {
@@ -117,8 +131,20 @@ impl EncryptedFileSecrets {
             inner: Arc::new(Inner {
                 path: path.into(),
                 key,
+                corrupt_file_policy: CorruptFilePolicy::FailClosed,
             }),
         }
+    }
+
+    /// Select what this store does when the encrypted file is corrupt.
+    ///
+    /// The default is [`CorruptFilePolicy::FailClosed`]. Recovery is opt-in
+    /// because quarantining the file makes reads look empty and subsequent
+    /// writes create a fresh store.
+    #[must_use]
+    pub fn with_corrupt_file_policy(mut self, policy: CorruptFilePolicy) -> Self {
+        Arc::make_mut(&mut self.inner).corrupt_file_policy = policy;
+        self
     }
 
     /// The store at `dir/secrets.enc`, keyed by `dir/.secret_key`, which is
@@ -266,7 +292,7 @@ impl Drop for SecretMap {
 
 impl Inner {
     fn read_map_in(&self, namespace: &secure::Namespace) -> Result<SecretMap> {
-        let blob = match read_private(namespace, &self.path) {
+        let (blob, source_identity) = match read_private(namespace, &self.path) {
             Ok(blob) => blob,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(SecretMap::default()),
             Err(e) => return Err(io_error("read the secrets file", e)),
@@ -274,12 +300,114 @@ impl Inner {
         if blob.is_empty() {
             return Ok(SecretMap::default());
         }
-        let json = crypto::decrypt(&self.key, &blob)?;
+        let json = match crypto::decrypt(&self.key, &blob) {
+            Ok(json) => json,
+            Err(_error) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
+                self.quarantine_corrupt_in(namespace, source_identity)?;
+                return Ok(SecretMap::default());
+            }
+            Err(error) => return Err(error),
+        };
         // The serde message can quote the offending input, which here is
         // plaintext, so it is neither kept nor chained as the source.
-        serde_json::from_slice(&json).map(SecretMap).map_err(|_| {
-            StorageError::serialization("decrypted secrets file is not a json object of strings")
-        })
+        match serde_json::from_slice(&json) {
+            Ok(map) => Ok(SecretMap(map)),
+            Err(_) if self.corrupt_file_policy == CorruptFilePolicy::QuarantineAndContinue => {
+                self.quarantine_corrupt_in(namespace, source_identity)?;
+                Ok(SecretMap::default())
+            }
+            Err(_) => Err(StorageError::serialization(
+                "decrypted secrets file is not a json object of strings",
+            )),
+        }
+    }
+
+    fn quarantine_corrupt_in(
+        &self,
+        namespace: &secure::Namespace,
+        corrupt_identity: secure::Identity,
+    ) -> Result<()> {
+        static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let name =
+            secure::file_name(&self.path).map_err(|e| io_error("admit the secret name", e))?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        for _ in 0..128 {
+            let sequence = QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut archived = name.as_os_str().to_os_string();
+            archived.push(format!(".corrupt.{timestamp}.{sequence}"));
+            let archived = PathBuf::from(archived);
+            #[cfg(test)]
+            tests::before_quarantine_archive_check(&archived);
+            match namespace.open_file(&archived, false) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error("inspect the corruption archive", error)),
+            }
+            #[cfg(test)]
+            tests::after_quarantine_absence_check(&archived);
+            let source = namespace
+                .open_file(name, false)
+                .map_err(|error| io_error("revalidate the corrupt secrets file", error))?;
+            if secure::identity(&source)
+                .map_err(|error| io_error("identify the corrupt secrets file", error))?
+                != corrupt_identity
+            {
+                return Err(StorageError::conflict(
+                    "secrets file changed before corruption quarantine",
+                ));
+            }
+            #[cfg(test)]
+            tests::after_quarantine_source_check();
+            match namespace.move_noreplace(name, &archived) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io_error("quarantine the corrupt secrets file", error)),
+            }
+            let archived_file = namespace
+                .open_file(&archived, false)
+                .map_err(|error| io_error("verify the corruption archive", error))?;
+            if secure::identity(&archived_file)
+                .map_err(|error| io_error("identify the corruption archive", error))?
+                != corrupt_identity
+            {
+                #[cfg(test)]
+                tests::after_quarantine_mismatch();
+                Self::restore_replaced_source(namespace, &archived, name)?;
+                return Err(StorageError::conflict(
+                    "quarantined secrets file identity changed",
+                ));
+            }
+            #[cfg(unix)]
+            namespace
+                .sync()
+                .map_err(|error| io_error("persist the secrets quarantine", error))?;
+            return Ok(());
+        }
+        Err(StorageError::backend(
+            "could not find an unused secrets quarantine name",
+        ))
+    }
+
+    fn restore_replaced_source(
+        namespace: &secure::Namespace,
+        archived: &Path,
+        source: &Path,
+    ) -> Result<()> {
+        match namespace.move_noreplace(archived, source) {
+            Ok(()) => {}
+            // A later writer won the source name. Keep its file and the
+            // mismatched archived object; neither may be overwritten.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(io_error("restore the replaced secrets file", error)),
+        }
+        #[cfg(unix)]
+        namespace
+            .sync()
+            .map_err(|error| io_error("persist the restored secrets file", error))?;
+        Ok(())
     }
 
     fn write_map_in(&self, namespace: &secure::Namespace, map: &SecretMap) -> Result<()> {
@@ -300,7 +428,12 @@ impl Inner {
 /// Take an exclusive advisory lock on `lock_path` (created if absent), held
 /// until the returned file is dropped. The same `flock`/`LockFileEx` lock
 /// OpenHuman's `fs2` lock takes.
-pub(crate) fn lock_file(lock_path: &Path) -> Result<secure::Locked> {
+///
+/// # Errors
+///
+/// Returns an error if the lock path is unsafe, the lock cannot be created or
+/// opened, or the advisory lock cannot be acquired.
+pub fn lock_file(lock_path: &Path) -> Result<Locked> {
     let namespace = open_parent(lock_path, true)?;
     let name = secure::file_name(lock_path).map_err(|e| io_error("admit the lock name", e))?;
     let file = match namespace.create_file(name) {
@@ -311,7 +444,7 @@ pub(crate) fn lock_file(lock_path: &Path) -> Result<secure::Locked> {
         Err(error) => return Err(io_error("create the lock file", error)),
     };
     fs4::FileExt::lock(&file).map_err(|e| io_error("take the lock", e))?;
-    let lock = secure::Locked {
+    let lock = Locked {
         namespace,
         file,
         name: name.to_path_buf(),
@@ -335,17 +468,30 @@ fn create_parent(path: &Path) -> Result<()> {
     open_parent(path, true).map(|_| ())
 }
 
-fn read_private(namespace: &secure::Namespace, path: &Path) -> std::io::Result<Vec<u8>> {
+fn read_private(
+    namespace: &secure::Namespace,
+    path: &Path,
+) -> std::io::Result<(Vec<u8>, secure::Identity)> {
     let mut file = namespace.open_file(secure::file_name(path)?, false)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    let identity = secure::identity(&file)?;
     namespace.verify()?;
-    Ok(bytes)
+    Ok((bytes, identity))
 }
 
 /// Replace a private object and verify the published identity and bytes.
-#[cfg(test)]
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+/// The staged file is owner-only before any payload bytes are written, and the
+/// containing directory is synced on Unix. Windows preserves the platform's
+/// retained-handle replacement semantics; corruption quarantine separately
+/// uses write-through no-replace moves.
+///
+/// # Errors
+///
+/// Returns an error if the path is unsafe, the parent cannot be admitted, the
+/// private staging file cannot be written or synced, publication fails, or
+/// the visible file fails identity/content verification.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let namespace = open_parent(path, true)?;
     write_atomic_in(&namespace, path, bytes)
 }
