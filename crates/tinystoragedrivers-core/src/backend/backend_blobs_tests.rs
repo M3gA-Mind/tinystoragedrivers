@@ -118,6 +118,16 @@ async fn backend_blobs_purges_expired_bytes_in_legacy_mapped_and_unmapped_namesp
         .unwrap();
     put_expired_blob(generation.as_ref(), 2).await?;
     let generation_bytes = physical_generation(&storage, &generation_scope, 1)?;
+    let later_generation = backend
+        .for_scope_generation(&generation_scope, ScopeGeneration(2))
+        .unwrap();
+    later_generation.put("replacement", vec![22], None).await?;
+
+    let sibling_scope = Scope::new("u:expired-purge-sibling").unwrap();
+    let sibling = backend
+        .for_scope_generation(&sibling_scope, ScopeGeneration(1))
+        .unwrap();
+    sibling.put("sibling", vec![23], None).await?;
 
     let whole_scope = Scope::new("u:expired-whole-scope-purge").unwrap();
     let whole_legacy = storage.for_scope(&whole_scope).unwrap().blobs().clone();
@@ -153,6 +163,12 @@ async fn backend_blobs_purges_expired_bytes_in_legacy_mapped_and_unmapped_namesp
         + whole_generation_bytes.sweep_expired().await?
         + unmapped_bytes.sweep_expired().await?;
     assert_eq!(remaining, 0, "purge must reclaim expired physical bytes");
+    assert_eq!(
+        later_generation.get("replacement").await?.unwrap().bytes,
+        [22],
+        "generation purge must retain later-generation data",
+    );
+    assert_eq!(sibling.get("sibling").await?.unwrap().bytes, [23]);
     Ok(())
 }
 
