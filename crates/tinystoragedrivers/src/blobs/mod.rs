@@ -2,10 +2,11 @@
 #[cfg(not(feature = "s3"))]
 use crate::StorageError;
 use crate::{BackendBlobs, BlobBackend, CompositeStorage, Result, StorageBackend, StorageConfig};
+use std::fmt;
 use std::sync::Arc;
 
 /// A blob location independent of the document/stream location.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobConfig {
     /// The blob port from a complete backend.
     Backend(StorageConfig),
@@ -36,7 +37,22 @@ impl BlobConfig {
                 "s3 blob URL needs the s3 feature",
             ));
         }
-        Ok(Self::Backend(StorageConfig::parse(url)?))
+        let config = StorageConfig::parse(url)?;
+        if matches!(&config, StorageConfig::Composite { .. }) {
+            return Err(crate::StorageError::invalid_input(
+                "nested composite blob URLs are not supported",
+            ));
+        }
+        Ok(Self::Backend(config))
+    }
+}
+
+impl fmt::Display for BlobConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Backend(config) => write!(f, "{config}"),
+            Self::S3 { url } => f.write_str(url),
+        }
     }
 }
 

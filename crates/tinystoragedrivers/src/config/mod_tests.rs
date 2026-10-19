@@ -48,6 +48,12 @@ fn parses_every_form() {
             database: "app".into()
         }
     );
+    assert_eq!(
+        StorageConfig::parse("memory?blobs=memory%3a")
+            .unwrap()
+            .driver(),
+        "composite"
+    );
 }
 
 #[test]
@@ -61,6 +67,13 @@ fn parses_an_encoded_blob_backend_and_preserves_record_options() {
     let config = StorageConfig::parse(&url).unwrap();
 
     assert_eq!(config.driver(), "composite");
+    let StorageConfig::Composite { records, .. } = &config else {
+        panic!("expected a composite config")
+    };
+    assert_eq!(
+        records.to_string(),
+        "mongodb://records-user:***@records-host/app?appName=desktop&retryWrites=true"
+    );
     let shown = config.to_string();
     for preserved in [
         "appName",
@@ -93,6 +106,11 @@ fn rejects_malformed_duplicate_and_recursive_blob_parameters() {
     let malformed = StorageConfig::parse("memory?blobs=%ZZ").unwrap_err();
     assert_eq!(malformed.kind(), ErrorKind::InvalidInput);
 
+    for bad in ["memory?blobs=", "memory?blobs=%FF"] {
+        let error = StorageConfig::parse(bad).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{bad}");
+    }
+
     let duplicate =
         StorageConfig::parse("memory?blobs=memory&blobs=file%3A%2Ftmp%2Fblobs").unwrap_err();
     assert_eq!(duplicate.kind(), ErrorKind::InvalidInput);
@@ -103,10 +121,12 @@ fn rejects_malformed_duplicate_and_recursive_blob_parameters() {
 
 #[test]
 fn nested_blob_parse_errors_do_not_echo_credentials() {
-    let blobs = percent_encode("mongodb://nested-user:nested-secret@blob-host");
+    let blobs =
+        percent_encode("mongodb://nested-user:nested-secret@blob-host?password=query-secret");
     let error = StorageConfig::parse(&format!("memory?blobs={blobs}")).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(!error.to_string().contains("nested-secret"), "{error}");
+    assert!(!error.to_string().contains("query-secret"), "{error}");
     assert!(error.message().contains("names no database"), "{error}");
 }
 
