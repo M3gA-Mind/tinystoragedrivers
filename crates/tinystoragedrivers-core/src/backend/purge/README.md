@@ -22,9 +22,17 @@ enumeration. With `ExistingSchema`, trusted bootstrap must prepare the
 coordinator collection; restricted handles validate its presence and
 compatibility without creating it.
 
+`BackendBlobs` records nonzero logical-to-physical generation mappings in its
+reserved `__tsd_composite_blob_scope_map/scopes` collection. ExistingSchema
+backends must prepare that collection through trusted bootstrap before those
+generations are used; restricted handles validate it and fail closed if it is
+missing or incompatible. Generation zero retains the legacy physical scope.
+
 The port does not promise root-wide atomic erasure or external key revocation.
 S3 scope purge requires a signer with `s3:ListBucketVersions` and
 `s3:DeleteObjectVersion`; signer-less S3 and custom blob backends without
 generation-safe purge support do not enable composite purge. Quiescent mode
 requires the host to drain writers. Late uploads that complete in an old
 physical generation may leave unreachable orphans for separate cleanup.
+S3 version-list and version-delete requests have bounded connect and total
+request timeouts, and transport errors do not include signed URLs.

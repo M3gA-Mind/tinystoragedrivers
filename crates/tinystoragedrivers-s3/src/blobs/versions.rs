@@ -1,6 +1,10 @@
 //! Version-aware S3 requests used by physical scope purge and enumeration.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use http::Method;
 use object_store::{
@@ -12,6 +16,22 @@ use tinystoragedrivers_core::{Capability, Result, StorageError};
 
 const REQUEST_TTL: Duration = Duration::from_secs(300);
 const PAGE_SIZE: &str = "1000";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn http_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, ()>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| ())
+    }) {
+        Ok(client) => Ok(client),
+        Err(()) => Err(backend_error("failed to configure bounded S3 HTTP client")),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct ListVersionsPage {
@@ -175,13 +195,13 @@ async fn delete_version(
 
 pub(super) async fn purge_prefix(signer: Option<&Arc<dyn Signer>>, prefix: &str) -> Result<()> {
     let signer = signer.ok_or_else(unsupported_signer)?;
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let mut key_marker = None;
     let mut version_marker = None;
     let mut seen_markers = HashSet::new();
     loop {
         let page = list_page(
-            &client,
+            client,
             signer.as_ref(),
             prefix,
             key_marker.as_deref(),
@@ -220,14 +240,14 @@ pub(super) async fn list_keys(
     prefix: &str,
 ) -> Result<Vec<String>> {
     let signer = signer.ok_or_else(unsupported_signer)?;
-    let client = reqwest::Client::new();
+    let client = http_client()?;
     let mut key_marker = None;
     let mut version_marker = None;
     let mut keys = Vec::new();
     let mut seen_markers = HashSet::new();
     loop {
         let page = list_page(
-            &client,
+            client,
             signer.as_ref(),
             prefix,
             key_marker.as_deref(),

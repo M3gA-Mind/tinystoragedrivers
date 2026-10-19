@@ -36,6 +36,14 @@ draining writers during quiescent reset. A writer that violates that contract
 and finishes in an old generation can leave unreachable orphan objects;
 reclamation remains separate maintenance.
 
+BackendBlobs keeps its logical-scope-to-physical-generation index in the
+reserved `__tsd_composite_blob_scope_map/scopes` collection of the wrapped
+backend. Generation-zero storage keeps its legacy scope name. An
+ExistingSchema backend used for nonzero BackendBlobs generations must have
+that internal collection prepared by trusted bootstrap; restricted use
+validates it and fails closed if it is absent or incompatible. The index is
+data metadata and does not alter application collection declarations.
+
 ## Contract
 
 PurgeRequest contains a stable host-issued operation_id and Atomic or Quiescent
@@ -76,7 +84,9 @@ its VersionId. AWS credentials need `s3:ListBucketVersions` on the bucket and
 `s3:DeleteObjectVersion` on the scoped object resources. A signer-less S3
 backend, or a custom blob backend without truthful generation-purge support,
 withholds composite ScopePurge before mutation. S3 erasure is staged and is not
-atomic with record deletion.
+atomic with record deletion. Version-list and version-delete HTTP requests use
+bounded connect and total request timeouts; transport and client-construction
+errors are returned without including signed URLs or credentials.
 
 MongoDB standalone deployments refuse ScopePurge. MongoDB Atomic mode and
 native fenced GridFS purge refuse their unsupported guarantees before starting.
