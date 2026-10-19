@@ -7,10 +7,9 @@ mod schema;
 use std::path::Path;
 use std::sync::Arc;
 
+pub use rusqlite;
 use rusqlite::Connection;
 use tinystoragedrivers_types::Result;
-pub use rusqlite;
-pub use mongodb;
 
 use connection::Db;
 pub use schema::SqliteTables;
@@ -108,11 +107,13 @@ impl SqliteConnection {
 fn system_clock() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn is_file_path(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-        ext.eq_ignore_ascii_case("db") || ext.eq_ignore_ascii_case("sqlite")
-    })
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("db") || ext.eq_ignore_ascii_case("sqlite"))
 }

@@ -44,8 +44,8 @@ impl S3ConnectionConfig {
             .ok_or_else(|| StorageError::invalid_input("s3 URL requires a bucket"))?
             .to_owned();
         let prefix = url.path().trim_matches('/').to_owned();
-        if prefix.as_bytes().contains(&0) || prefix.split('/').any(|part| part == "..") {
-            return Err(StorageError::invalid_input("invalid s3 object prefix"));
+        if !prefix.is_empty() {
+            validate_prefix(&prefix)?;
         }
         let mut region = "us-east-1".to_owned();
         let mut endpoint = None;
@@ -171,4 +171,23 @@ impl S3Connection {
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
+}
+
+#[cfg(test)]
+#[path = "s3_tests.rs"]
+mod tests;
+
+fn validate_prefix(prefix: &str) -> Result<()> {
+    use tinystoragedrivers_types::Key;
+    if prefix.len() > tinystoragedrivers_types::MAX_KEY_LEN || prefix.contains('\0') {
+        return Err(StorageError::invalid_input("invalid s3 object prefix"));
+    }
+    if prefix
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(StorageError::invalid_input("invalid s3 object prefix"));
+    }
+    Key::new(prefix.to_owned())?;
+    Ok(())
 }
