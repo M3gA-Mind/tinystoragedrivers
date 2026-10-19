@@ -3724,6 +3724,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-api"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "tinystoragedrivers-types",
+ "zeroize",
+]
+
+[[package]]
 name = "tinystoragedrivers-bus"
 version = "1.0.0"
 dependencies = [
@@ -3770,7 +3783,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tinystoragedrivers-api",
  "tinystoragedrivers-schema",
+ "tinystoragedrivers-types",
  "tokio",
  "ulid",
  "zstd",
@@ -3896,6 +3911,15 @@ dependencies = [
  "tinystoragedrivers-bus",
  "tinystoragedrivers-core",
  "tokio",
+]
+
+[[package]]
+name = "tinystoragedrivers-types"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

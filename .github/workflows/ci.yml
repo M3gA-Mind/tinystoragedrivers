@@ -191,24 +191,16 @@ jobs:
       - name: Verify confidential document callbacks through a real module
         run: bash scripts/test-document-callback.sh
 
-      # `tinystoragedrivers-core` defines the ports every driver and consumer
-      # compiles against. A database library arriving there transitively would
-      # force SQLite or MongoDB onto every host, so it is asserted rather than
-      # documented. The FORWARD form is required: `cargo tree -i <crate> -p
-      # <pkg>` discards the `-p` scope and exits 0 looking clean.
-      - name: Assert the core crate stays driver-free
+      # These are the only production vocabularies every driver and consumer
+      # needs. Exact forward dependency closures make any unreviewed transitive
+      # package fail, including new clients, runtimes and native bindings.
+      - name: Assert the types and API crates stay dependency-light
         run: |
           set -euo pipefail
-          forbidden="$(cargo tree -p tinystoragedrivers-core --all-features -e normal,build --prefix none \
-            | grep -Ei 'rusqlite|libsqlite3|mongodb|bson|reqwest|hyper|lapin|amq-protocol' || true)"
-          if [ -n "$forbidden" ]; then
-            echo "tinystoragedrivers-core pulled in a dependency its manifest forbids:" >&2
-            echo "$forbidden" >&2
-            echo >&2
-            echo "The ports must stay free of database clients and transports;" >&2
-            echo "drivers live in their own crates." >&2
-            exit 1
-          fi
+          .github/scripts/check-vocabulary-deps.sh \
+            tinystoragedrivers-types .github/dependency-allowlists/types.txt
+          .github/scripts/check-vocabulary-deps.sh \
+            tinystoragedrivers-api .github/dependency-allowlists/api.txt
 
       - name: Install native syscall observation for full-workspace coverage
         run: sudo apt-get install --yes strace
