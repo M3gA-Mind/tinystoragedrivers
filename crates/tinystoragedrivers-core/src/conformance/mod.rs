@@ -26,6 +26,7 @@ mod migrations;
 mod primitives;
 mod purge;
 mod purge_history;
+mod queue;
 mod schema;
 mod seal;
 mod semantics;
@@ -43,7 +44,8 @@ use crate::capabilities::Capability;
 use crate::error::{ErrorKind, Result};
 use crate::scope::Scope;
 
-/// Run the port checks (documents, validated batches, watch, streams, blobs)
+/// Run the port checks (documents, validated batches, watch, streams, blobs,
+/// queues)
 /// against one already-scoped handle.
 ///
 /// This is the part of [`run`] that needs nothing from the backend itself, so
@@ -61,6 +63,7 @@ pub async fn run_ports(storage: &ScopedStorage) {
     seal::run(storage).await;
     blobs::run(storage).await;
     primitives::run(storage).await;
+    queue::run(storage).await;
 }
 
 /// Run every check against `backend`.
