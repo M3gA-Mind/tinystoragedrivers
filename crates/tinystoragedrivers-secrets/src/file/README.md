@@ -26,6 +26,13 @@ Existing permissions are checked, never repaired after exposure.
 Reads and mutations hold `<secrets filename>.lock`. Key creation holds
 `<key filename>.lock`, including the short two-link no-clobber publication
 interval. New staging, key, data and lock files are private before bytes.
+
+`EncryptedFileSecrets` fails closed on decryption and serialization errors by
+default. A host that wants desktop recovery can opt into
+`CorruptFilePolicy::QuarantineAndContinue`: the driver moves the corrupt file
+to a unique `.corrupt.*` sibling under the same held lock and syncs the
+directory on Unix before continuing with an empty store. It never removes the
+archived bytes. Permission, namespace and other I/O failures remain errors.
 Publication flushes staged content, publishes, then verifies the actual
 published identity and content. Unix also syncs the admitted directory.
 Windows uses same-volume native replacement through `std::fs::rename`, whose

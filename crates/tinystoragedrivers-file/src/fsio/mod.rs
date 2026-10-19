@@ -121,10 +121,26 @@ fn parent(path: &Path) -> Result<&Path> {
 
 /// Replace `path` with `bytes`: write a sibling temporary file, flush it, and
 /// rename it into place. Creates the directory when missing.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error if the parent cannot be created, the temporary file cannot
+/// be written or synced, the rename fails, or syncing the directory fails.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_with(path, |file| {
         file.write_all(bytes).map_err(io_error("write a file"))
     })
+}
+
+/// Flush directory entry changes to durable storage where the platform
+/// supports opening and syncing directories. Windows treats this as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be opened or synced on the current
+/// platform.
+pub fn fsync_dir(dir: &Path) -> Result<()> {
+    sync_dir(dir)
 }
 
 /// [`write_atomic`] with the content produced by `fill`, which writes straight

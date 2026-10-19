@@ -58,7 +58,9 @@
 mod blobs;
 mod documents;
 mod encode;
-mod fsio;
+/// Filesystem primitives shared with host applications that need the same
+/// atomic replacement and directory durability guarantees as this driver.
+pub mod fsio;
 mod scopes;
 mod storage;
 mod streams;

@@ -157,6 +157,99 @@ async fn a_missing_or_empty_file_is_an_empty_store() {
 }
 
 #[tokio::test]
+async fn corrupt_files_fail_closed_by_default() {
+    let dir = TempDir::new("corrupt-default");
+    let path = dir.0.join("secrets.enc");
+    fixture_write(&path, b"not ciphertext").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key());
+
+    assert_eq!(store.get("a").await.unwrap_err().kind(), ErrorKind::Crypto);
+    assert_eq!(fs::read(&path).unwrap(), b"not ciphertext");
+    assert!(fs::read_dir(&dir.0).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".corrupt.")
+    }));
+}
+
+#[tokio::test]
+async fn opt_in_corrupt_file_recovery_quarantines_and_continues() {
+    let dir = TempDir::new("corrupt-recovery");
+    let path = dir.0.join("secrets.enc");
+    fixture_write(&path, b"not ciphertext").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+
+    assert_eq!(store.get("a").await.unwrap(), None);
+    assert!(!path.exists());
+    let archived = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".corrupt.")
+        })
+        .expect("corrupt bytes are preserved in quarantine");
+    assert_eq!(fs::read(archived).unwrap(), b"not ciphertext");
+
+    store.set("a", b"value").await.unwrap();
+    assert_eq!(store.get("a").await.unwrap().unwrap().as_slice(), b"value");
+}
+
+#[tokio::test]
+async fn opt_in_recovery_also_quarantines_decrypted_non_json() {
+    let dir = TempDir::new("corrupt-json");
+    let path = dir.0.join("secrets.enc");
+    let key = fixture_key();
+    fixture_write(&path, crypto::encrypt(&key, b"not json").unwrap()).unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, key)
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+
+    assert_eq!(store.list("").await.unwrap(), Vec::<String>::new());
+    assert!(!path.exists());
+    let archived = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".corrupt.")
+        })
+        .expect("decrypted invalid JSON is preserved");
+    let archive_bytes = fs::read(archived).unwrap();
+    assert_eq!(
+        crypto::decrypt(&fixture_key(), &archive_bytes)
+            .unwrap()
+            .as_slice(),
+        b"not json"
+    );
+}
+
+#[tokio::test]
+async fn opt_in_recovery_does_not_quarantine_non_corruption_io_errors() {
+    let dir = TempDir::new("corrupt-policy-permission");
+    let path = dir.0.join("secrets.enc");
+    fs::create_dir(&path).unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+
+    assert_eq!(store.get("a").await.unwrap_err().kind(), ErrorKind::Backend);
+    assert!(path.is_dir());
+    assert!(fs::read_dir(&dir.0).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".corrupt.")
+    }));
+}
+
+#[tokio::test]
 async fn binary_values_are_rejected() {
     let dir = TempDir::new("binary");
     let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
