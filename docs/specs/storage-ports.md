@@ -130,8 +130,8 @@ Versioned JSON **objects** in named collections.
     (`conformance/semantics.rs`) pins all of this.
   - Vector search is not a port here; it stays with TinyMemory (see
     [`storage-bus.md`](storage-bus.md)).
-  - `Fencing`: `StorageBackend::for_scope_fenced`, see
-    [`write-fencing.md`](write-fencing.md).
+  - `Fencing`: `StorageBackend::for_scope_fenced` checks each write atomically
+    against a guard document, returning `ErrorKind::Fenced` when the guard fails.
 
 ### `StreamStore`
 
@@ -185,7 +185,7 @@ bus client answer them identically.
   v2, see [`schema-v2.md`](schema-v2.md) section 7).
 - `for_scope_fenced(scope, fence)` returns handles whose writes the driver
   checks atomically against a guard document (`Capability::Fencing`,
-  `ErrorKind::Fenced`). See [`write-fencing.md`](write-fencing.md).
+  `ErrorKind::Fenced`).
 - OpenHuman's scope is the agent id. The cloud deployment runs one agent per
   user, so this is the user.
 
@@ -226,7 +226,7 @@ tests. `conformance::run` therefore also covers, on every driver:
 - **Document migrations** (`migrations.rs`): a two-step chain over several
   batches, a crash part way, a resume that writes no record twice, and a no-op
   re-run (drivers with `RecordMetadata`).
-- **Holder fences**: see [`write-fencing.md`](write-fencing.md).
+- **Holder fences**: writes through a fenced handle are checked atomically against its guard document.
 
 External drivers should call the public
 `conformance::run_with_process_capabilities(backend, single_scope,
@@ -303,138 +303,3 @@ nonretryable backend error because the mutation may have committed: callers
 must read their durable outcome before retrying. The API has no deadline
 parameter. Scope serialization trades same-scope mutation throughput for
 cross-document serializability.
-
-## Scoped reset and writer admission
-
-Reset targets one scope of the connected backend. A receipt from one backend
-says nothing about another; a host reports a full reset only after every owned
-backend and external owner stage completes.
-
-`ScopedStorage::purge(PurgeRequest { operation_id, mode })` is optional.
-Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
-`ScopePurge` advertises native scope admission and reset support;
-`AtomicScopePurge` additionally promises one atomic all-port operation.
-A custom `ScopePurge` implementation must explicitly opt in to generation
-validation before CompositeStorage can rely on its generation check. Full
-binding validation is a separate opt-in that also checks a native writer fence.
-This distinction lets composite blob reads reject retired generations while
-retaining the existing fenced-read contract; writes still enforce their fence.
-Both trait defaults are unsupported for compatibility with older custom ports;
-advertising purge alone does not prove that a handle rejects retired
-generations. A composite refuses purge capability if its record or blob half
-cannot validate the required generation binding.
-A stable operation identity makes retries idempotent and its receipt survives
-the erased data. `PurgeMode::Quiescent` is a trusted host assertion that every
-writer has been stopped and drained; it is never a model-selectable option.
-`PurgeMode::Atomic` requires native atomic erasure of all storage ports.
-
-Memory and SQLite implement atomic erasure of documents, deleted-document
-versions, document-backed secrets and wrapped-key envelopes, import receipts,
-stream records and lifetime cursors, and blobs for exactly one scope.
-SQLite also removes that scope's search mirror. Shared collection declarations,
-indexes and native admission/receipt metadata remain: removing shared schemas
-would alter other scopes. Query results become empty while declarations remain.
-Standalone secrets backends, OS keyrings, arbitrary native SQL tables and other
-external owner stores are outside these ports and require explicit owner stages.
-
-The operation issues a monotonically increasing `ScopeGeneration`.
-Generation zero is the legacy handle default. On memory and SQLite, every data
-read and mutation, including empty operations and schema
-declarations, validates its issued generation under the same native
-lock/transaction as the data access. SQLite reads pin generation and data in
-one deferred read transaction. Retired handles cannot read replacement data.
-Revoked generations fail with `ScopeGenerationRejected`, even if the operation
-would otherwise change nothing; an actual stale native lease guard continues
-to fail with `Fenced`.
-Hosts persist the returned generation in authoritative profile state before
-reopening through `for_scope_generation` or
-`for_scope_fenced_generation`. Generations come from trusted
-native receipts and profile admission, never model arguments or document
-metadata. A matching receipt retry does not erase data written in the new
-generation. Reusing an older operation identity after a later reset cannot
-revive the old generation.
-
-A fenced purge checks and holds the native guard through the operation. The
-guard's scope must differ from the erased scope, including when the guard is
-in another scope. A stale guard changes nothing.
-Memory and SQLite support this natively. File purge is durable but staged
-across filesystem entries and makes no crash-atomicity claim. CompositeStorage
-uses a durable coordinator in the record backend and stages records and blob
-deletion separately; it never advertises AtomicScopePurge. Its coordinator
-collection must already be present and compatible when the record backend is
-opened through ExistingSchema. Trusted bootstrap prepares that internal
-collection; restricted use validates it and refuses if it is missing, without
-creating or repairing schema. Nested compositions reserve deterministic
-internal coordinator scopes, which public scope constructors and enumeration
-hide.
-
-S3 advertises ScopePurge only when a signer is installed. It enumerates every
-object version and delete marker beneath the exact generation prefix and
-deletes each VersionId. AWS permissions must include `s3:ListBucketVersions`
-for the bucket and `s3:DeleteObjectVersion` for the scoped object keys. A
-signer-less S3 backend or a custom blob driver without generation isolation
-withholds the composite capability before record or blob mutation. File,
-Mongo GridFS, S3 and composite storage do not advertise atomic all-port purge;
-they must not turn an unsupported native guarantee into an unfenced
-best-effort success.
-
-Reset invalidates application query caches, old version preconditions, stream
-cursors, import receipts and scoped secret providers. Shared declaration caches
-remain valid because declarations are retained. Hosts stop and drain KMS loads
-and secret writers, call `KmsKeyProvider::invalidate(scope)` to zeroize the
-local cached key, then rebuild/rebind providers over the admitted generation.
-KMS async reads already revalidate the durable envelope before using cached
-plaintext; the synchronous KMS path refuses to use unvalidated cached keys.
-The new envelope must be created through a generation-admitted handle.
-
-The reset coordinator may call `purge_status(operation_id)` through its bound
-reset port even when its data generation has retired. This reads native receipt
-authority and checks its native lease; it cannot start another erase. Pending
-receipts identify the next `PurgeStage`; a typed stage failure is followed by a
-status query and a retry of the same operation identity.
-
-### Mongo quiescent purge
-
-Replica sets advertise ScopePurge, with PurgeMode::Quiescent only. GridFS
-prevents atomic all-port erasure and fenced all-port reset: Atomic and fenced
-requests return typed Unsupported before changing admission or tenant data.
-Standalone and without_transactions backends do not advertise reset support.
-An independent replica handle with public transactions disabled still obeys
-the persistent admission row; normal document and stream mutations retain
-internal transactions.
-
-The host must stop and drain every scoped writer, including GridFS uploads,
-before starting. GridFS chunks carry no scope before a completed file manifest,
-so the driver cannot prove that assertion. Reset persists the issued generation,
-operation identity, Pending flag and next stage outside tenant data. Pending
-blocks both old and newly issued generations from data reads and mutations.
-Document and stream writes hold that admission row and check their generation
-inside the same transaction as the mutation. Shared declaration changes check
-the actor generation inside the schema metadata transaction; indexes remain
-shared administrative declarations.
-
-Records and stream lifetime heads are erased transactionally for the exact
-default/named namespace. Blob planning saves one durable manifest row per file.
-Each blob's chunks are erased before its file and manifest row. A stage failure
-keeps the receipt Pending; retrying the same identity resumes without losing
-ownership of orphan chunks. Complete is persisted only after no scoped files
-or manifest rows remain. It covers this one backend, and is not a
-cross-address, cross-port atomicity claim.
-
-All Mongo payload and admission reads select the primary. Port reads validate
-generation and Pending both before and after reading; a changed generation
-rejects the result instead of exposing replacement data. Existing returned
-bytes/values cannot be revoked, so hosts must gate and drain readers too before
-publishing a full reset. Each document/stream mutation serializes on its scope
-metadata row; unrelated scopes use separate rows. Scoped expiry reclamation
-after a reset uses sweep_expired_generation with the issued generation.
-
-### Record driver identity in composites
-
-`StorageBackend::driver` remains its diagnostic label (`composite` for a
-composition). `document_driver` identifies the originating native document and
-stream driver, defaulting to `driver` for ordinary backends. Compositions and
-transparent backend wrappers forward it recursively. It performs no opening or I/O. Hosts must use the record identity when
-applying their own coordination/recovery rules rather than classifying a wrapper
-or independent blob driver. The identity grants no capability or actor authority;
-native capabilities and admission still govern operations.

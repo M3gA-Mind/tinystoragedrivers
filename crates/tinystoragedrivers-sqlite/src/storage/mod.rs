@@ -119,60 +119,32 @@ impl SqliteStorage {
     }
 
     fn handles(&self, scope: &Scope, fencing: Option<&Arc<Fencing>>) -> ScopedStorage {
-        self.handles_generation(
-            scope,
-            fencing,
-            tinystoragedrivers_core::ScopeGeneration::default(),
-        )
-    }
-    fn handles_generation(
-        &self,
-        scope: &Scope,
-        fencing: Option<&Arc<Fencing>>,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(
-                SqliteDocuments::new(
-                    Arc::clone(&self.db),
-                    Arc::clone(&self.tables),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fencing.cloned(),
-                    self.existing,
-                )
-                .with_generation(generation),
-            ),
-            Arc::new(
-                SqliteStreams::new(
-                    Arc::clone(&self.db),
-                    Arc::clone(&self.tables),
-                    scope.clone(),
-                    fencing.cloned(),
-                    Arc::clone(&self.clock),
-                )
-                .with_generation(generation),
-            ),
-            Arc::new(
-                SqliteBlobs::new(
-                    Arc::clone(&self.db),
-                    Arc::clone(&self.tables),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fencing.cloned(),
-                )
-                .with_generation(generation),
-            ),
+            Arc::new(SqliteDocuments::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fencing.cloned(),
+                self.existing,
+            )),
+            Arc::new(SqliteStreams::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                fencing.cloned(),
+                Arc::clone(&self.clock),
+            )),
+            Arc::new(SqliteBlobs::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fencing.cloned(),
+            )),
         )
-        .with_purge(Arc::new(crate::purge::SqlitePurge {
-            db: Arc::clone(&self.db),
-            tables: Arc::clone(&self.tables),
-            scope: scope.clone(),
-            generation,
-            fencing: fencing.cloned(),
-        }))
     }
 
     /// The database file this storage reads and writes.
@@ -190,14 +162,6 @@ impl StorageBackend for SqliteStorage {
 
     fn capabilities(&self) -> Capabilities {
         capabilities()
-    }
-
-    fn supports_scope_purge_binding_validation(&self) -> bool {
-        true
-    }
-
-    fn supports_scope_purge_generation_validation(&self) -> bool {
-        true
     }
 
     async fn prepare_schema(&self) -> Result<()> {
@@ -227,24 +191,6 @@ impl StorageBackend for SqliteStorage {
         fence.validate()?;
         let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
         Ok(self.handles(scope, Some(&fencing)))
-    }
-
-    fn for_scope_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Result<ScopedStorage> {
-        Ok(self.handles_generation(scope, None, generation))
-    }
-    fn for_scope_fenced_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-        fence: &Fence,
-    ) -> Result<ScopedStorage> {
-        fence.validate()?;
-        let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
-        Ok(self.handles_generation(scope, Some(&fencing), generation))
     }
 
     /// Returns freed pages to the filesystem. It acts on the whole database file.
@@ -282,7 +228,3 @@ mod tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
-
-#[cfg(test)]
-#[path = "generation_tests.rs"]
-mod generation_tests;

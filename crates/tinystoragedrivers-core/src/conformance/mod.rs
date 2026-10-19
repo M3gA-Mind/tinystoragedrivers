@@ -24,8 +24,6 @@ mod ledger;
 mod maintenance;
 mod migrations;
 mod primitives;
-mod purge;
-mod purge_history;
 mod queue;
 mod queue_port;
 mod schema;
@@ -179,8 +177,6 @@ pub async fn run_with_process_capabilities(
         isolation::run(backend).await;
         isolation::nested(backend).await;
         validated::isolation(backend).await;
-        purge::run(backend).await;
-        purge_history::run(backend).await;
         maintenance::run(backend).await;
     }
     migrations::run(backend).await;

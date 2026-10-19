@@ -1,12 +1,11 @@
 //! Independently configured blob storage and composite document/blob backends.
 #[cfg(not(feature = "s3"))]
 use crate::StorageError;
-use crate::{BackendBlobs, BlobBackend, CompositeStorage, Result, StorageBackend, StorageConfig};
-use std::fmt;
+use crate::{BackendBlobs, BlobBackend, Result, StorageConfig};
 use std::sync::Arc;
 
 /// A blob location independent of the document/stream location.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum BlobConfig {
     /// The blob port from a complete backend.
     Backend(StorageConfig),
@@ -37,22 +36,7 @@ impl BlobConfig {
                 "s3 blob URL needs the s3 feature",
             ));
         }
-        let config = StorageConfig::parse(url)?;
-        if matches!(&config, StorageConfig::Composite { .. }) {
-            return Err(crate::StorageError::invalid_input(
-                "nested composite blob URLs are not supported",
-            ));
-        }
-        Ok(Self::Backend(config))
-    }
-}
-
-impl fmt::Display for BlobConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Backend(config) => write!(f, "{config}"),
-            Self::S3 { url } => f.write_str(url),
-        }
+        Ok(Self::Backend(StorageConfig::parse(url)?))
     }
 }
 
@@ -63,9 +47,7 @@ impl fmt::Display for BlobConfig {
 /// A missing feature, invalid configuration, or backend connection error.
 pub async fn open_blobs(config: &BlobConfig) -> Result<Arc<dyn BlobBackend>> {
     match config {
-        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(
-            Box::pin(crate::open(config)).await?,
-        ))),
+        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(crate::open(config).await?))),
         #[cfg(feature = "s3")]
         BlobConfig::S3 { url } => Ok(Arc::new(tinystoragedrivers_s3::S3Storage::open(
             &tinystoragedrivers_s3::S3Config::parse(url)?,
@@ -75,24 +57,6 @@ pub async fn open_blobs(config: &BlobConfig) -> Result<Arc<dyn BlobBackend>> {
             "s3 blob URL needs the s3 feature",
         )),
     }
-}
-
-/// Open documents/streams and blobs on independent locations.
-///
-/// Use an unfenced scoped blob handle to upload first, then a fenced document
-/// handle to publish the reference. Fenced composite blob writes are refused.
-///
-/// # Errors
-///
-/// Any parse/connection failure in either configured backend.
-pub async fn open_composite(
-    records: &StorageConfig,
-    blobs: &BlobConfig,
-) -> Result<Arc<dyn StorageBackend>> {
-    Ok(Arc::new(CompositeStorage::new(
-        Box::pin(crate::open(records)).await?,
-        open_blobs(blobs).await?,
-    )))
 }
 
 #[cfg(test)]

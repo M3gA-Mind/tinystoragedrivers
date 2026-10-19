@@ -34,8 +34,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, ScopeGeneration, SealOutcome, StorageError, StreamEntry, StreamInfo,
-    StreamStore, validate_stream,
+    Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo, StreamStore, validate_stream,
 };
 
 use crate::documents::guard;
@@ -87,7 +86,6 @@ pub struct FileStreams {
     scope: Scope,
     /// Checked under the directory lock before every write, when set.
     fence: Option<Arc<Fencing>>,
-    generation: ScopeGeneration,
 }
 
 /// The paths of one stream.
@@ -98,17 +96,7 @@ struct Paths {
 
 impl FileStreams {
     pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fencing>>) -> Self {
-        Self {
-            db,
-            scope,
-            fence,
-            generation: ScopeGeneration::default(),
-        }
-    }
-
-    pub(crate) fn with_generation(mut self, generation: ScopeGeneration) -> Self {
-        self.generation = generation;
-        self
+        Self { db, scope, fence }
     }
 
     fn dir(db: &Db, scope: &Scope) -> PathBuf {
@@ -141,12 +129,9 @@ impl FileStreams {
         F: FnOnce(&Db, &Scope, &Paths) -> Result<T> + Send + 'static,
     {
         validate_stream(name)?;
-        let (scope, name, generation) = (self.scope.clone(), name.to_owned(), self.generation);
+        let (scope, name) = (self.scope.clone(), name.to_owned());
         self.db
-            .run(move |db| {
-                db.check_generation(&scope, generation)?;
-                work(db, &scope, &Self::paths(db, &scope, &name))
-            })
+            .run(move |db| work(db, &scope, &Self::paths(db, &scope, &name)))
             .await
     }
 
@@ -167,15 +152,9 @@ impl FileStreams {
         F: FnOnce(&Db, &Scope, &Paths) -> Result<T> + Send + 'static,
     {
         validate_stream(name)?;
-        let (scope, name, fence, generation) = (
-            self.scope.clone(),
-            name.to_owned(),
-            self.fence.clone(),
-            self.generation,
-        );
+        let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
         self.db
             .run(move |db| {
-                db.check_generation(&scope, generation)?;
                 guard(db, fence.as_deref())?;
                 work(db, &scope, &Self::paths(db, &scope, &name))
             })
@@ -528,10 +507,9 @@ impl StreamStore for FileStreams {
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
-        let (scope, prefix, generation) = (self.scope.clone(), prefix.to_owned(), self.generation);
+        let (scope, prefix) = (self.scope.clone(), prefix.to_owned());
         self.db
             .run(move |db| {
-                db.check_generation(&scope, generation)?;
                 let mut names = Vec::new();
                 for path in files_with_suffix(&Self::dir(db, &scope), META_SUFFIX)? {
                     if let Some(meta) = read_json::<StreamMeta>(&path)?

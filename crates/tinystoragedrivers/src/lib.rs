@@ -51,7 +51,7 @@
 mod blobs;
 mod config;
 mod queues;
-pub use blobs::{BlobConfig, open_blobs, open_composite};
+pub use blobs::{BlobConfig, open_blobs};
 pub use queues::{QueueConfig, open_queues};
 
 pub use config::{StorageConfig, open, redact_url};

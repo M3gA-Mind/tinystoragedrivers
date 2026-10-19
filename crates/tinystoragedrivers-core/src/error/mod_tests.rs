@@ -19,10 +19,6 @@ fn every_constructor_sets_its_kind() {
         (StorageError::unavailable("x"), ErrorKind::Unavailable),
         (StorageError::backend("x"), ErrorKind::Backend),
         (StorageError::fenced("x"), ErrorKind::Fenced),
-        (
-            StorageError::scope_generation_rejected("x"),
-            ErrorKind::ScopeGenerationRejected,
-        ),
     ];
     for (error, kind) in cases {
         assert_eq!(error.kind(), kind);
@@ -44,7 +40,6 @@ fn display_prefixes_the_kind() {
         StorageError::unavailable("a").to_string(),
         StorageError::backend("a").to_string(),
         StorageError::fenced("a").to_string(),
-        StorageError::scope_generation_rejected("a").to_string(),
     ];
     assert_eq!(
         rendered,
@@ -59,7 +54,6 @@ fn display_prefixes_the_kind() {
             "unavailable: a",
             "backend: a",
             "fenced: a",
-            "scope generation rejected: a",
         ]
     );
 }

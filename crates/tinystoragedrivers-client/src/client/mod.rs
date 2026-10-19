@@ -75,9 +75,9 @@ pub(crate) fn wire_error(error: WireError, unsupported_as: Option<Capability>) -
 
 /// A storage backend reached over a bus, bound to the one scope its host chose.
 ///
-/// There is no way to select another scope, fence or generation from
+/// There is no way to select another scope or fence from
 /// here: those are fixed by the host's grant, so [`StorageBackend::for_scope`]
-/// accepts only the bound scope and the fenced and generation variants stay
+/// accepts only the bound scope; the fenced variants stay
 /// unsupported.
 #[derive(Clone)]
 pub struct BusStorage {

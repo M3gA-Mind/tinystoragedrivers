@@ -12,7 +12,7 @@ use tinystoragedrivers_core::{
 
 /// Capabilities bus callers never see.
 ///
-/// Fencing, scope purge and the existing-schema open are the host's own
+/// Fencing and the existing-schema open are the host's own
 /// lifecycle controls. Two more are host-only by the storage-bus trust model,
 /// even though the wire could carry them: `Maintenance` (`maintain`,
 /// `checkpoint`) lets the caller trigger vacuum, WAL checkpoints and
@@ -28,10 +28,8 @@ use tinystoragedrivers_core::{
 /// `RecordMetadata` (contract version 4: `Meta` on every read, `schema` and
 /// `expires_ms` on `Put`) and `StreamSeal` (`Streams.Seal`) act only inside
 /// the module's own grant, so they are exposed.
-pub(crate) const HOST_ONLY: [Capability; 8] = [
+pub(crate) const HOST_ONLY: [Capability; 6] = [
     Capability::Fencing,
-    Capability::ScopePurge,
-    Capability::AtomicScopePurge,
     Capability::ExistingSchema,
     Capability::Maintenance,
     Capability::ScopeEnumeration,
@@ -59,7 +57,6 @@ pub(crate) fn failure_of(error: &StorageError) -> StorageFailure {
         ErrorKind::Crypto => StorageKind::Crypto,
         ErrorKind::Unavailable => StorageKind::Unavailable,
         ErrorKind::Fenced => StorageKind::Fenced,
-        ErrorKind::ScopeGenerationRejected => StorageKind::ScopeGenerationRejected,
         _ => StorageKind::Backend,
     };
     StorageFailure { kind }
@@ -87,7 +84,6 @@ pub(crate) fn error_of(
         StorageKind::Unavailable => StorageError::unavailable(message),
         StorageKind::Backend => StorageError::backend(message),
         StorageKind::Fenced => StorageError::fenced(message),
-        StorageKind::ScopeGenerationRejected => StorageError::scope_generation_rejected(message),
     }
 }
 

@@ -1,4 +1,4 @@
-//! Stream storage on MongoDB. Replica-set writes use native scope-admission
+//! Stream storage on MongoDB. Replica-set writes use the shared document-validation lock
 //! transactions; standalone writes retain the segment uniqueness protocol.
 //!
 //! A stream is a run of *segments* in `<prefix>_tsd_streams`, one per append:
@@ -207,7 +207,6 @@ pub(crate) fn head_id(scope: &Scope, stream: &str) -> Document {
 pub(crate) struct MongoStreams {
     shared: Arc<Shared>,
     scope: Scope,
-    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Every write runs in a transaction that holds this fence, when set.
     fence: Option<Arc<Fencing>>,
 }
@@ -217,16 +216,8 @@ impl MongoStreams {
         Self {
             shared,
             scope,
-            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fence,
         }
-    }
-    pub(crate) fn with_generation(
-        mut self,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Self {
-        self.generation = generation;
-        self
     }
 
     /// The injected clock's reading, as the signed value BSON stores.
@@ -234,11 +225,11 @@ impl MongoStreams {
         i64::try_from((self.shared.clock)()).unwrap_or(i64::MAX)
     }
 
-    async fn hold_admission(&self, session: &mut ClientSession) -> Result<()> {
+    async fn hold_validation(&self, session: &mut ClientSession) -> Result<()> {
         self.shared
             .hold_validation(Some(&self.scope), &mut *session)
             .await?;
-        crate::purge::check(&self.shared, &self.scope, self.generation, Some(session)).await
+        Ok(())
     }
 
     async fn segments(&self) -> Result<ScopedCollection> {
@@ -253,9 +244,7 @@ impl MongoStreams {
     /// and a sealed stream's blob is written and removed around the fenced
     /// document writes, never inside one.
     fn blobs(&self) -> MongoBlobs {
-        MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false)
-            .with_generation(self.generation)
-            .with_sealed_access()
+        MongoBlobs::new(Arc::clone(&self.shared), self.scope.clone(), false).with_sealed_access()
     }
 
     fn heads(&self) -> ScopedCollection {
@@ -536,13 +525,13 @@ impl StreamStore for MongoStreams {
     }
 
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             let handle = self.segments().await?;
             if self.shared.physical_transactions {
                 self.shared.prepare_validation(Some(&self.scope)).await?;
                 return in_write!(&self.shared, self.fence.as_deref(), session => {
-                    self.hold_admission(&mut *session).await?;
+                    self.hold_validation(&mut *session).await?;
                     self.append_once(&handle, stream, &values, None, Some(session)).await
                         .and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
                 });
@@ -558,7 +547,7 @@ impl StreamStore for MongoStreams {
             Err(StorageError::unavailable(
                 "stream kept growing concurrently; retry",
             ))
-        })
+        }
     }
 
     async fn append_batch_if_offset(
@@ -567,7 +556,7 @@ impl StreamStore for MongoStreams {
         expected_next_offset: u64,
         values: Vec<Value>,
     ) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             if !self.shared.transactions {
                 return Err(StorageError::unsupported(
@@ -578,15 +567,15 @@ impl StreamStore for MongoStreams {
             let handle = self.segments().await?;
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
+                self.hold_validation(&mut *session).await?;
                 self.append_once(&handle, stream, &values, Some(expected_next_offset), Some(session)).await
                     .and_then(|offset| offset.ok_or_else(|| StorageError::unavailable("stream grew concurrently; retry")))
             })
-        })
+        }
     }
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             if limit == 0 {
                 if self.shared.existing {
@@ -625,11 +614,11 @@ impl StreamStore for MongoStreams {
                 }
             }
             Ok(out)
-        })
+        }
     }
 
     async fn len(&self, stream: &str) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             let handle = self.segments().await?;
             let generation = self.generation(stream, None).await?;
@@ -637,11 +626,11 @@ impl StreamStore for MongoStreams {
                 .edge(&handle, stream, generation, -1, None)
                 .await?
                 .map_or(0, |last| last.end))
-        })
+        }
     }
 
     async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             let handle = self.segments().await?;
             let generation = self.generation(stream, None).await?;
@@ -666,11 +655,11 @@ impl StreamStore for MongoStreams {
                 None,
                 last.at_ms,
             )))
-        })
+        }
     }
 
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             let handle = self.segments().await?;
             if !self.shared.physical_transactions {
@@ -678,20 +667,20 @@ impl StreamStore for MongoStreams {
             }
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
+                self.hold_validation(&mut *session).await?;
                 self.truncate_in(&handle, stream, offset, Some(session)).await
             })
-        })
+        }
     }
 
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
-        crate::purge::admitted!(self, {
+        {
             validate_stream(stream)?;
             let handle = self.segments().await?;
             let removed = if self.shared.physical_transactions {
                 self.shared.prepare_validation(Some(&self.scope)).await?;
                 in_write!(&self.shared, self.fence.as_deref(), session => {
-                    self.hold_admission(&mut *session).await?;
+                    self.hold_validation(&mut *session).await?;
                     self.delete_in(&handle, stream, Some(session)).await
                 })?
             } else {
@@ -701,22 +690,19 @@ impl StreamStore for MongoStreams {
             // it deleted, including one a crashed or stalled seal left.
             self.purge_stale_sealed_blobs(stream).await?;
             Ok(removed)
-        })
+        }
     }
 
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
-        crate::purge::admitted!(self, self.seal_stream(stream).await)
+        self.seal_stream(stream).await
     }
 
     async fn delete_sealed_stream(&self, stream: &str, sealed_ms: i64) -> Result<bool> {
-        crate::purge::admitted!(
-            self,
-            self.delete_sealed_stream_impl(stream, sealed_ms).await
-        )
+        self.delete_sealed_stream_impl(stream, sealed_ms).await
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
-        crate::purge::admitted!(self, {
+        {
             let handle = self.segments().await?;
             let present = handle
                 .aggregate(
@@ -748,7 +734,7 @@ impl StreamStore for MongoStreams {
             names.sort();
             names.dedup();
             Ok(names)
-        })
+        }
     }
 }
 

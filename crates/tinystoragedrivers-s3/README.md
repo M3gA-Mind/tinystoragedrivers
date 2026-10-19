@@ -19,25 +19,6 @@ prefix. max_key_len reports 1024 minus the prefix's UTF-8 byte length;
 keys exceeding that scoped limit fail before a network call. List consumes all result pages and returns complete metadata sorted
 by logical key.
 
-## Scope purge
-
-Scope purge is advertised only when a signer is configured. Generation zero
-uses the legacy `scopes/<scope-hex>/` prefix; later generations use the sibling
-`scope-generations/<scope-hex>/<generation>/` prefix so a legal legacy object
-key cannot collide with the generation namespace. Purge lists every object
-version and delete marker beneath the exact prefix, follows S3 version markers
-across pages, and deletes each entry by VersionId. This handles versioned and
-versioning-suspended buckets, including the `null` version. It does not claim
-atomicity with document or stream deletion.
-
-The signing identity needs `s3:ListBucketVersions` on the bucket and
-`s3:DeleteObjectVersion` on the scoped object resources. Signer-less stores
-withhold ScopePurge, and CompositeStorage refuses the purge capability before
-mutation if its blob backend cannot provide generation-safe purge. Hosts must
-stop and drain writers before quiescent reset. An upload that finishes late in
-an old physical generation can leave an unreachable orphan; its reclamation is
-separate maintenance work.
-
 ## Streaming and publication
 
 put_stream reads at most 8 MiB for a small upload. Larger objects use sequential
@@ -74,6 +55,6 @@ signatures. They do not prove compatibility with a particular live service.
 Run .github/scripts/test-minio.sh for live local MinIO conformance, direct
 presigned transfers and a 500 MiB streaming roundtrip. The fixture verifies a
 pinned upstream release checksum, stores everything under target/, and binds
-only loopback. CI runs this same suite. Composite facade URL selection is
-available through BlobConfig and open_composite behind the facade's s3 feature.
-Host feature forwarding and desktop data import remain host integration work.
+only loopback. CI runs this same suite. S3 blob URL selection is available
+through `BlobConfig` and `open_blobs` behind the facade's `s3` feature. Host
+feature forwarding and desktop data import remain host integration work.

@@ -25,9 +25,7 @@ use futures_util::TryStreamExt;
 use mongodb::IndexModel;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::IndexOptions;
-use tinystoragedrivers_core::{
-    Capability, CollectionSpec, Result, Scope, SearchSpec, StorageError,
-};
+use tinystoragedrivers_core::{Capability, CollectionSpec, Result, SearchSpec, StorageError};
 
 use super::Shared;
 use crate::documents::stored::{Stored, bury, expired_filter, not_deleted, visible};
@@ -367,19 +365,13 @@ impl Shared {
     /// for a spec that does not merge,
     /// [`ErrorKind::AlreadyExists`](tinystoragedrivers_core::ErrorKind::AlreadyExists)
     /// when stored documents violate a new unique index, or a backend error.
-    pub(crate) async fn ensure(
-        &self,
-        spec: &CollectionSpec,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Result<()> {
+    pub(crate) async fn ensure(&self, spec: &CollectionSpec) -> Result<()> {
         if self.existing {
             return Err(StorageError::unsupported(
                 Capability::ExistingSchema,
                 "existing-schema handles cannot declare collections",
             ));
         }
-        crate::purge::check(self, scope, generation, None).await?;
         spec.validate()?;
         let meta = self.raw(META);
         for _ in 0..ENSURE_ATTEMPTS {
@@ -404,7 +396,6 @@ impl Shared {
                 self.prepare_validation(None).await?;
                 crate::fence::in_write!(self, None, session => {
                     self.hold_validation(None, &mut *session).await?;
-                    crate::purge::check(self, scope, generation, Some(&mut *session)).await?;
                     self.write_spec(&spec.name, &encoded, revision, Some(session)).await
                 })
             } else {

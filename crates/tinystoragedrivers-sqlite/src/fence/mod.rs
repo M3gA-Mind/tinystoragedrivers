@@ -32,9 +32,6 @@ impl fmt::Debug for Fencing {
 }
 
 impl Fencing {
-    pub(crate) fn guard_scope(&self) -> &tinystoragedrivers_core::Scope {
-        self.fence.scope()
-    }
     pub(crate) fn new(fence: Fence, clock: Clock) -> Self {
         Self { fence, clock }
     }

@@ -168,4 +168,6 @@ server, `readWrite` on any database (or on those name patterns) is sufficient.
 The URL's `authSource` continues to select the authentication database
 independently.
 
-Existing-schema handles also refuse scope purge before any mutation: native reset may initialize its private receipt and manifest collections. Use trusted bootstrap authority for reset, with actual writer quiescence. Schema validation reads remain bound to the captured scope generation and refuse after that generation retires.
+Collections left by older releases for scope-reset bookkeeping are not read,
+created, or modified by this driver. Current handles are not bound to reset
+generations; schema validation checks only the declared collection schema.

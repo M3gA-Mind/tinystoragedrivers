@@ -7,7 +7,7 @@ serve_collection. It loads the real verified module using that same binding.
 The service implementation is private. There is no ordinary service constructor
 or public direct dispatch method. Registration and calls cannot select another
 collection, scope, URL, database or native admission. Native ports perform CAS,
-data validation, generation checks and fenced writes; this crate only forwards.
+data validation and host-scoped writes; this crate only forwards.
 
 Schema preparation and legacy import authority remain the owning host/module's
 explicit responsibilities. Registration never calls ensure_collection. Native

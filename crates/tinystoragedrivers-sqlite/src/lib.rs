@@ -39,7 +39,6 @@ mod fence;
 mod fields;
 mod maintenance;
 mod native;
-mod purge;
 mod scopes;
 mod sql;
 mod storage;

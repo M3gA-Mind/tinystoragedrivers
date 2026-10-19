@@ -95,7 +95,7 @@ impl std::fmt::Debug for StorageServer {
 }
 
 impl StorageServer {
-    /// Serve `storage`, whose scope (and any fence or generation) the host
+    /// Serve `storage`, whose scope (and optional write fence) the host
     /// already chose.
     #[must_use]
     pub fn new(storage: ScopedStorage) -> Self {

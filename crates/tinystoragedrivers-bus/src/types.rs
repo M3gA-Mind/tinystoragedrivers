@@ -116,8 +116,6 @@ pub enum StorageKind {
     Backend,
     /// Native lease guard no longer holds.
     Fenced,
-    /// Scope generation retired or unissued, or scope reset pending.
-    ScopeGenerationRejected,
 }
 /// Content-free failure; no native message or source crosses the ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

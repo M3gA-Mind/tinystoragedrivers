@@ -1,18 +1,27 @@
-//! Composite URL selection and missing-feature failures.
+//! Blob URL validation and missing-feature failures.
 use super::*;
-use crate::{ErrorKind, Scope};
+use crate::{ErrorKind, StorageConfig};
+use tinystoragedrivers_core::{Capability, Scope};
 
 #[tokio::test]
-async fn composite_config_selects_independent_persistent_ports() {
-    let config = BlobConfig::parse("memory").unwrap();
-    let backend = open_composite(&StorageConfig::Memory, &config)
+async fn opening_a_backend_blob_port_preserves_scope_and_capability_behavior() {
+    let blobs = open_blobs(&BlobConfig::Backend(StorageConfig::Memory))
         .await
         .unwrap();
-    let one = backend.for_scope(&Scope::local()).unwrap();
-    one.blobs().put("x", vec![1], None).await.unwrap();
-    let two = backend.for_scope(&Scope::new("other").unwrap()).unwrap();
-    assert!(two.blobs().get("x").await.unwrap().is_none());
-    crate::conformance::run_with_process_capabilities(backend.as_ref(), false, false, false).await;
+    let first = blobs.for_scope(&Scope::new("first").unwrap()).unwrap();
+    let second = blobs.for_scope(&Scope::new("second").unwrap()).unwrap();
+
+    first.put("item", b"first".to_vec(), None).await.unwrap();
+    second.put("item", b"second".to_vec(), None).await.unwrap();
+    assert_eq!(first.get("item").await.unwrap().unwrap().bytes, b"first");
+    assert_eq!(second.get("item").await.unwrap().unwrap().bytes, b"second");
+
+    let caps = blobs.capabilities();
+    assert!(caps.contains(Capability::BlobTtl));
+    assert!(!caps.contains(Capability::Transactions));
+    assert!(!caps.contains(Capability::Fencing));
+    assert!(!caps.contains(Capability::PresignedUrls));
+    assert!(!caps.contains(Capability::StreamingBlobs));
 }
 
 #[test]
@@ -31,43 +40,37 @@ fn s3_credentials_are_rejected_without_echoing_the_url() {
     assert!(!error.to_string().contains("secret"));
 }
 
+#[test]
+fn parses_backend_blob_urls_through_storage_config() {
+    assert!(matches!(
+        BlobConfig::parse("memory").unwrap(),
+        BlobConfig::Backend(StorageConfig::Memory)
+    ));
+}
+
 #[cfg(feature = "s3")]
 #[tokio::test]
-async fn s3_composite_open_preserves_document_ports_and_blob_capabilities() {
-    let config = BlobConfig::parse(
-        "s3://test-bucket/root?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A1",
-    )
-    .unwrap();
-    let backend = open_composite(&StorageConfig::Memory, &config)
-        .await
-        .unwrap();
-    assert!(
-        backend
-            .capabilities()
-            .contains(crate::Capability::StreamingBlobs)
-    );
-    assert!(
-        backend
-            .capabilities()
-            .contains(crate::Capability::PresignedUrls)
-    );
-    let scoped = backend.for_scope(&Scope::local()).unwrap();
-    scoped
-        .documents()
-        .put(
-            "documents",
-            "one",
-            serde_json::json!({}),
-            crate::Precondition::None,
-        )
-        .await
-        .unwrap();
-    assert!(
-        scoped
-            .documents()
-            .get("documents", "one")
-            .await
-            .unwrap()
-            .is_some()
+async fn opening_an_s3_blob_url_constructs_a_local_client_without_network_io() {
+    let config =
+        BlobConfig::parse("s3://bucket/prefix?region=local&endpoint=http%3A%2F%2F127.0.0.1%3A9000")
+            .unwrap();
+    let blobs = open_blobs(&config).await.unwrap();
+    let scoped = blobs.for_scope(&Scope::new("tenant").unwrap()).unwrap();
+
+    assert!(blobs.capabilities().contains(Capability::StreamingBlobs));
+    assert!(blobs.capabilities().contains(Capability::BlobTtl));
+    assert_eq!(scoped.capabilities(), blobs.capabilities());
+}
+
+#[cfg(feature = "s3")]
+#[tokio::test]
+async fn opening_an_invalid_s3_blob_url_fails_before_client_construction() {
+    let config = BlobConfig::S3 {
+        url: "s3://bucket?unknown=value".to_owned(),
+    };
+
+    assert_eq!(
+        open_blobs(&config).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
     );
 }
