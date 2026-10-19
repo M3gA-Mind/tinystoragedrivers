@@ -15,13 +15,17 @@ Specification: [`../specs/queue-store.md`](../specs/queue-store.md).
    `QueueDeclaration`), `schemas/queues.schema.json`,
    `docs/examples/queues.json`.
 4. [x] MongoDB live job passes the queue checks.
-5. [ ] Storage bus: a `Queues` object and selectors in
-   `tinystoragedrivers-bus` (contract version bump), client and busproxy
-   server, loopback conformance.
+5. [x] Storage bus: a `Queues` object and selectors in
+   `tinystoragedrivers-bus` (contract version 5), `BusQueues` client,
+   `StorageServer` selectors with manifest-bounded serving
+   (`with_queue_manifest`), busproxy serving, and the clock-free
+   `conformance::run_queue` across the loopback and a real bus.
 6. [ ] `tinystoragedrivers-rabbitmq`: native queue backend behind the facade's
    `rabbitmq` feature and an `amqp://` queue URL, with a live CI job.
 7. [ ] `ScopedStorage::queues()` and facade wiring for a queue URL separate
    from the storage URL.
+   - [x] `ScopedStorage::queues()` / `with_queues`.
+   - [ ] Facade queue URL.
 
 ## Verification
 
