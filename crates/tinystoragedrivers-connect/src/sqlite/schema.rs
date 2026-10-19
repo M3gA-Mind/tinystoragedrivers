@@ -40,6 +40,7 @@ pub(crate) fn ident(name: &str) -> String {
 }
 
 /// Quote an SQL string literal.
+#[cfg(test)]
 pub(crate) fn literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
