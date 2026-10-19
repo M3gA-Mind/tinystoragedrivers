@@ -65,7 +65,7 @@ async fn composite_without_blob_generation_isolation_refuses_purge() {
 fn every_composite_scope_constructor_rejects_internal_scopes() {
     let backend = CompositeStorage::new(
         Arc::new(MemoryStorage::new()),
-        Arc::new(BackendBlobs::new(Arc::new(MemoryStorage::new()))),
+        Arc::new(MemoryGenerationBlobs(Arc::new(MemoryStorage::new()))),
     );
     let fence = Fence::epoch(Scope::local(), "leases", "lease", "epoch", 1);
     for name in [
@@ -77,8 +77,21 @@ fn every_composite_scope_constructor_rejects_internal_scopes() {
         "__tsd_composite_blob_generation/deadbeef/1",
     ] {
         let reserved = Scope::new(name).unwrap();
-        assert!(backend.for_scope(&reserved).is_err());
-        assert!(backend.for_scope_fenced(&reserved, &fence).is_err());
+        assert_eq!(
+            purge::ensure_public_scope(&reserved).unwrap_err().kind(),
+            crate::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            backend.for_scope(&reserved).unwrap_err().kind(),
+            crate::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            backend
+                .for_scope_fenced(&reserved, &fence)
+                .unwrap_err()
+                .kind(),
+            crate::ErrorKind::InvalidInput
+        );
         assert!(
             backend
                 .for_scope_generation(&reserved, ScopeGeneration(0))
