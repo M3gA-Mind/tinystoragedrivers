@@ -63,7 +63,9 @@ impl fmt::Display for BlobConfig {
 /// A missing feature, invalid configuration, or backend connection error.
 pub async fn open_blobs(config: &BlobConfig) -> Result<Arc<dyn BlobBackend>> {
     match config {
-        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(crate::open(config).await?))),
+        BlobConfig::Backend(config) => Ok(Arc::new(BackendBlobs::new(
+            Box::pin(crate::open(config)).await?,
+        ))),
         #[cfg(feature = "s3")]
         BlobConfig::S3 { url } => Ok(Arc::new(tinystoragedrivers_s3::S3Storage::open(
             &tinystoragedrivers_s3::S3Config::parse(url)?,
@@ -88,7 +90,7 @@ pub async fn open_composite(
     blobs: &BlobConfig,
 ) -> Result<Arc<dyn StorageBackend>> {
     Ok(Arc::new(CompositeStorage::new(
-        crate::open(records).await?,
+        Box::pin(crate::open(records)).await?,
         open_blobs(blobs).await?,
     )))
 }
