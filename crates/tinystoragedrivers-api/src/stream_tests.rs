@@ -79,11 +79,17 @@ fn required_stream_methods_remain_available_on_a_minimal_implementation() {
         run_ready(store.append_batch("s", vec![json!(1), json!(2)])).unwrap(),
         2
     );
-    assert!(run_ready(store.read_window("s", 0, 10)).unwrap().is_empty());
+    assert_eq!(
+        run_ready(store.read_window("s", 0, 10)).unwrap(),
+        Vec::<StreamEntry>::new()
+    );
     assert_eq!(run_ready(store.len("s")).unwrap(), 0);
     assert_eq!(run_ready(store.truncate_before("s", 10)).unwrap(), 0);
     assert!(!run_ready(store.delete_stream("s")).unwrap());
-    assert!(run_ready(store.streams("prefix")).unwrap().is_empty());
+    assert_eq!(
+        run_ready(store.streams("prefix")).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 fn run_ready<F: Future>(future: F) -> F::Output {

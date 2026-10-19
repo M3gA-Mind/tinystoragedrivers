@@ -21,3 +21,10 @@ fn blob_values_round_trip_with_optional_content_type() {
     };
     assert_eq!(entry.name(), "one");
 }
+
+#[test]
+fn sealed_blob_namespace_is_reserved_only_below_its_prefix() {
+    assert!(is_reserved_blob_key("_tsd/sealed/stream"));
+    assert!(!is_reserved_blob_key("_tsd/sealed"));
+    assert!(!is_reserved_blob_key("_tsd/sealedish/stream"));
+}

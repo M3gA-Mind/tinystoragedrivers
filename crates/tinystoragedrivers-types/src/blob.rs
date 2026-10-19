@@ -2,9 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-#[path = "blob_tests.rs"]
-mod tests;
+/// Prefix reserved for blobs owned by sealed stream implementations.
+pub const SEALED_BLOB_PREFIX: &str = "_tsd/sealed/";
+
+/// Returns whether a blob key is inside the sealed-stream namespace.
+#[must_use]
+pub fn is_reserved_blob_key(key: &str) -> bool {
+    key.starts_with(SEALED_BLOB_PREFIX)
+}
 
 /// Metadata for a stored blob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,3 +80,7 @@ impl TreeFile {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "blob_tests.rs"]
+mod tests;

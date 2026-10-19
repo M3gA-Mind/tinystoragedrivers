@@ -3,10 +3,6 @@
 use crate::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-#[path = "collection_tests.rs"]
-mod tests;
-
 /// Longest accepted collection name, in bytes.
 pub const MAX_COLLECTION_LEN: usize = 120;
 
@@ -245,3 +241,7 @@ pub fn validate_field_path(path: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "collection_tests.rs"]
+mod tests;

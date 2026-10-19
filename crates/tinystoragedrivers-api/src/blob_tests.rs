@@ -263,8 +263,13 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
             .kind(),
         ErrorKind::Unsupported(Capability::BlobTtl)
     );
+    assert_tree_operations_preserve_existing_blobs(&store);
+    assert_tree_rejects_invalid_paths(&store);
+}
 
-    run_ready(store.put_tree(
+fn assert_tree_operations_preserve_existing_blobs(store: &MemoryBlobs) {
+    run_ready(store.put("root/old.txt", b"old".to_vec(), None)).unwrap();
+    let written = run_ready(store.put_tree(
         "root",
         vec![
             TreeFile::new("top.txt", b"top".to_vec()),
@@ -272,6 +277,17 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
         ],
     ))
     .unwrap();
+    assert_eq!(
+        written
+            .iter()
+            .map(|meta| meta.key.as_str())
+            .collect::<Vec<_>>(),
+        ["root/top.txt", "root/nested/child.txt"]
+    );
+    assert_eq!(
+        written.iter().map(|meta| meta.len).collect::<Vec<_>>(),
+        [3, 5]
+    );
     let root_entries = run_ready(store.list_dir("")).unwrap();
     assert_eq!(
         root_entries.iter().map(TreeEntry::name).collect::<Vec<_>>(),
@@ -280,10 +296,10 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
     let entries = run_ready(store.list_dir("root")).unwrap();
     assert_eq!(
         entries.iter().map(TreeEntry::name).collect::<Vec<_>>(),
-        ["nested", "top.txt"]
+        ["nested", "old.txt", "top.txt"]
     );
     assert!(matches!(&entries[0], TreeEntry::Dir { prefix, .. } if prefix == "root/nested"));
-    assert!(matches!(&entries[1], TreeEntry::Blob { meta, .. } if meta.key == "root/top.txt"));
+    assert!(matches!(&entries[2], TreeEntry::Blob { meta, .. } if meta.key == "root/top.txt"));
     assert_eq!(
         run_ready(store.get_range("root/top.txt", 1..3)).unwrap(),
         Some(b"op".to_vec())
@@ -292,10 +308,12 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
         run_ready(store.head("root/top.txt")).unwrap().unwrap().len,
         3
     );
-    assert_eq!(run_ready(store.list("root/")).unwrap().len(), 2);
-    assert_eq!(run_ready(store.delete_tree("root")).unwrap(), 2);
+    assert_eq!(run_ready(store.list("root/")).unwrap().len(), 3);
+    assert_eq!(run_ready(store.delete_tree("root")).unwrap(), 3);
     assert!(!run_ready(store.delete("root/top.txt")).unwrap());
+}
 
+fn assert_tree_rejects_invalid_paths(store: &MemoryBlobs) {
     let duplicate = run_ready(store.put_tree(
         "root",
         vec![TreeFile::new("same", vec![]), TreeFile::new("same", vec![])],
@@ -318,6 +336,14 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
             "path should be rejected: {invalid_path:?}"
         );
     }
+    let writes_before_reserved_path = store.put_count();
+    assert_eq!(
+        run_ready(store.put_tree("", vec![TreeFile::new("_tsd/sealed/stream", vec![1])],))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(store.put_count(), writes_before_reserved_path);
     let too_long = "x".repeat(129);
     assert_eq!(
         run_ready(store.put_tree("root", vec![TreeFile::new(too_long, vec![])]))

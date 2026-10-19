@@ -348,7 +348,7 @@ impl BlobStore for UnsupportedBlobs {
     async fn list_dir(&self, _: &str) -> Result<Vec<TreeEntry>> {
         Err(unavailable!(Blobs))
     }
-    async fn put_tree(&self, _: &str, _: Vec<TreeFile>) -> Result<()> {
+    async fn put_tree(&self, _: &str, _: Vec<TreeFile>) -> Result<Vec<BlobMeta>> {
         Err(unavailable!(Blobs))
     }
     async fn delete_tree(&self, _: &str) -> Result<u64> {

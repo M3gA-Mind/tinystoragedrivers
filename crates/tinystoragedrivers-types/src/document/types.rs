@@ -7,10 +7,6 @@ use super::Meta;
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
-#[cfg(test)]
-#[path = "types_tests.rs"]
-mod tests;
-
 /// The longest document id a driver must accept, in bytes.
 pub const MAX_ID_LEN: usize = 512;
 
@@ -417,3 +413,7 @@ pub struct SearchHit {
     /// result list.
     pub score: f64,
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

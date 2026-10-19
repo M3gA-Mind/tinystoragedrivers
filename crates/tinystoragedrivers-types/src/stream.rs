@@ -2,10 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-#[path = "stream_tests.rs"]
-mod tests;
-
 /// What a successful stream seal leaves behind.
 ///
 /// Sealing twice returns equal outcomes.
@@ -92,3 +88,7 @@ impl StreamInfo {
         self.sealed_ms.is_some()
     }
 }
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;
