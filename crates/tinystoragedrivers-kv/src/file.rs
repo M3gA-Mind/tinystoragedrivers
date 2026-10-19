@@ -1,18 +1,18 @@
 //! Plain-file KV engine with durable atomic value replacement.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_api::KvStore;
+use tinystoragedrivers_connect::FileConnection;
 use tinystoragedrivers_types::{
     Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, Scope, StorageError,
     Version, Versioned,
@@ -37,24 +37,19 @@ struct Record {
     value: Value,
 }
 
-type DirectoryLocks = HashMap<PathBuf, Weak<Mutex<()>>>;
-
-fn directory_locks() -> &'static Mutex<DirectoryLocks> {
-    static LOCKS: OnceLock<Mutex<DirectoryLocks>> = OnceLock::new();
-    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// File-backed KV store bound to one scope directory.
 #[derive(Clone)]
 pub struct FileKv {
+    connection: FileConnection,
+    scope: String,
     directory: PathBuf,
-    lock: Arc<Mutex<()>>,
     clock: Clock,
 }
 
 impl std::fmt::Debug for FileKv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileKv")
+            .field("scope", &self.scope)
             .field("directory", &self.directory)
             .finish()
     }
@@ -66,7 +61,7 @@ impl FileKv {
     /// # Errors
     /// Returns an error if the root cannot be created or resolved.
     pub fn open(root: impl AsRef<Path>, scope: &Scope) -> Result<Self> {
-        Self::open_with_clock(root, scope, Arc::new(system_clock))
+        Self::new(FileConnection::open(root)?, scope.clone())
     }
 
     /// Open the store with an injected clock for deterministic expiry tests.
@@ -74,39 +69,28 @@ impl FileKv {
     /// # Errors
     /// Returns an error if the root cannot be created or resolved.
     pub fn open_with_clock(root: impl AsRef<Path>, scope: &Scope, clock: Clock) -> Result<Self> {
-        let root = root.as_ref();
-        fs::create_dir_all(root).map_err(io_error("create its directory"))?;
-        let root = root
-            .canonicalize()
-            .map_err(io_error("resolve its directory"))?;
-        let directory = root
-            .join("scopes")
-            .join(encode_components(scope.as_str()))
-            .join(DIRECTORY);
-        fs::create_dir_all(&directory).map_err(io_error("create its scope directory"))?;
-        let mut locks = directory_locks()
-            .lock()
-            .map_err(|_| StorageError::backend("file KV lock registry was poisoned"))?;
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        let lock = locks
-            .get(&directory)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| {
-                let lock = Arc::new(Mutex::new(()));
-                locks.insert(directory.clone(), Arc::downgrade(&lock));
-                lock
-            });
-        Ok(Self {
-            directory,
-            lock,
-            clock,
-        })
+        Self::new(FileConnection::open_with_clock(root, clock)?, scope.clone())
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
-        self.lock
-            .lock()
-            .map_err(|_| StorageError::backend("file KV lock was poisoned"))
+    /// Bind the store to one scope under a shared local storage connection.
+    ///
+    /// # Errors
+    /// Returns an error if its reserved scope directory cannot be created.
+    pub fn new(connection: FileConnection, scope: Scope) -> Result<Self> {
+        let scope_name = scope.as_str().to_owned();
+        let directory_scope = encode_components(&scope_name);
+        let directory = connection.run_now(move |root| {
+            let directory = root.join("scopes").join(directory_scope).join(DIRECTORY);
+            fs::create_dir_all(&directory).map_err(io_error("create its scope directory"))?;
+            Ok(directory)
+        })?;
+        let clock = connection.clock();
+        Ok(Self {
+            connection,
+            scope: scope_name,
+            directory,
+            clock,
+        })
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -151,15 +135,7 @@ impl FileKv {
         F: FnOnce(&Self) -> Result<T> + Send + 'static,
     {
         let store = self.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle
-                .spawn_blocking(move || operation(&store))
-                .await
-                .map_err(|error| {
-                    StorageError::backend("file KV operation did not complete").with_source(error)
-                })?,
-            Err(_) => operation(&store),
-        }
+        self.connection.run(move |_| operation(&store)).await
     }
 
     fn save(
@@ -170,7 +146,6 @@ impl FileKv {
         expires_ms: Option<u64>,
         now: u64,
     ) -> Result<Version> {
-        let _guard = self.lock()?;
         let old = self.read(key)?;
         check_precondition(
             expected,
@@ -213,7 +188,6 @@ impl KvStore for FileKv {
         validate_key(key)?;
         let key = key.to_owned();
         self.run(move |store| {
-            let _guard = store.lock()?;
             let now = store.now();
             Ok(store.read(&key)?.and_then(|record| {
                 Self::live(&record, now).map(|value| Versioned {
@@ -251,7 +225,6 @@ impl KvStore for FileKv {
         validate_key(key)?;
         let key = key.to_owned();
         self.run(move |store| {
-            let _guard = store.lock()?;
             let now = store.now();
             let old = store.read(&key)?;
             let current = old
@@ -287,7 +260,6 @@ impl KvStore for FileKv {
             .transpose()?;
         let prefix = prefix.to_owned();
         self.run(move |store| {
-            let _guard = store.lock()?;
             let now = store.now();
             let mut found: BTreeMap<String, Record> = store
                 .list_records()?
@@ -464,14 +436,6 @@ fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
 
 fn io_error(action: &'static str) -> impl FnOnce(std::io::Error) -> StorageError {
     move |error| StorageError::backend(format!("file KV could not {action}")).with_source(error)
-}
-
-fn system_clock() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[cfg(test)]

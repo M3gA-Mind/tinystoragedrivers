@@ -3782,6 +3782,7 @@ dependencies = [
  "mongodb",
  "object_store",
  "rusqlite",
+ "tempfile",
  "tinystoragedrivers-types",
  "tokio",
  "url",

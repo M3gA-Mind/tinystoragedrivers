@@ -92,6 +92,20 @@ async fn concurrent_handles_allow_only_one_matching_version_write() {
 }
 
 #[tokio::test]
+async fn adapter_uses_a_supplied_shared_file_connection() {
+    let root = tempdir().unwrap();
+    let connection = FileConnection::open(root.path()).unwrap();
+    let store = FileKv::new(connection.clone(), Scope::new("tenant").unwrap()).unwrap();
+    let version = store.put("key", json!("shared root")).await.unwrap();
+    assert_eq!(version, Version::FIRST);
+    assert_eq!(
+        store.get("key").await.unwrap().unwrap().doc,
+        json!("shared root")
+    );
+    assert_eq!(store.connection.root(), connection.root());
+}
+
+#[tokio::test]
 async fn ttl_is_checked_against_wall_clock() {
     let root = tempdir().unwrap();
     let now = Arc::new(AtomicU64::new(1_000));

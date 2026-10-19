@@ -87,6 +87,12 @@ async fn live_native_kv_contract() {
         store.get("p/null").await.unwrap().unwrap().doc,
         serde_json::Value::Null
     );
+    let exact_json = json!({"large": u64::MAX, "nested": {"a\0b": [".", "$"]}});
+    store.put("p/exact-json", exact_json.clone()).await.unwrap();
+    assert_eq!(
+        store.get("p/exact-json").await.unwrap().unwrap().doc,
+        exact_json
+    );
     assert_eq!(
         legacy.find_one(doc! {"_id": &legacy_id}).await.unwrap(),
         Some(doc! {"_id": &legacy_id, "value": "preserve"})
@@ -104,6 +110,19 @@ async fn live_native_kv_contract() {
         store.list("p/", page.next, 1).await.unwrap().items[0].id,
         "p/b"
     );
+
+    let race_version = store.put("p/race", json!(0)).await.unwrap();
+    let left_store = store.clone();
+    let right_store = store.clone();
+    let (left, right) = tokio::join!(
+        left_store.cas("p/race", json!(1), Precondition::Version(race_version)),
+        right_store.cas("p/race", json!(2), Precondition::Version(race_version)),
+    );
+    let loser = match (left, right) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => error,
+        outcome => panic!("expected one successful Mongo CAS, got {outcome:?}"),
+    };
+    assert_eq!(loser.kind(), ErrorKind::Conflict);
 
     store
         .put_with_ttl("p/expiring", json!(3), Duration::from_millis(10))

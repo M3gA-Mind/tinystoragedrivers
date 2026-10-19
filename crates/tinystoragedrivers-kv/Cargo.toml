@@ -16,13 +16,12 @@ default = ["memory"]
 memory = []
 sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite"]
 mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:mongodb", "dep:futures-util"]
-file = ["dep:libc", "dep:tokio"]
+file = ["dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 tinystoragedrivers-api = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tinystoragedrivers-connect = { workspace = true, optional = true }
