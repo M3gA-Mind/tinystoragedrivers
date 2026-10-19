@@ -293,8 +293,9 @@ enum Boundary {
 
 /// Query options whose values are credentials (AWS session tokens ride in
 /// `authMechanismProperties`).
-const SECRET_OPTIONS: [&str; 3] = [
+const SECRET_OPTIONS: [&str; 4] = [
     "authmechanismproperties",
+    "proxypassword",
     "tlscertificatekeyfilepassword",
     "password",
 ];
@@ -303,7 +304,10 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// any option in [`SECRET_OPTIONS`].
 fn redact(url: &str) -> String {
     let Some(parts) = split_uri(url, Boundary::Anywhere) else {
-        return url.to_owned();
+        let Some((prefix, query)) = url.split_once('?') else {
+            return url.to_owned();
+        };
+        return format!("{prefix}?{}", redact_query(query));
     };
     let mut out = format!("{}://", parts.scheme);
     if let Some(userinfo) = parts.userinfo {
@@ -321,18 +325,22 @@ fn redact(url: &str) -> String {
     }
     if let Some(query) = parts.query {
         out.push('?');
-        let options: Vec<String> = query
-            .split('&')
-            .map(|option| match option.split_once('=') {
-                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
-                    format!("{key}=***")
-                }
-                _ => option.to_owned(),
-            })
-            .collect();
-        out.push_str(&options.join("&"));
+        out.push_str(&redact_query(query));
     }
     out
+}
+
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|option| match option.split_once('=') {
+            Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
+                format!("{key}=***")
+            }
+            _ => option.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 impl fmt::Display for StorageConfig {
