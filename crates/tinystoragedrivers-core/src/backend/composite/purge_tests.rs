@@ -143,6 +143,26 @@ async fn conflict_recovery_without_a_current_receipt_is_not_completion() {
         None,
         "a missing coordinator receipt cannot confirm a concurrent completion"
     );
+    let current = composite
+        .coordinator
+        .documents()
+        .get(
+            COMPOSITE_PURGE_COLLECTION,
+            &coordinator_id(&composite.scope).unwrap(),
+        )
+        .await
+        .unwrap();
+    let history = composite
+        .coordinator
+        .documents()
+        .get(
+            COMPOSITE_PURGE_COLLECTION,
+            &coordinator_operation_id(&composite.scope, "concurrent-operation").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(current.is_none());
+    assert!(history.is_none());
 }
 
 #[tokio::test]
