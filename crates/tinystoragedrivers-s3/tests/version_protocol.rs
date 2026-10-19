@@ -113,9 +113,9 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new(state: FixtureState) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+    async fn new(state: FixtureState) -> Result<Self, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
         let state = Arc::new(state);
         let task_state = Arc::clone(&state);
         let task = tokio::spawn(async move {
@@ -126,11 +126,11 @@ impl Fixture {
                 tokio::spawn(handle_request(stream, Arc::clone(&task_state)));
             }
         });
-        Self {
+        Ok(Self {
             base: format!("http://{address}/"),
             state,
             task,
-        }
+        })
     }
 
     fn signer(&self) -> Arc<dyn Signer> {
@@ -173,8 +173,18 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
 
     let (status, body) = match method {
         "GET" => {
-            state.get_requests.lock().unwrap().push(target.to_owned());
-            let page = { state.pages.lock().unwrap().pop_front() };
+            state
+                .get_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(target.to_owned());
+            let page = {
+                state
+                    .pages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+            };
             if let Some(page) = page {
                 ("200 OK", page)
             } else if let Some(objects) = &state.objects {
@@ -210,7 +220,7 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
             state
                 .delete_requests
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(target.to_owned());
             if state.pause_first_delete.swap(false, Ordering::SeqCst) {
                 state.delete_entered.notify_one();
@@ -243,8 +253,9 @@ fn page(prefix: &str, truncated: bool, marker: Option<(&str, &str)>, versions: &
 }
 
 #[tokio::test]
-async fn version_purge_forwards_markers_and_deletes_versions_and_markers() {
-    let scope = Scope::new("protocol-pagination").unwrap();
+async fn version_purge_forwards_markers_and_deletes_versions_and_markers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-pagination")?;
     let prefix = format!("test/scopes/{}/", scope_hex(&scope));
     let mut pages = VecDeque::new();
     pages.push_back(page(
@@ -263,28 +274,37 @@ async fn version_purge_forwards_markers_and_deletes_versions_and_markers() {
         pages: Mutex::new(pages),
         ..FixtureState::default()
     })
-    .await;
+    .await?;
     let objects = Arc::new(InMemory::new());
-    let storage = S3Storage::with_store(objects, Some(fixture.signer()), "test").unwrap();
+    let storage = S3Storage::with_store(objects, Some(fixture.signer()), "test")?;
     storage
         .purge_scope_generation(&scope, ScopeGeneration(0))
-        .await
-        .unwrap();
+        .await?;
 
-    let requests = fixture.state.get_requests.lock().unwrap();
+    let requests = fixture
+        .state
+        .get_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(requests.len(), 2);
     assert!(requests[1].contains("key-marker=marker-key"));
     assert!(requests[1].contains("version-id-marker=marker-version"));
-    let deletes = fixture.state.delete_requests.lock().unwrap();
+    let deletes = fixture
+        .state
+        .delete_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(deletes.len(), 3);
     assert!(deletes[0].contains("versionId=v1"));
     assert!(deletes[1].contains("versionId=null"));
     assert!(deletes[2].contains("versionId=delete-2"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn repeated_version_marker_cycle_fails_before_an_extra_request() {
-    let scope = Scope::new("protocol-marker-cycle").unwrap();
+async fn repeated_version_marker_cycle_fails_before_an_extra_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("protocol-marker-cycle")?;
     let prefix = format!("test/scopes/{}/", scope_hex(&scope));
     let pages = VecDeque::from([
         page(&prefix, true, Some(("key-a", "v1")), ""),
@@ -295,60 +315,69 @@ async fn repeated_version_marker_cycle_fails_before_an_extra_request() {
         pages: Mutex::new(pages),
         ..FixtureState::default()
     })
-    .await;
-    let storage =
-        S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test").unwrap();
-    assert_eq!(
-        storage
-            .purge_scope_generation(&scope, ScopeGeneration(0))
-            .await
-            .unwrap_err()
-            .kind(),
-        tinystoragedrivers_core::ErrorKind::Backend
-    );
-    assert_eq!(fixture.state.get_requests.lock().unwrap().len(), 3);
+    .await?;
+    let storage = S3Storage::with_store(Arc::new(InMemory::new()), Some(fixture.signer()), "test")?;
+    let result = storage
+        .purge_scope_generation(&scope, ScopeGeneration(0))
+        .await;
+    let error = match result {
+        Ok(()) => return Err(std::io::Error::other("expected marker-cycle failure").into()),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    let requests = fixture
+        .state
+        .get_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(requests.len(), 3);
+    Ok(())
 }
 
 #[tokio::test]
-async fn signed_url_failure_does_not_expose_credentials_or_query_values() {
+async fn signed_url_failure_does_not_expose_credentials_or_query_values()
+-> Result<(), Box<dyn std::error::Error>> {
     let storage = S3Storage::with_store(
         Arc::new(InMemory::new()),
         Some(Arc::new(LeakyFailureSigner)),
         "test",
-    )
-    .unwrap();
-    let error = storage
-        .purge_scope_generation(
-            &Scope::new("signing-error-scope").unwrap(),
-            ScopeGeneration(0),
-        )
-        .await
-        .unwrap_err();
+    )?;
+    let result = storage
+        .purge_scope_generation(&Scope::new("signing-error-scope")?, ScopeGeneration(0))
+        .await;
+    let error = match result {
+        Ok(()) => return Err(std::io::Error::other("expected signer failure").into()),
+        Err(error) => error,
+    };
     assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
     assert!(!format!("{error:?}").contains("secret"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn delayed_old_generation_delete_cannot_remove_replacement_blob() {
+async fn delayed_old_generation_delete_cannot_remove_replacement_blob()
+-> Result<(), Box<dyn std::error::Error>> {
     let objects = Arc::new(InMemory::new());
     let fixture = Fixture::new(FixtureState {
         objects: Some(Arc::clone(&objects)),
         pause_first_delete: AtomicBool::new(true),
         ..FixtureState::default()
     })
-    .await;
-    let blobs = Arc::new(S3Storage::with_store(objects, Some(fixture.signer()), "test").unwrap());
+    .await?;
+    let blobs = Arc::new(S3Storage::with_store(
+        objects,
+        Some(fixture.signer()),
+        "test",
+    )?);
     let records = Arc::new(MemoryStorage::new());
     let first = CompositeStorage::new(records.clone(), blobs.clone());
     let second = CompositeStorage::new(records, blobs);
-    let scope = Scope::new("delayed-s3-generation-delete").unwrap();
+    let scope = Scope::new("delayed-s3-generation-delete")?;
     first
-        .for_scope(&scope)
-        .unwrap()
+        .for_scope(&scope)?
         .blobs()
         .put("same-key", vec![1], None)
-        .await
-        .unwrap();
+        .await?;
     let request = PurgeRequest {
         operation_id: "delayed-generation-purge".into(),
         mode: PurgeMode::Quiescent,
@@ -357,45 +386,52 @@ async fn delayed_old_generation_delete_cannot_remove_replacement_blob() {
         let first = first;
         let scope = scope.clone();
         let request = request.clone();
-        tokio::spawn(async move { first.for_scope(&scope).unwrap().purge(&request).await })
+        tokio::spawn(async move { first.for_scope(&scope)?.purge(&request).await })
     };
     fixture.state.delete_entered.notified().await;
 
-    let receipt = second
-        .for_scope(&scope)
-        .unwrap()
-        .purge(&request)
-        .await
-        .unwrap();
+    let receipt = second.for_scope(&scope)?.purge(&request).await?;
     assert_eq!(
         receipt.status,
         tinystoragedrivers_core::PurgeStatus::Complete
     );
     let replacement = second
-        .for_scope_generation(&scope, receipt.generation)
-        .unwrap()
+        .for_scope_generation(&scope, receipt.generation)?
         .blobs()
         .clone();
-    replacement.put("same-key", vec![9], None).await.unwrap();
+    replacement.put("same-key", vec![9], None).await?;
 
     fixture.state.release_delete.notify_one();
-    stale_runner.await.unwrap().unwrap();
+    stale_runner.await??;
     assert_eq!(
-        replacement.get("same-key").await.unwrap().unwrap().bytes,
+        replacement
+            .get("same-key")
+            .await?
+            .ok_or_else(|| std::io::Error::other(
+                "replacement blob disappeared after stale delete"
+            ))?
+            .bytes,
         [9]
     );
-    let deletes = fixture.state.delete_requests.lock().unwrap();
+    let deletes = fixture
+        .state
+        .delete_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(
         deletes
             .iter()
             .all(|request| !request.contains("scope-generations"))
     );
+    Ok(())
 }
 
 fn scope_hex(scope: &Scope) -> String {
-    scope
-        .as_str()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(scope.as_str().len() * 2);
+    for byte in scope.as_str().bytes() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }

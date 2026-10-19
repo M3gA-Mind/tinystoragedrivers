@@ -102,6 +102,35 @@ async fn composite_purge_works_with_predeclared_existing_schema() {
 }
 
 #[tokio::test]
+async fn unrestricted_composite_purge_prepares_its_coordinator_schema() {
+    let records = Arc::new(MemoryStorage::new());
+    let composite = CompositeStorage::new(
+        records.clone(),
+        Arc::new(MemoryGenerationBlobs(Arc::new(MemoryStorage::new()))),
+    );
+    let scoped = composite
+        .for_scope(&Scope::new("u:fresh-composite-purge").unwrap())
+        .unwrap();
+
+    let receipt = scoped
+        .purge(&PurgeRequest {
+            operation_id: "fresh-coordinator-schema".into(),
+            mode: PurgeMode::Quiescent,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.status, PurgeStatus::Complete);
+    records
+        .for_scope(&Scope::new("__tsd_composite_purge_coordinator").unwrap())
+        .unwrap()
+        .documents()
+        .validate_collection_spec(&crate::CollectionSpec::new("__tsd_composite_purges"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn existing_schema_blob_admission_does_not_require_an_undeclared_probe() {
     let records = MemoryStorage::new();
     records.prepare_schema().await.unwrap();

@@ -98,9 +98,13 @@ async fn live_minio_composite_purge_deletes_across_pages_and_keeps_sibling_scope
     );
 }
 
-fn signed_minio_request(method: &str, url: &str, body: Option<&str>) -> String {
-    let access_key = std::env::var("AWS_ACCESS_KEY_ID").unwrap();
-    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").unwrap();
+fn signed_minio_request(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let access_key = std::env::var("AWS_ACCESS_KEY_ID")?;
+    let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")?;
     let credentials = format!("{access_key}:{secret_key}");
     let mut command = Command::new("curl");
     command
@@ -119,28 +123,25 @@ fn signed_minio_request(method: &str, url: &str, body: Option<&str>) -> String {
         command.args(["-H", "Content-Type: application/xml", "--data-binary", body]);
     }
     command.arg(url);
-    let output = command
-        .output()
-        .expect("curl must be installed for live MinIO tests");
-    assert!(
-        output.status.success(),
-        "signed MinIO {method} request failed with status {}",
-        output.status
-    );
-    String::from_utf8(output.stdout).expect("MinIO XML response is UTF-8")
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "signed MinIO {method} request failed with status {}",
+            output.status
+        ))
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
-#[tokio::test]
-async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target() {
-    let Ok(url) = std::env::var("TSD_S3_URL") else {
-        return;
-    };
-    let mut config = S3Config::parse(&url).unwrap();
-    let endpoint = config
-        .endpoint
-        .as_deref()
-        .expect("versioned purge test requires an explicit local MinIO endpoint");
-    let endpoint_url = url::Url::parse(endpoint).unwrap();
+fn create_versioned_bucket(
+    url: &str,
+) -> Result<(S3Config, String, String), Box<dyn std::error::Error>> {
+    let mut config = S3Config::parse(url)?;
+    let endpoint = config.endpoint.as_deref().ok_or_else(|| {
+        std::io::Error::other("versioned purge requires an explicit local endpoint")
+    })?;
+    let endpoint_url = url::Url::parse(endpoint)?;
     assert!(
         matches!(
             endpoint_url.host_str(),
@@ -149,13 +150,12 @@ async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target
         "versioned-bucket test is restricted to the explicitly configured local MinIO endpoint"
     );
     let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     config.bucket = format!("tsd-versioned-{}-{nonce}", std::process::id());
     config.prefix = "scope-purge-test".into();
     let bucket_root = format!("{}/{}", endpoint.trim_end_matches('/'), config.bucket);
-    signed_minio_request("PUT", &bucket_root, None);
+    signed_minio_request("PUT", &bucket_root, None)?;
     let bucket_url = format!("{bucket_root}?versioning");
     signed_minio_request(
         "PUT",
@@ -163,41 +163,36 @@ async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target
         Some(
             "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>",
         ),
-    );
+    )?;
+    Ok((config, bucket_root, bucket_url))
+}
 
-    let storage = S3Storage::open(&config).unwrap();
-    let target = Scope::new("live-versioned-target").unwrap();
-    let sibling = Scope::new("live-versioned-sibling").unwrap();
-    let target_blobs = storage.for_scope(&target).unwrap();
-    let sibling_blobs = storage.for_scope(&sibling).unwrap();
-    target_blobs
-        .put("versioned-target", vec![1], None)
-        .await
-        .unwrap();
-    target_blobs
-        .put("versioned-target", vec![2], None)
-        .await
-        .unwrap();
-    assert!(target_blobs.delete("versioned-target").await.unwrap());
+#[tokio::test]
+async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Ok(url) = std::env::var("TSD_S3_URL") else {
+        return Ok(());
+    };
+    let (config, bucket_root, bucket_url) = create_versioned_bucket(&url)?;
+
+    let storage = S3Storage::open(&config)?;
+    let target = Scope::new("live-versioned-target")?;
+    let sibling = Scope::new("live-versioned-sibling")?;
+    let target_blobs = storage.for_scope(&target)?;
+    let sibling_blobs = storage.for_scope(&sibling)?;
+    target_blobs.put("versioned-target", vec![1], None).await?;
+    target_blobs.put("versioned-target", vec![2], None).await?;
+    assert!(target_blobs.delete("versioned-target").await?);
     sibling_blobs
         .put("versioned-sibling", vec![3], None)
-        .await
-        .unwrap();
+        .await?;
 
-    let target_scope = target
-        .as_str()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let sibling_scope = sibling
-        .as_str()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let target_scope = scope_hex(target.as_str());
+    let sibling_scope = scope_hex(sibling.as_str());
     let target_key = format!("{}/scopes/{target_scope}/versioned-target", config.prefix);
     let sibling_key = format!("{}/scopes/{sibling_scope}/versioned-sibling", config.prefix);
     let target_versions_url = format!("{bucket_root}?versions&prefix={target_key}");
-    let target_versions_before = signed_minio_request("GET", &target_versions_url, None);
+    let target_versions_before = signed_minio_request("GET", &target_versions_url, None)?;
     assert_eq!(
         target_versions_before
             .matches(&format!("<Key>{target_key}</Key>"))
@@ -206,17 +201,17 @@ async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target
         "the fixture must contain two target versions and their delete marker before purge"
     );
     let sibling_versions_url = format!("{bucket_root}?versions&prefix={sibling_key}");
-    let sibling_versions_before = signed_minio_request("GET", &sibling_versions_url, None);
+    let sibling_versions_before = signed_minio_request("GET", &sibling_versions_url, None)?;
     assert!(sibling_versions_before.contains(&format!("<Key>{sibling_key}</Key>")));
 
-    storage.purge_scope(&target).await.unwrap();
+    storage.purge_scope(&target).await?;
 
-    let target_versions_after = signed_minio_request("GET", &target_versions_url, None);
+    let target_versions_after = signed_minio_request("GET", &target_versions_url, None)?;
     assert!(
         !target_versions_after.contains(&format!("<Key>{target_key}</Key>")),
         "purge must physically remove every target version and delete marker"
     );
-    let sibling_versions_after = signed_minio_request("GET", &sibling_versions_url, None);
+    let sibling_versions_after = signed_minio_request("GET", &sibling_versions_url, None)?;
     assert!(
         sibling_versions_after.contains(&format!("<Key>{sibling_key}</Key>")),
         "purge must preserve every sibling version"
@@ -228,27 +223,37 @@ async fn live_minio_scope_purge_removes_all_versions_and_markers_only_for_target
         Some(
             "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Suspended</Status></VersioningConfiguration>",
         ),
-    );
+    )?;
     target_blobs
         .put("suspended-null-version", vec![4], None)
-        .await
-        .unwrap();
+        .await?;
     let null_key = format!(
         "{}/scopes/{target_scope}/suspended-null-version",
         config.prefix
     );
     let null_versions_url = format!("{bucket_root}?versions&prefix={null_key}");
-    let null_versions_before = signed_minio_request("GET", &null_versions_url, None);
+    let null_versions_before = signed_minio_request("GET", &null_versions_url, None)?;
     assert!(null_versions_before.contains("<VersionId>null</VersionId>"));
-    storage.purge_scope(&target).await.unwrap();
+    storage.purge_scope(&target).await?;
     assert!(
-        !signed_minio_request("GET", &null_versions_url, None)
+        !signed_minio_request("GET", &null_versions_url, None)?
             .contains(&format!("<Key>{null_key}</Key>")),
         "purge must remove the null version from a suspended bucket"
     );
 
-    storage.purge_scope(&sibling).await.unwrap();
-    signed_minio_request("DELETE", &bucket_root, None);
+    storage.purge_scope(&sibling).await?;
+    signed_minio_request("DELETE", &bucket_root, None)?;
+    Ok(())
+}
+
+fn scope_hex(scope: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(scope.len() * 2);
+    for byte in scope.bytes() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 #[tokio::test]

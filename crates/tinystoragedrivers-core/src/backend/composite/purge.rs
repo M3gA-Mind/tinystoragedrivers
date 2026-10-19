@@ -27,13 +27,12 @@ pub(super) const COMPOSITE_PURGE_SCOPE: &str = "__tsd_composite_purge_coordinato
 async fn validate_coordinator_schema(coordinator: &ScopedStorage) -> Result<()> {
     let spec = crate::CollectionSpec::new(COMPOSITE_PURGE_COLLECTION);
     let documents = coordinator.documents();
-    if documents
-        .capabilities()
-        .contains(Capability::ExistingSchema)
-    {
-        documents.validate_collection_spec(&spec).await
-    } else {
-        documents.ensure_collection(&spec).await
+    match documents.ensure_collection(&spec).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == crate::ErrorKind::Unsupported(Capability::ExistingSchema) => {
+            documents.validate_collection_spec(&spec).await
+        }
+        Err(error) => Err(error),
     }
 }
 

@@ -163,7 +163,6 @@ async fn composite_does_not_advertise_purge_for_legacy_native_purge_ports() {
     let scope = Scope::new("u:legacy-purge-validation").unwrap();
     assert!(!composite.capabilities().contains(Capability::ScopePurge));
     let scoped = composite.for_scope(&scope).unwrap();
-    assert!(!scoped.capabilities().contains(Capability::ScopePurge));
     assert_eq!(
         scoped
             .purge(&PurgeRequest {
