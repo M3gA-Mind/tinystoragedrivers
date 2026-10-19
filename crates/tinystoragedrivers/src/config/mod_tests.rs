@@ -130,6 +130,18 @@ fn nested_blob_parse_errors_do_not_echo_credentials() {
     assert!(error.message().contains("names no database"), "{error}");
 }
 
+#[test]
+fn nested_blob_errors_redact_credentials_even_for_unknown_schemes() {
+    let nested = percent_encode("memory?password=sentinel-secret");
+    let error = StorageConfig::parse(&format!("memory?blobs={nested}")).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        !error.to_string().contains("sentinel-secret"),
+        "{error}"
+    );
+}
+
 #[cfg(feature = "file")]
 #[tokio::test]
 async fn opens_composite_url_with_independent_record_and_blob_drivers() {
