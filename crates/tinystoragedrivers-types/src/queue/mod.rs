@@ -1,13 +1,9 @@
-//! The value types of the [`QueueStore`](super::QueueStore) port.
+//! The value types used by the queue storage port.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Result, StorageError};
-
-#[cfg(test)]
-#[path = "../queue_tests.rs"]
-mod tests;
 
 /// The longest queue name, in bytes.
 pub const MAX_QUEUE_NAME_LEN: usize = 64;
@@ -41,7 +37,7 @@ pub fn validate_queue_name(name: &str) -> Result<()> {
 }
 
 /// How a queue treats its messages, declared once with
-/// [`ensure_queue`](super::QueueStore::ensure_queue).
+/// `ensure_queue`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueSpec {
     /// Deliveries a message gets before it is dead-lettered. A delivery whose
@@ -226,7 +222,7 @@ pub struct Delivery {
     pub lease_until_ms: i64,
 }
 
-/// What [`nack`](super::QueueStore::nack) does with a message.
+/// What a queue port's `nack` operation does with a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Retry {
     /// Deliver it again after this many milliseconds, unless it has used up
@@ -266,3 +262,7 @@ pub struct QueueStats {
     /// Dead-lettered.
     pub dead: u64,
 }
+
+#[cfg(test)]
+#[path = "../queue_tests.rs"]
+mod tests;

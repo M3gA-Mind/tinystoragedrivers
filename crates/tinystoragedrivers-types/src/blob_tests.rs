@@ -53,3 +53,10 @@ fn older_paged_blob_values_decode_without_age_or_cursor() {
     assert_eq!(decoded.items[0].written_at_ms, None);
     assert_eq!(decoded.next_after, None);
 }
+
+#[test]
+fn sealed_blob_namespace_is_reserved_only_below_its_prefix() {
+    assert!(is_reserved_blob_key("_tsd/sealed/stream"));
+    assert!(!is_reserved_blob_key("_tsd/sealed"));
+    assert!(!is_reserved_blob_key("_tsd/sealedish/stream"));
+}

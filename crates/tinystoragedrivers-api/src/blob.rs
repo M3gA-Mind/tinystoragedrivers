@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
 use tinystoragedrivers_types::{
-    Blob, BlobListPage, BlobMeta, Capabilities, Capability, MAX_BLOB_LIST_PAGE_ITEMS, Result,
-    StorageError, TreeEntry, TreeFile,
+    Blob, BlobListPage, BlobMeta, Capabilities, Capability, MAX_BLOB_LIST_PAGE_ITEMS, MAX_KEY_LEN,
+    Result, StorageError, TreeEntry, TreeFile, is_reserved_blob_key,
 };
 
 /// An owned stream of blob chunks. Stream failures use the storage error vocabulary.
@@ -250,11 +250,15 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         Ok(entries.into_values().collect())
     }
 
-    /// Replace a directory tree with the supplied files.
+    /// Write `files` beneath `dir`, replacing blobs at the supplied paths and
+    /// leaving unlisted blobs unchanged. All paths are validated before the
+    /// first write, but writes are not atomic across files. Returns metadata in
+    /// the same order as `files`.
     ///
     /// # Errors
-    /// Returns the first error from a blob write.
-    async fn put_tree(&self, dir: &str, files: Vec<TreeFile>) -> Result<()> {
+    /// Returns an error for an invalid or duplicate path, or the first error
+    /// from a blob write.
+    async fn put_tree(&self, dir: &str, files: Vec<TreeFile>) -> Result<Vec<BlobMeta>> {
         if !dir.is_empty() {
             validate_tree_key(dir, self.max_key_len())?;
         }
@@ -275,11 +279,14 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
             }
             entries.push((key, file));
         }
+        let mut written = Vec::with_capacity(entries.len());
         for (key, file) in entries {
-            self.put(&key, file.bytes, file.content_type.as_deref())
-                .await?;
+            written.push(
+                self.put(&key, file.bytes, file.content_type.as_deref())
+                    .await?,
+            );
         }
-        Ok(())
+        Ok(written)
     }
 
     /// Delete all objects beneath a directory prefix.
@@ -329,7 +336,11 @@ async fn collect_exact(mut reader: BlobReader, len: u64) -> Result<Vec<u8>> {
 }
 
 fn validate_tree_key(key: &str, max_key_len: usize) -> Result<()> {
-    if key.is_empty() || key.len() > max_key_len || key.contains('\0') {
+    if key.is_empty()
+        || key.len() > max_key_len.min(MAX_KEY_LEN)
+        || key.contains('\0')
+        || is_reserved_blob_key(key)
+    {
         return Err(StorageError::invalid_input(
             "invalid tree blob key length or NUL byte",
         ));

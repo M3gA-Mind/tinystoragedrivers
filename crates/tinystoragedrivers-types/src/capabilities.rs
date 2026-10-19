@@ -2,9 +2,6 @@
 
 use crate::{Result, StorageError};
 
-#[cfg(test)]
-#[path = "capabilities_tests.rs"]
-mod tests;
 use std::fmt;
 
 /// An optional behavior exposed by one or more primitive ports.
@@ -194,3 +191,7 @@ impl fmt::Debug for Capabilities {
         f.debug_set().entries(self.iter()).finish()
     }
 }
+
+#[cfg(test)]
+#[path = "capabilities_tests.rs"]
+mod tests;

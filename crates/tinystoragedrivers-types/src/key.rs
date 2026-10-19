@@ -2,9 +2,6 @@
 
 use crate::{Result, StorageError};
 
-#[cfg(test)]
-#[path = "key_tests.rs"]
-mod tests;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum accepted key length in bytes.
@@ -73,3 +70,7 @@ impl<'de> Deserialize<'de> for Key {
         Self::new(value).map_err(serde::de::Error::custom)
     }
 }
+
+#[cfg(test)]
+#[path = "key_tests.rs"]
+mod tests;
