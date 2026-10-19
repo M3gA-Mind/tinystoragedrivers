@@ -306,6 +306,34 @@ fn a_quarantine_name_collision_preserves_both_files() {
     assert_eq!(archives, [b"corrupt bytes".to_vec(), sentinel.to_vec()]);
 }
 
+#[test]
+fn a_full_quarantine_namespace_fails_without_moving_the_corrupt_source() {
+    let dir = TempDir::new("quarantine-exhaustion");
+    let path = dir.0.join("secrets.enc");
+    fixture_write(&path, b"corrupt bytes").unwrap();
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    let archive_dir = dir.0.clone();
+    let _fill = quarantine_fill_pause::Guard::install(move |candidate| {
+        fixture_write(archive_dir.join(candidate), b"existing archive").unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    let Err(error) = store.inner.read_map_in(&lock.namespace) else {
+        panic!("quarantine must stop when all candidate archives are occupied");
+    };
+    assert_eq!(
+        error.message(),
+        "could not find an unused secrets quarantine name"
+    );
+    assert_eq!(fs::read(path).unwrap(), b"corrupt bytes");
+    assert_eq!(
+        fs::read_dir(&dir.0).unwrap().count(),
+        130,
+        "all 128 occupied archive candidates, the original and its lock remain"
+    );
+}
+
 #[tokio::test]
 async fn a_source_replaced_before_quarantine_remains_active() {
     let dir = TempDir::new("quarantine-precheck-replacement");
@@ -1085,6 +1113,38 @@ mod quarantine_pause {
     }
 }
 
+mod quarantine_fill_pause {
+    use super::Path;
+    use std::cell::RefCell;
+
+    type Callback = Box<dyn FnMut(&Path)>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnMut(&Path) + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run(candidate: &Path) {
+        CALLBACK.with(|slot| {
+            if let Some(callback) = slot.borrow_mut().as_mut() {
+                callback(candidate);
+            }
+        });
+    }
+}
+
 mod quarantine_source_pause {
     use std::cell::RefCell;
     type Callback = Box<dyn FnOnce()>;
@@ -1143,6 +1203,10 @@ mod quarantine_restore_pause {
 
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
+}
+
+pub(super) fn before_quarantine_archive_check(candidate: &Path) {
+    quarantine_fill_pause::run(candidate);
 }
 
 pub(super) fn after_quarantine_source_check() {

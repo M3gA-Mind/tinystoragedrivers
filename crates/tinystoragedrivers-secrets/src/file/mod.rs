@@ -339,6 +339,8 @@ impl Inner {
             let mut archived = name.as_os_str().to_os_string();
             archived.push(format!(".corrupt.{timestamp}.{sequence}"));
             let archived = PathBuf::from(archived);
+            #[cfg(test)]
+            tests::before_quarantine_archive_check(&archived);
             match namespace.open_file(&archived, false) {
                 Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
