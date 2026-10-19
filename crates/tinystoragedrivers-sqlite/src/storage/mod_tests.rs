@@ -579,7 +579,8 @@ async fn purge_refuses_generation_overflow_without_erasing_current_data() {
                     crate::sql::ident(&storage.tables.admissions)
                 ),
                 rusqlite::params![scope.as_str(), i64::MAX, "near_overflow"],
-            )?;
+            )
+            .unwrap();
             Ok(())
         })
         .unwrap();
