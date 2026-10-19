@@ -31,6 +31,35 @@ fn creates_layout_two_tables_idempotently() {
 }
 
 #[test]
+fn blob_age_metadata_does_not_change_the_v1_blob_table() {
+    let conn = Connection::open_in_memory().unwrap();
+    let tables = SqliteTables::new();
+    tables.ensure(&conn).unwrap();
+
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(blobs)")
+        .unwrap()
+        .query_map([], |row| row.get(1))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            "scope",
+            "key",
+            "content_type",
+            "size",
+            "sha256",
+            "expires_ms",
+            "bytes"
+        ]
+    );
+    assert_eq!(tables.blob_written(), "_tsd_blob_written");
+    assert!(table_exists(&conn, tables.blob_written()).unwrap());
+}
+
+#[test]
 fn a_foreign_table_in_the_way_is_refused() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE docs (id TEXT)").unwrap();
@@ -45,7 +74,10 @@ fn legacy_v0_tables_are_left_for_host_upgrade() {
     conn.execute_batch("CREATE TABLE _tsd_docs (scope TEXT)")
         .unwrap();
     let error = tables.ensure(&conn).unwrap_err();
-    assert!(error.to_string().contains("upgraded by the host"), "{error}");
+    assert!(
+        error.to_string().contains("upgraded by the host"),
+        "{error}"
+    );
 }
 
 #[test]

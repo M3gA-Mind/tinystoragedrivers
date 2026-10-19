@@ -14,6 +14,7 @@ sqlite = ["dep:rusqlite", "dep:tokio"]
 mongodb = ["dep:mongodb"]
 s3 = ["dep:object_store", "dep:url"]
 amqp = ["dep:lapin"]
+file = ["dep:tokio"]
 
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
@@ -26,3 +27,6 @@ lapin = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
