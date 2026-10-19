@@ -152,8 +152,9 @@ fn split_uri(url: &str) -> Option<UriParts<'_>> {
 
 /// Query options whose values are credentials (AWS session tokens ride in
 /// `authMechanismProperties`).
-const SECRET_OPTIONS: [&str; 3] = [
+const SECRET_OPTIONS: [&str; 4] = [
     "authmechanismproperties",
+    "proxypassword",
     "tlscertificatekeyfilepassword",
     "password",
 ];
