@@ -455,10 +455,22 @@ async fn completed_purge_replay_preserves_a_later_generation() {
         operation_id: "first-reset".into(),
         mode: PurgeMode::Quiescent,
     };
+    first.validate_purge_generation().await.unwrap();
+    first.validate_purge_binding().await.unwrap();
     let first_receipt = first.purge(&request).await.unwrap();
+    assert_eq!(
+        first.validate_purge_generation().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        first.validate_purge_binding().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
     let second = root
         .for_scope_generation(&scope, first_receipt.generation)
         .unwrap();
+    second.validate_purge_generation().await.unwrap();
+    second.validate_purge_binding().await.unwrap();
     second
         .blobs()
         .put("replacement", vec![9], None)

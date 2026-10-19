@@ -180,6 +180,58 @@ async fn composite_scope_purge_erases_both_ports_and_preserves_siblings() {
 }
 
 #[tokio::test]
+async fn successive_composite_purges_preserve_each_completed_history_receipt() {
+    use crate::{PurgeMode, PurgeRequest, ScopeGeneration};
+    let records = Arc::new(MemoryStorage::new());
+    let blob_storage = Arc::new(MemoryStorage::new());
+    let backend = CompositeStorage::new(records, Arc::new(MemoryGenerationBlobs(blob_storage)));
+    let scope = Scope::new("u:successive-resets").unwrap();
+    let first_request = PurgeRequest {
+        operation_id: "successive-first".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let first = backend
+        .for_scope(&scope)
+        .unwrap()
+        .purge(&first_request)
+        .await
+        .unwrap();
+
+    let second_scope = backend
+        .for_scope_generation(&scope, first.generation)
+        .unwrap();
+    second_scope
+        .blobs()
+        .put("generation-one", vec![1], None)
+        .await
+        .unwrap();
+    let second_request = PurgeRequest {
+        operation_id: "successive-second".into(),
+        mode: PurgeMode::Quiescent,
+    };
+    let second = second_scope.purge(&second_request).await.unwrap();
+    assert_eq!(second.generation, ScopeGeneration(2));
+    assert_eq!(
+        backend
+            .for_scope_generation(&scope, second.generation)
+            .unwrap()
+            .purge_status(&first_request.operation_id)
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(
+        backend
+            .for_scope_generation(&scope, second.generation)
+            .unwrap()
+            .purge(&first_request)
+            .await
+            .unwrap(),
+        first
+    );
+}
+
+#[tokio::test]
 async fn composite_purge_records_pending_external_stage_and_replay_preserves_new_generation() {
     let records = Arc::new(MemoryStorage::new());
     let blob_storage = Arc::new(MemoryStorage::new());

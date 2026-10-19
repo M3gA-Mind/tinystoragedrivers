@@ -949,6 +949,38 @@ async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
 }
 
 #[tokio::test]
+async fn sqlite_purge_validators_track_current_and_revoked_generations() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("explicit-purge-validation").unwrap();
+    let old = storage.for_scope(&scope).unwrap();
+    old.validate_purge_generation().await.unwrap();
+    old.validate_purge_binding().await.unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "validate-reset".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        old.validate_purge_generation().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        old.validate_purge_binding().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current.validate_purge_generation().await.unwrap();
+    current.validate_purge_binding().await.unwrap();
+}
+
+#[tokio::test]
 async fn retired_scope_handles_cannot_read_replacement_data() {
     use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
     let dir = tempfile::tempdir().unwrap();
