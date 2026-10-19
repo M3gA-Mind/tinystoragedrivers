@@ -3775,6 +3775,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-connect"
+version = "1.0.0"
+dependencies = [
+ "lapin",
+ "mongodb",
+ "object_store",
+ "rusqlite",
+ "tempfile",
+ "tinystoragedrivers-types",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "tinystoragedrivers-core"
 version = "1.0.0"
 dependencies = [
