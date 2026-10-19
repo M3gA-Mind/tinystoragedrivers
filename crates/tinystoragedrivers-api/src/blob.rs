@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
 use tinystoragedrivers_types::{
-    Blob, BlobMeta, Capabilities, Capability, Result, StorageError, TreeEntry, TreeFile,
+    Blob, BlobListPage, BlobMeta, Capabilities, Capability, MAX_BLOB_LIST_PAGE_ITEMS, Result,
+    StorageError, TreeEntry, TreeFile,
 };
 
 /// An owned stream of blob chunks. Stream failures use the storage error vocabulary.
@@ -149,6 +150,32 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// Returns an error for an invalid prefix or a backend failure.
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>>;
+
+    /// List physical blobs with bytewise key ordering and an exclusive cursor.
+    /// Expired physical objects are included; blobs without recorded age have
+    /// `written_at_ms: None`. The maximum page size is
+    /// [`MAX_BLOB_LIST_PAGE_ITEMS`].
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a zero or oversized page and
+    /// `Unsupported(BlobListing)` when pagination is unavailable.
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobListPage> {
+        let _ = (prefix, after);
+        if limit == 0 || limit > MAX_BLOB_LIST_PAGE_ITEMS {
+            return Err(StorageError::invalid_input(
+                "invalid blob listing page size",
+            ));
+        }
+        Err(StorageError::unsupported(
+            Capability::BlobListing,
+            "paged blob listing is unsupported",
+        ))
+    }
 
     /// Reclaim expired blobs where supported. Defaults to zero.
     ///

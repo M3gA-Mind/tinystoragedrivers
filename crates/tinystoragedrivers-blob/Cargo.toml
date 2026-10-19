@@ -1,0 +1,39 @@
+[package]
+name = "tinystoragedrivers-blob"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone scoped blob primitives for tinystoragedrivers."
+publish = false
+
+[features]
+default = ["memory"]
+memory = []
+fs = ["dep:tokio"]
+sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:sha2"]
+mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
+s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "dep:object_store", "dep:futures-util", "dep:http"]
+
+[dependencies]
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"], optional = true }
+tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", optional = true }
+sha2 = { version = "0.10", optional = true }
+object_store = { version = "0.14.2", default-features = false, features = ["aws"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
+http = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

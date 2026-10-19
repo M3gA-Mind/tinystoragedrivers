@@ -1,0 +1,424 @@
+//! Plain-file blob engine preserving the v1 data and sidecar layout.
+
+use std::{
+    fs,
+    io::Write,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tinystoragedrivers_api::BlobStore;
+use tinystoragedrivers_types::{
+    Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+};
+
+use crate::key::{MAX_KEY_LEN, clamp_range, now_ms, validate_key, validate_prefix};
+
+const META_SUFFIX: &str = ".meta.json";
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Sidecar {
+    key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written_at_ms: Option<u64>,
+}
+
+/// A scope-bound file blob engine using raw bytes and JSON sidecars.
+#[derive(Debug, Clone)]
+pub struct FileBlobStore {
+    root: PathBuf,
+    scope: Scope,
+    clock: fn() -> u64,
+}
+
+impl FileBlobStore {
+    /// Opens the blob directory rooted at `root` for one scope.
+    ///
+    /// # Errors
+    /// Returns a backend error when the directory cannot be created.
+    pub fn open(root: impl AsRef<Path>, scope: Scope) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(scope_dir(&root, &scope)).map_err(io_error)?;
+        Ok(Self {
+            root,
+            scope,
+            clock: now_ms,
+        })
+    }
+
+    /// Opens the blob directory with an injected Unix-millisecond clock.
+    ///
+    /// # Errors
+    /// Returns a backend error when the directory cannot be created.
+    pub fn open_with_clock(
+        root: impl AsRef<Path>,
+        scope: Scope,
+        clock: fn() -> u64,
+    ) -> Result<Self> {
+        let mut store = Self::open(root, scope)?;
+        store.clock = clock;
+        Ok(store)
+    }
+
+    fn base(&self) -> PathBuf {
+        scope_dir(&self.root, &self.scope).join("blobs")
+    }
+    fn paths(&self, key: &str) -> (PathBuf, PathBuf) {
+        let stem = file_stem(key);
+        let base = self.base();
+        (base.join(&stem), base.join(format!("{stem}{META_SUFFIX}")))
+    }
+
+    fn sidecar(path: &Path, key: &str) -> Result<Option<Sidecar>> {
+        let Some(sidecar) = read_sidecar(path)? else {
+            return Ok(None);
+        };
+        if sidecar.key != key {
+            return Err(StorageError::backend("file storage name hash collision"));
+        }
+        Ok(Some(sidecar))
+    }
+
+    fn read_meta(
+        data: &Path,
+        path: &Path,
+        key: &str,
+        now: u64,
+        include_expired: bool,
+    ) -> Result<Option<(BlobMeta, Sidecar)>> {
+        let Some(sidecar) = Self::sidecar(path, key)? else {
+            return Ok(None);
+        };
+        if !include_expired && sidecar.expires_at_ms.is_some_and(|expires| expires <= now) {
+            return Ok(None);
+        }
+        let metadata = match fs::symlink_metadata(data) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => return Err(StorageError::backend("blob path is not a regular file")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        };
+        let meta = BlobMeta {
+            key: key.to_owned(),
+            len: metadata.len(),
+            content_type: sidecar.content_type.clone(),
+        };
+        Ok(Some((meta, sidecar)))
+    }
+}
+
+#[async_trait]
+impl BlobStore for FileBlobStore {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+            .with(Capability::Blobs)
+            .with(Capability::BlobTtl)
+            .with(Capability::BlobListing)
+    }
+    fn max_key_len(&self) -> usize {
+        MAX_KEY_LEN
+    }
+
+    async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None)
+    }
+    async fn put_expiring(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, Some(ttl))
+    }
+    async fn get(&self, key: &str) -> Result<Option<Blob>> {
+        validate_key(key)?;
+        let (data, metadata) = self.paths(key);
+        let now = (self.clock)();
+        let Some((meta, _)) = Self::read_meta(&data, &metadata, key, now, false)? else {
+            return Ok(None);
+        };
+        let bytes = read_regular(&data)?;
+        Ok(Some(Blob { meta, bytes }))
+    }
+    async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
+        validate_key(key)?;
+        let Some(blob) = self.get(key).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            blob.bytes[clamp_range(blob.bytes.len(), range.start, range.end)].to_vec(),
+        ))
+    }
+    async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
+        validate_key(key)?;
+        let (data, metadata) = self.paths(key);
+        Ok(Self::read_meta(&data, &metadata, key, (self.clock)(), false)?.map(|(meta, _)| meta))
+    }
+    async fn delete(&self, key: &str) -> Result<bool> {
+        validate_key(key)?;
+        let (data, metadata) = self.paths(key);
+        let now = (self.clock)();
+        let existed = Self::read_meta(&data, &metadata, key, now, false)?.is_some();
+        remove_if_exists(&metadata)?;
+        remove_if_exists(&data)?;
+        Ok(existed)
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_prefix(prefix, None)?;
+        let mut items = Vec::new();
+        for (key, _, _) in self.scan()? {
+            if key.starts_with(prefix) {
+                if let Some(meta) = self.head(&key).await? {
+                    items.push(meta);
+                }
+            }
+        }
+        items.sort_by(|a, b| a.key.as_bytes().cmp(b.key.as_bytes()));
+        Ok(items)
+    }
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobListPage> {
+        if limit == 0 || limit > MAX_BLOB_LIST_PAGE_ITEMS {
+            return Err(StorageError::invalid_input(
+                "invalid blob listing page size",
+            ));
+        }
+        validate_prefix(prefix, after)?;
+        let mut entries: Vec<_> = self
+            .scan()?
+            .into_iter()
+            .filter(|(key, _, _)| {
+                key.starts_with(prefix)
+                    && after.is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
+            })
+            .map(|(key, data, metadata)| (key.clone(), data, metadata))
+            .collect();
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        let mut items = Vec::with_capacity(entries.len());
+        for (key, data, path) in entries {
+            if let Some((meta, sidecar)) = Self::read_meta(&data, &path, &key, 0, true)? {
+                items.push(BlobListEntry {
+                    meta,
+                    written_at_ms: sidecar.written_at_ms,
+                });
+            }
+        }
+        let next_after = if more {
+            items.last().map(|entry| entry.meta.key.clone())
+        } else {
+            None
+        };
+        Ok(BlobListPage { items, next_after })
+    }
+    async fn sweep_expired(&self) -> Result<u64> {
+        let now = (self.clock)();
+        let mut swept = 0;
+        for (key, data, metadata) in self.scan()? {
+            if Self::sidecar(&metadata, &key)?
+                .and_then(|s| s.expires_at_ms)
+                .is_some_and(|expires| expires <= now)
+            {
+                remove_if_exists(&data)?;
+                remove_if_exists(&metadata)?;
+                swept += 1;
+            }
+        }
+        Ok(swept)
+    }
+}
+
+impl FileBlobStore {
+    fn store(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        ttl: Option<Duration>,
+    ) -> Result<BlobMeta> {
+        validate_key(key)?;
+        let (data, metadata) = self.paths(key);
+        fs::create_dir_all(self.base()).map_err(io_error)?;
+        if Self::sidecar(&metadata, key)?.is_none() && metadata.exists() {
+            return Err(StorageError::backend("file storage name hash collision"));
+        }
+        write_atomic(&data, &bytes)?;
+        let now = (self.clock)();
+        let sidecar = Sidecar {
+            key: key.to_owned(),
+            content_type: content_type.map(str::to_owned),
+            expires_at_ms: ttl
+                .map(|ttl| now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))),
+            written_at_ms: Some(now),
+        };
+        let json = serde_json::to_vec(&sidecar).map_err(StorageError::from)?;
+        write_atomic(&metadata, &json)?;
+        Ok(BlobMeta {
+            key: key.to_owned(),
+            len: bytes.len() as u64,
+            content_type: sidecar.content_type,
+        })
+    }
+
+    fn scan(&self) -> Result<Vec<(String, PathBuf, PathBuf)>> {
+        let directory = self.base();
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut found = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(io_error)?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json")
+                || !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(META_SUFFIX))
+            {
+                continue;
+            }
+            if let Some(sidecar) = read_sidecar(&path)? {
+                found.push((
+                    sidecar.key.clone(),
+                    directory.join(file_stem(&sidecar.key)),
+                    path,
+                ));
+            }
+        }
+        Ok(found)
+    }
+}
+
+fn read_sidecar(path: &Path) -> Result<Option<Sidecar>> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && !metadata.file_type().is_file()
+    {
+        return Err(StorageError::backend(
+            "blob metadata path is not a regular file",
+        ));
+    }
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(StorageError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+fn read_regular(path: &Path) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(StorageError::backend("blob path is not a regular file"));
+    }
+    fs::read(path).map_err(io_error)
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StorageError::invalid_input("blob path has no parent"))?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| StorageError::invalid_input("invalid blob path"))?;
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".{name}.tmp-{}-{sequence}", std::process::id()));
+    let mut file = fs::File::create(&temporary).map_err(io_error)?;
+    file.write_all(bytes).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    fs::rename(&temporary, path).map_err(io_error)
+}
+
+fn io_error(error: std::io::Error) -> StorageError {
+    StorageError::backend(error.to_string()).with_source(error)
+}
+
+fn scope_dir(root: &Path, scope: &Scope) -> PathBuf {
+    root.join("scopes").join(dir_components(scope.as_str()))
+}
+
+fn encode(name: &str) -> String {
+    let mut result = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-') {
+            result.push(char::from(byte));
+        } else {
+            result.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    if is_reserved(&result) {
+        let mut chars = result.chars();
+        if let Some(first) = chars.next() {
+            return format!("%{:02X}{}", first as u32, chars.as_str());
+        }
+    }
+    result
+}
+
+fn is_reserved(encoded: &str) -> bool {
+    const RESERVED: [&str; 4] = ["con", "prn", "aux", "nul"];
+    RESERVED.contains(&encoded)
+        || (encoded.len() == 4
+            && (encoded.starts_with("com") || encoded.starts_with("lpt"))
+            && encoded.as_bytes()[3].is_ascii_digit())
+}
+
+fn dir_components(name: &str) -> PathBuf {
+    let encoded = encode(name);
+    let mut path = PathBuf::new();
+    for (index, chunk) in encoded.as_bytes().chunks(200).enumerate() {
+        let chunk = std::str::from_utf8(chunk).unwrap_or("");
+        path.push(if index == 0 {
+            chunk.to_owned()
+        } else {
+            format!("+{chunk}")
+        });
+    }
+    path
+}
+
+fn file_stem(name: &str) -> String {
+    let encoded = encode(name);
+    if encoded.len() <= 200 {
+        return encoded;
+    }
+    let hash = name.bytes().fold(
+        0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128,
+        |hash, byte| {
+            (hash ^ u128::from(byte)).wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b)
+        },
+    );
+    format!("~{hash:032x}")
+}
+
+#[cfg(test)]
+#[path = "fs_tests.rs"]
+mod tests;

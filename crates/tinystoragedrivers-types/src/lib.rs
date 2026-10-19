@@ -25,7 +25,9 @@ mod stream;
 pub mod value;
 mod watch;
 
-pub use blob::{Blob, BlobMeta, TreeEntry, TreeFile};
+pub use blob::{
+    Blob, BlobListEntry, BlobListPage, BlobMeta, MAX_BLOB_LIST_PAGE_ITEMS, TreeEntry, TreeFile,
+};
 pub use capabilities::{Capabilities, Capability};
 pub use document::{
     CollectionSpec, Cursor, CursorPosition, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN,
