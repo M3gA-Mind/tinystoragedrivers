@@ -9,10 +9,6 @@ use std::cmp::Ordering;
 
 use serde_json::{Map, Value};
 
-#[cfg(test)]
-#[path = "value_tests.rs"]
-mod tests;
-
 /// Look up a dotted `path` (`"owner.name"`) inside `value`.
 ///
 /// Each segment indexes an object by key, or an array by a decimal position.
@@ -203,3 +199,7 @@ fn collect_tokens(value: &Value, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+#[path = "value_tests.rs"]
+mod tests;

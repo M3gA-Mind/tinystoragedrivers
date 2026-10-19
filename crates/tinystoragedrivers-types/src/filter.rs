@@ -19,10 +19,6 @@ use crate::document::Meta;
 use crate::error::{Result, StorageError};
 use crate::value;
 
-#[cfg(test)]
-#[path = "filter_tests.rs"]
-mod tests;
-
 /// The path that addresses a document's id instead of a body field.
 pub const ID_FIELD: &str = "_id";
 
@@ -435,3 +431,7 @@ pub fn sort_documents_with_meta<T>(
             .unwrap_or_else(|| id_a.cmp(id_b))
     });
 }
+
+#[cfg(test)]
+#[path = "filter_tests.rs"]
+mod tests;

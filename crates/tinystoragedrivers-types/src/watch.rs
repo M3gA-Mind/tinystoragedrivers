@@ -8,10 +8,6 @@ use std::time::Duration;
 
 use crate::{Result, StorageError};
 
-#[cfg(test)]
-#[path = "watch_tests.rs"]
-mod tests;
-
 /// Maximum encoded opaque cursor size accepted at the port boundary.
 pub const MAX_WATCH_CURSOR_BYTES: usize = 65_536;
 
@@ -134,3 +130,7 @@ impl fmt::Debug for WatchNotice {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "watch_tests.rs"]
+mod tests;

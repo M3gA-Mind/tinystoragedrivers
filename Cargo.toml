@@ -21,8 +21,8 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
 [workspace.dependencies]
-tinystoragedrivers-types = { path = "crates/tinystoragedrivers-types" }
-tinystoragedrivers-api = { path = "crates/tinystoragedrivers-api" }
+tinystoragedrivers-types = { version = "1.0.0", path = "crates/tinystoragedrivers-types" }
+tinystoragedrivers-api = { version = "1.0.0", path = "crates/tinystoragedrivers-api" }
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.

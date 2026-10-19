@@ -4,10 +4,6 @@ use std::{error::Error as StdError, fmt};
 
 use crate::Capability;
 
-#[cfg(test)]
-#[path = "error_tests.rs"]
-mod tests;
-
 /// The category of a storage failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -144,3 +140,7 @@ impl From<serde_json::Error> for StorageError {
 
 /// The common result type returned by primitive ports.
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

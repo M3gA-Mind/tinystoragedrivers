@@ -3,10 +3,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[cfg(test)]
-#[path = "meta_tests.rs"]
-mod tests;
-
 /// Metadata recorded alongside a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Meta {
@@ -123,3 +119,7 @@ impl WriteOptions {
         self.schema == 0 && self.expires_ms.is_none() && self.created_ms.is_none()
     }
 }
+
+#[cfg(test)]
+#[path = "meta_tests.rs"]
+mod tests;
