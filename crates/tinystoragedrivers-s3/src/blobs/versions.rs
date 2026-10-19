@@ -225,7 +225,7 @@ pub(super) async fn purge_prefix(signer: Option<&Arc<dyn Signer>>, prefix: &str)
                     "S3 version-list returned an out-of-prefix key",
                 ));
             }
-            delete_version(&client, signer.as_ref(), object).await?;
+            delete_version(client, signer.as_ref(), object).await?;
         }
         let Some((next_key, next_version)) = next else {
             return Ok(());
