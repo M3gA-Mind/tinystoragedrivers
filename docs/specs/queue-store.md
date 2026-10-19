@@ -1,7 +1,7 @@
 # QueueStore: durable message queues
 
-**Status:** Implemented (document drivers). Broker driver and bus selectors
-pending, see [the plan](../plans/queue-store.md). **Owner:** tinystoragedrivers.
+**Status:** Implemented (document drivers, storage bus `Queues` object).
+Broker driver pending, see [the plan](../plans/queue-store.md). **Owner:** tinystoragedrivers.
 
 ## Problem
 
@@ -115,6 +115,17 @@ and backoff, group exclusivity and pinning, dedupe windows and tombstone
 pruning, lease extension, queue isolation and purge, and input validation.
 The memory, SQLite and file drivers pass them; MongoDB passes them in its live
 job.
+
+`conformance::run_queue(&dyn QueueStore)` (`conformance/queue_port.rs`) is the
+clock-free part: ordering, acknowledgement, nacks with attempts and dead
+letters, redrive, extension, stats, isolation and purge, plus delays, groups
+and dedupe without a window when the queue reports them. Leases are a minute
+and never left to lapse, so it holds for a queue whose clock the caller does
+not own: `run_ports` runs it on `ScopedStorage::queues()`, which over the bus
+client is the host's queue, and a broker runs it directly.
+
+`ScopedStorage::queues()` is every scope's queue port: a `DocumentQueue` over
+its documents by default, or whatever `ScopedStorage::with_queues` installed.
 
 ## Open questions
 

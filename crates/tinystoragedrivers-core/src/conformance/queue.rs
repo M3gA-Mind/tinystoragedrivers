@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
 
-use super::{fails, ok, unique};
+use super::{empty, fails, ok, unique};
 use crate::backend::ScopedStorage;
 use crate::error::ErrorKind;
 use crate::queue::{self, DocumentQueue, NewMessage, QueueSpec, QueueStats, QueueStore, Retry};
@@ -181,7 +181,10 @@ async fn delays_and_nack(storage: &ScopedStorage) {
         "enqueue",
     );
     assert_eq!(ok(q.stats(&name).await, "delayed").delayed, 1);
-    assert!(ok(q.receive(&name, 1, 10, "w").await, "too early").is_empty());
+    empty(
+        &ok(q.receive(&name, 1, 10, "w").await, "too early"),
+        "too early",
+    );
     time.advance(500);
     let first = ok(q.receive(&name, 1, 10, "w").await, "due").remove(0);
     assert!(ok(
@@ -197,7 +200,10 @@ async fn delays_and_nack(storage: &ScopedStorage) {
     );
     assert_eq!(ok(q.stats(&name).await, "backing off").delayed, 1);
     time.advance(299);
-    assert!(ok(q.receive(&name, 1, 10, "w").await, "backoff").is_empty());
+    empty(
+        &ok(q.receive(&name, 1, 10, "w").await, "backoff"),
+        "backoff",
+    );
     time.advance(1);
     let again = ok(q.receive(&name, 1, 10, "w").await, "retry due");
     assert_eq!(again[0].attempt, 2);
