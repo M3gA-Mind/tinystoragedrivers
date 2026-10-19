@@ -20,12 +20,14 @@ Specification: [`../specs/queue-store.md`](../specs/queue-store.md).
    `StorageServer` selectors with manifest-bounded serving
    (`with_queue_manifest`), busproxy serving, and the clock-free
    `conformance::run_queue` across the loopback and a real bus.
-6. [ ] `tinystoragedrivers-rabbitmq`: native queue backend behind the facade's
-   `rabbitmq` feature and an `amqp://` queue URL, with a live CI job.
-7. [ ] `ScopedStorage::queues()` and facade wiring for a queue URL separate
+6. [x] `tinystoragedrivers-rabbitmq` ([spec](../specs/queue-rabbitmq.md)):
+   native queue backend behind the facade's `rabbitmq` feature and an
+   `amqp://` queue URL, with live tests in a RabbitMQ CI job and the coverage
+   job.
+7. [x] `ScopedStorage::queues()` and facade wiring for a queue URL separate
    from the storage URL.
    - [x] `ScopedStorage::queues()` / `with_queues`.
-   - [ ] Facade queue URL.
+   - [x] Facade `QueueConfig` and `open_queues(config, storage, manifest)`.
 
 ## Verification
 
@@ -33,4 +35,6 @@ Specification: [`../specs/queue-store.md`](../specs/queue-store.md).
 cargo test -p tinystoragedrivers-core --all-features queue
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
+TSD_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/%2f \
+  cargo test -p tinystoragedrivers-rabbitmq --test live
 ```

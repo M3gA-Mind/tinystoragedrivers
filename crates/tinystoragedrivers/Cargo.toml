@@ -25,6 +25,8 @@ tinystoragedrivers-secrets = { workspace = true, optional = true }
 # The MongoDB driver, compiled in only with the `mongodb` feature so a desktop
 # build never links a MongoDB client.
 tinystoragedrivers-mongodb = { workspace = true, optional = true }
+# The RabbitMQ queue backend, compiled in only with the `rabbitmq` feature.
+tinystoragedrivers-rabbitmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration test runs the conformance suite through the facade.
@@ -63,6 +65,9 @@ keyring-secret-service = ["keyring", "tinystoragedrivers-secrets/keyring-secret-
 # `mongodb://…/<db>` and `mongodb+srv://…/<db>` URLs: the multi-tenant MongoDB
 # driver.
 mongodb = ["dep:tinystoragedrivers-mongodb"]
+# `amqp://` and `amqps://` queue URLs (`QueueConfig`, `open_queues`): the
+# RabbitMQ queue backend, separate from the storage URL.
+rabbitmq = ["dep:tinystoragedrivers-rabbitmq"]
 
 [lints]
 workspace = true
