@@ -136,10 +136,7 @@ fn nested_blob_errors_redact_credentials_even_for_unknown_schemes() {
     let error = StorageConfig::parse(&format!("memory?blobs={nested}")).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    assert!(
-        !error.to_string().contains("sentinel-secret"),
-        "{error}"
-    );
+    assert!(!error.to_string().contains("sentinel-secret"), "{error}");
 }
 
 #[cfg(feature = "file")]
