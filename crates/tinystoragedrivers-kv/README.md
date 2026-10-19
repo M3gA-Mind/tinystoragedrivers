@@ -12,6 +12,7 @@ adapters.
 
 Each stored value is arbitrary JSON. Writes support unconditional replacement
 and version preconditions, listing is stable and keyset paginated, and optional
-TTL entries read as absent after expiry. SQLite and MongoDB use native KV
-tables/collections; they never read or write the legacy `tsd.kv` document
-collection.
+TTL entries read as absent after expiry. File storage uses a reserved
+`_tsd_kv` directory; SQLite stores rows in the `_tsd_kv` table; MongoDB uses
+the `_tsd_kv` collection. The database engines never read or write the legacy
+`kv` document collection.

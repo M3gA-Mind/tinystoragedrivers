@@ -9,13 +9,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_api::KvStore;
 use tinystoragedrivers_types::{
-    Capabilities, Capability, Cursor, ErrorKind, Meta, Page, Precondition, Result, StorageError,
-    Version, Versioned,
+    Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, StorageError, Version,
+    Versioned,
 };
 
 use crate::common::{
-    check_precondition, cursor_key, make_cursor, next_version, validate_key, validate_limit,
-    validate_prefix,
+    check_precondition, cursor_key, duration_millis, make_cursor, next_version, validate_key,
+    validate_limit, validate_prefix,
 };
 
 use crate::Clock;
@@ -72,17 +72,17 @@ impl MemoryKv {
     }
 
     fn live(entry: &Entry, now: u64) -> Option<&Value> {
-        entry.value.as_ref().filter(|_| {
-            entry
-                .expires_ms
-                .is_none_or(|expires_ms| expires_ms > now)
-        })
+        entry
+            .value
+            .as_ref()
+            .filter(|_| entry.expires_ms.is_none_or(|expires_ms| expires_ms > now))
     }
 
     fn live_version(state: &State, key: &str, now: u64) -> Option<Version> {
-        state.entries.get(key).and_then(|entry| {
-            Self::live(entry, now).map(|_| entry.version)
-        })
+        state
+            .entries
+            .get(key)
+            .and_then(|entry| Self::live(entry, now).map(|_| entry.version))
     }
 
     fn put_locked(
@@ -112,11 +112,13 @@ impl MemoryKv {
 fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn expiry(now: u64, ttl: Duration) -> u64 {
-    now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
+    now.saturating_add(duration_millis(ttl))
 }
 
 #[async_trait]
@@ -143,8 +145,9 @@ impl KvStore for MemoryKv {
 
     async fn put(&self, key: &str, value: Value) -> Result<Version> {
         validate_key(key)?;
+        let mut state = self.lock()?;
         Self::put_locked(
-            &mut self.lock()?,
+            &mut state,
             key,
             value,
             Precondition::None,
@@ -155,14 +158,8 @@ impl KvStore for MemoryKv {
 
     async fn cas(&self, key: &str, value: Value, expected: Precondition) -> Result<Version> {
         validate_key(key)?;
-        Self::put_locked(
-            &mut self.lock()?,
-            key,
-            value,
-            expected,
-            None,
-            (self.clock)(),
-        )
+        let mut state = self.lock()?;
+        Self::put_locked(&mut state, key, value, expected, None, (self.clock)())
     }
 
     async fn delete(&self, key: &str, expected: Precondition) -> Result<bool> {
@@ -194,7 +191,10 @@ impl KvStore for MemoryKv {
     ) -> Result<Page<Versioned<Value>>> {
         validate_prefix(prefix)?;
         validate_limit(limit)?;
-        let after = cursor.as_ref().map(|cursor| cursor_key(cursor, prefix)).transpose()?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| cursor_key(cursor, prefix))
+            .transpose()?;
         let now = (self.clock)();
         let state = self.lock()?;
         let mut found: Vec<_> = state
@@ -230,8 +230,9 @@ impl KvStore for MemoryKv {
     async fn put_with_ttl(&self, key: &str, value: Value, ttl: Duration) -> Result<Version> {
         validate_key(key)?;
         let now = (self.clock)();
+        let mut state = self.lock()?;
         Self::put_locked(
-            &mut self.lock()?,
+            &mut state,
             key,
             value,
             Precondition::None,

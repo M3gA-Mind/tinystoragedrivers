@@ -1,9 +1,9 @@
 //! Plain-file KV engine with durable atomic value replacement.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -14,17 +14,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_api::KvStore;
 use tinystoragedrivers_types::{
-    Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, StorageError, Version,
-    Versioned, Scope,
+    Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, Scope, StorageError,
+    Version, Versioned,
 };
 
-use crate::common::{
-    check_precondition, cursor_key, make_cursor, next_version, validate_key, validate_limit,
-    validate_prefix,
-};
 use crate::Clock;
+use crate::common::{
+    check_precondition, cursor_key, duration_millis, make_cursor, next_version, validate_key,
+    validate_limit, validate_prefix,
+};
 
 const COMPONENT_CHUNK: usize = 160;
+const DIRECTORY: &str = "_tsd_kv";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Record {
@@ -32,8 +33,8 @@ struct Record {
     version: Version,
     #[serde(default)]
     expires_ms: Option<u64>,
-    #[serde(default)]
-    value: Option<Value>,
+    deleted: bool,
+    value: Value,
 }
 
 type DirectoryLocks = HashMap<PathBuf, Weak<Mutex<()>>>;
@@ -53,7 +54,9 @@ pub struct FileKv {
 
 impl std::fmt::Debug for FileKv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileKv").field("directory", &self.directory).finish()
+        f.debug_struct("FileKv")
+            .field("directory", &self.directory)
+            .finish()
     }
 }
 
@@ -70,11 +73,7 @@ impl FileKv {
     ///
     /// # Errors
     /// Returns an error if the root cannot be created or resolved.
-    pub fn open_with_clock(
-        root: impl AsRef<Path>,
-        scope: &Scope,
-        clock: Clock,
-    ) -> Result<Self> {
+    pub fn open_with_clock(root: impl AsRef<Path>, scope: &Scope, clock: Clock) -> Result<Self> {
         let root = root.as_ref();
         fs::create_dir_all(root).map_err(io_error("create its directory"))?;
         let root = root
@@ -83,7 +82,7 @@ impl FileKv {
         let directory = root
             .join("scopes")
             .join(encode_components(scope.as_str()))
-            .join("kv");
+            .join(DIRECTORY);
         fs::create_dir_all(&directory).map_err(io_error("create its scope directory"))?;
         let mut locks = directory_locks()
             .lock()
@@ -97,7 +96,11 @@ impl FileKv {
                 locks.insert(directory.clone(), Arc::downgrade(&lock));
                 lock
             });
-        Ok(Self { directory, lock, clock })
+        Ok(Self {
+            directory,
+            lock,
+            clock,
+        })
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
@@ -115,10 +118,16 @@ impl FileKv {
     fn read(&self, key: &str) -> Result<Option<Record>> {
         let path = self.path(key);
         match read_optional(&path)? {
-            Some(record) if record.key == key => Ok(Some(record)),
-            Some(_) => Err(StorageError::backend(
-                "file KV key path did not match its stored key",
-            )),
+            Some(bytes) => {
+                let record: Record = serde_json::from_slice(&bytes)?;
+                if record.key == key {
+                    Ok(Some(record))
+                } else {
+                    Err(StorageError::backend(
+                        "file KV key path did not match its stored key",
+                    ))
+                }
+            }
             None => Ok(None),
         }
     }
@@ -128,15 +137,29 @@ impl FileKv {
     }
 
     fn live<'a>(record: &'a Record, now: u64) -> Option<&'a Value> {
-        record.value.as_ref().filter(|_| {
-            record
-                .expires_ms
-                .is_none_or(|expires_ms| expires_ms > now)
-        })
+        (!record.deleted && record.expires_ms.is_none_or(|expires_ms| expires_ms > now))
+            .then_some(&record.value)
     }
 
     fn now(&self) -> u64 {
         (self.clock)()
+    }
+
+    async fn run<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> Result<T> + Send + 'static,
+    {
+        let store = self.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle
+                .spawn_blocking(move || operation(&store))
+                .await
+                .map_err(|error| {
+                    StorageError::backend("file KV operation did not complete").with_source(error)
+                })?,
+            Err(_) => operation(&store),
+        }
     }
 
     fn save(
@@ -151,16 +174,16 @@ impl FileKv {
         let old = self.read(key)?;
         check_precondition(
             expected,
-            old.as_ref().and_then(|record| {
-                Self::live(record, now).map(|_| record.version)
-            }),
+            old.as_ref()
+                .and_then(|record| Self::live(record, now).map(|_| record.version)),
         )?;
         let version = next_version(old.map(|record| record.version))?;
         self.write(&Record {
             key: key.to_owned(),
             version,
             expires_ms,
-            value: Some(value),
+            deleted: false,
+            value,
         })?;
         Ok(version)
     }
@@ -181,54 +204,73 @@ impl FileKv {
 #[async_trait]
 impl KvStore for FileKv {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none().with(Capability::Kv).with(Capability::Ttl)
+        Capabilities::none()
+            .with(Capability::Kv)
+            .with(Capability::Ttl)
     }
 
     async fn get(&self, key: &str) -> Result<Option<Versioned<Value>>> {
         validate_key(key)?;
-        let _guard = self.lock()?;
-        let now = self.now();
-        Ok(self.read(key)?.and_then(|record| {
-            Self::live(&record, now).map(|value| Versioned {
-                id: key.to_owned(),
-                version: record.version,
-                doc: value.clone(),
-                meta: Meta::unknown(),
-            })
-        }))
+        let key = key.to_owned();
+        self.run(move |store| {
+            let _guard = store.lock()?;
+            let now = store.now();
+            Ok(store.read(&key)?.and_then(|record| {
+                Self::live(&record, now).map(|value| Versioned {
+                    id: key,
+                    version: record.version,
+                    doc: value.clone(),
+                    meta: Meta::unknown(),
+                })
+            }))
+        })
+        .await
     }
 
     async fn put(&self, key: &str, value: Value) -> Result<Version> {
         validate_key(key)?;
-        let now = self.now();
-        self.save(key, value, Precondition::None, None, now)
+        let key = key.to_owned();
+        self.run(move |store| {
+            let now = store.now();
+            store.save(&key, value, Precondition::None, None, now)
+        })
+        .await
     }
 
     async fn cas(&self, key: &str, value: Value, expected: Precondition) -> Result<Version> {
         validate_key(key)?;
-        let now = self.now();
-        self.save(key, value, expected, None, now)
+        let key = key.to_owned();
+        self.run(move |store| {
+            let now = store.now();
+            store.save(&key, value, expected, None, now)
+        })
+        .await
     }
 
     async fn delete(&self, key: &str, expected: Precondition) -> Result<bool> {
         validate_key(key)?;
-        let _guard = self.lock()?;
-        let now = self.now();
-        let old = self.read(key)?;
-        let current = old.as_ref().and_then(|record| {
-            Self::live(record, now).map(|_| record.version)
-        });
-        check_precondition(expected, current)?;
-        let Some(current) = current else {
-            return Ok(false);
-        };
-        self.write(&Record {
-            key: key.to_owned(),
-            version: next_version(Some(current))?,
-            expires_ms: None,
-            value: None,
-        })?;
-        Ok(true)
+        let key = key.to_owned();
+        self.run(move |store| {
+            let _guard = store.lock()?;
+            let now = store.now();
+            let old = store.read(&key)?;
+            let current = old
+                .as_ref()
+                .and_then(|record| Self::live(record, now).map(|_| record.version));
+            check_precondition(expected, current)?;
+            let Some(current) = current else {
+                return Ok(false);
+            };
+            store.write(&Record {
+                key,
+                version: next_version(Some(current))?,
+                expires_ms: None,
+                deleted: true,
+                value: Value::Null,
+            })?;
+            Ok(true)
+        })
+        .await
     }
 
     async fn list(
@@ -239,54 +281,68 @@ impl KvStore for FileKv {
     ) -> Result<Page<Versioned<Value>>> {
         validate_prefix(prefix)?;
         validate_limit(limit)?;
-        let after = cursor.as_ref().map(|cursor| cursor_key(cursor, prefix)).transpose()?;
-        let _guard = self.lock()?;
-        let now = self.now();
-        let mut found: BTreeMap<String, Record> = self
-            .list_records()?
-            .into_iter()
-            .filter(|record| {
-                record.key.starts_with(prefix)
-                    && after.as_ref().is_none_or(|after| record.key > *after)
-                    && Self::live(record, now).is_some()
-            })
-            .map(|record| (record.key.clone(), record))
-            .collect();
-        let has_more = found.len() > limit;
-        let keys: Vec<_> = found.keys().take(limit).cloned().collect();
-        if has_more {
-            found.retain(|key, _| keys.binary_search(key).is_ok());
-        }
-        let items: Vec<_> = found
-            .into_values()
-            .filter_map(|record| {
-                Self::live(&record, now).map(|value| Versioned {
-                    id: record.key,
-                    version: record.version,
-                    doc: value.clone(),
-                    meta: Meta::unknown(),
+        let after = cursor
+            .as_ref()
+            .map(|cursor| cursor_key(cursor, prefix))
+            .transpose()?;
+        let prefix = prefix.to_owned();
+        self.run(move |store| {
+            let _guard = store.lock()?;
+            let now = store.now();
+            let mut found: BTreeMap<String, Record> = store
+                .list_records()?
+                .into_iter()
+                .filter(|record| {
+                    record.key.starts_with(&prefix)
+                        && after.as_ref().is_none_or(|after| record.key > *after)
+                        && Self::live(record, now).is_some()
                 })
-            })
-            .collect();
-        let next = if has_more {
-            items.last().map(|item| make_cursor(&item.id, prefix)).transpose()?
-        } else {
-            None
-        };
-        Ok(Page { items, next })
+                .map(|record| (record.key.clone(), record))
+                .collect();
+            let has_more = found.len() > limit;
+            let keys: Vec<_> = found.keys().take(limit).cloned().collect();
+            if has_more {
+                found.retain(|key, _| keys.binary_search(key).is_ok());
+            }
+            let items: Vec<_> = found
+                .into_values()
+                .filter_map(|record| {
+                    Self::live(&record, now).map(|value| Versioned {
+                        id: record.key.clone(),
+                        version: record.version,
+                        doc: value.clone(),
+                        meta: Meta::unknown(),
+                    })
+                })
+                .collect();
+            let next = if has_more {
+                items
+                    .last()
+                    .map(|item| make_cursor(&item.id, &prefix))
+                    .transpose()?
+            } else {
+                None
+            };
+            Ok(Page { items, next })
+        })
+        .await
     }
 
     async fn put_with_ttl(&self, key: &str, value: Value, ttl: Duration) -> Result<Version> {
         validate_key(key)?;
-        let now = self.now();
-        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
-        self.save(
-            key,
-            value,
-            Precondition::None,
-            Some(now.saturating_add(ttl_ms)),
-            now,
-        )
+        let key = key.to_owned();
+        let ttl_ms = duration_millis(ttl);
+        self.run(move |store| {
+            let now = store.now();
+            store.save(
+                &key,
+                value,
+                Precondition::None,
+                Some(now.saturating_add(ttl_ms)),
+                now,
+            )
+        })
+        .await
     }
 }
 
@@ -367,8 +423,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .create_new(true)
             .open(&temp)
             .map_err(io_error("create a temporary value"))?;
-        file.write_all(bytes)
-            .map_err(io_error("write a value"))?;
+        file.write_all(bytes).map_err(io_error("write a value"))?;
         file.sync_all().map_err(io_error("sync a value"))?;
         drop(file);
         fs::rename(&temp, path).map_err(io_error("replace a value"))?;
@@ -414,7 +469,9 @@ fn io_error(action: &'static str) -> impl FnOnce(std::io::Error) -> StorageError
 fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 //! Validation, cursors, and precondition checks shared by KV engines.
 
+use std::time::Duration;
+
 use tinystoragedrivers_types::{
     Cursor, CursorPosition, Key, Precondition, Result, StorageError, Version,
 };
@@ -48,16 +50,16 @@ pub(crate) fn make_cursor(key: &str, prefix: &str) -> Result<Cursor> {
 
 /// Stable 64-bit FNV-1a fingerprint for a prefix.
 fn prefix_hash(prefix: &str) -> u64 {
-    prefix.as_bytes().iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+    prefix
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
 }
 
 /// Enforce an optimistic write condition against the current live version.
-pub(crate) fn check_precondition(
-    expected: Precondition,
-    current: Option<Version>,
-) -> Result<()> {
+pub(crate) fn check_precondition(expected: Precondition, current: Option<Version>) -> Result<()> {
     let matches = match expected {
         Precondition::None => true,
         Precondition::Absent => current.is_none(),
@@ -91,11 +93,16 @@ pub(crate) fn validate_limit(limit: usize) -> Result<()> {
     }
 }
 
+/// Round positive fractional milliseconds up so a value never expires early.
+pub(crate) fn duration_millis(ttl: Duration) -> u64 {
+    let millis = ttl.as_millis();
+    let fractional = u128::from(ttl.subsec_nanos() % 1_000_000 != 0);
+    u64::try_from(millis.saturating_add(fractional)).unwrap_or(u64::MAX)
+}
+
 /// Convert a version to SQLite's signed integer representation.
-#[cfg(feature = "sqlite")]
-pub(crate) fn sqlite_version(version: Version) -> Result<i64> {
-    i64::try_from(version.0)
-        .map_err(|_| StorageError::backend("key version space is exhausted"))
+pub(crate) fn version_to_i64(version: Version) -> Result<i64> {
+    i64::try_from(version.0).map_err(|_| StorageError::backend("key version space is exhausted"))
 }
 
 /// Convert a stored SQL integer back to a validated version.

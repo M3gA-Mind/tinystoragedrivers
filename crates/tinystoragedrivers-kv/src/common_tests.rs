@@ -33,3 +33,15 @@ fn version_exhaustion_is_reported_without_reuse() {
     assert_eq!(next_version(Some(Version(8))).unwrap(), Version(9));
     assert!(next_version(Some(Version(u64::MAX))).is_err());
 }
+
+#[test]
+fn submillisecond_ttls_round_up_without_changing_whole_milliseconds() {
+    assert_eq!(duration_millis(Duration::ZERO), 0);
+    assert_eq!(duration_millis(Duration::from_nanos(1)), 1);
+    assert_eq!(duration_millis(Duration::from_millis(1)), 1);
+    assert_eq!(
+        duration_millis(Duration::from_millis(1) + Duration::from_nanos(1)),
+        2
+    );
+    assert_eq!(duration_millis(Duration::MAX), u64::MAX);
+}
