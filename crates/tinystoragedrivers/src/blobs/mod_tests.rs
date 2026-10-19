@@ -39,3 +39,38 @@ fn s3_credentials_are_rejected_without_echoing_the_url() {
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(!error.to_string().contains("secret"));
 }
+
+#[test]
+fn parses_backend_blob_urls_through_storage_config() {
+    assert!(matches!(
+        BlobConfig::parse("memory").unwrap(),
+        BlobConfig::Backend(StorageConfig::Memory)
+    ));
+}
+
+#[cfg(feature = "s3")]
+#[tokio::test]
+async fn opening_an_s3_blob_url_constructs_a_local_client_without_network_io() {
+    let config =
+        BlobConfig::parse("s3://bucket/prefix?region=local&endpoint=http%3A%2F%2F127.0.0.1%3A9000")
+            .unwrap();
+    let blobs = open_blobs(&config).await.unwrap();
+    let scoped = blobs.for_scope(&Scope::new("tenant").unwrap()).unwrap();
+
+    assert!(blobs.capabilities().contains(Capability::StreamingBlobs));
+    assert!(blobs.capabilities().contains(Capability::BlobTtl));
+    assert_eq!(scoped.capabilities(), blobs.capabilities());
+}
+
+#[cfg(feature = "s3")]
+#[tokio::test]
+async fn opening_an_invalid_s3_blob_url_fails_before_client_construction() {
+    let config = BlobConfig::S3 {
+        url: "s3://bucket?unknown=value".to_owned(),
+    };
+
+    assert_eq!(
+        open_blobs(&config).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+}
