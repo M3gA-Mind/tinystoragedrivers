@@ -23,6 +23,10 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 [workspace.dependencies]
 tinystoragedrivers-types = { version = "1.0.0", path = "crates/tinystoragedrivers-types" }
 tinystoragedrivers-api = { version = "1.0.0", path = "crates/tinystoragedrivers-api" }
+# Primitive implementations for scope-bound JSON key/value storage.
+tinystoragedrivers-kv = { path = "crates/tinystoragedrivers-kv" }
+# Refuse KV symlink reads on Unix file engines.
+libc = "0.2"
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
