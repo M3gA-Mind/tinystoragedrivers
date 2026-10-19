@@ -24,7 +24,6 @@ pub fn map(operation: &'static str, error: rusqlite::Error) -> StorageError {
 }
 
 /// Bind the operation name for `map_err`.
-#[must_use]
 pub fn during(operation: &'static str) -> impl Fn(rusqlite::Error) -> StorageError {
     move |error| map(operation, error)
 }
