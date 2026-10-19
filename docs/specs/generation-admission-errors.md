@@ -1,5 +1,7 @@
 # Scope generation refusals
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until generation admission is removed.
+
 Status: implemented and locally verified candidate; not released or consumed
 by OpenHuman. Owner: TinyStorageDrivers' native admission and error contracts.
 

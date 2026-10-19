@@ -1,5 +1,7 @@
 # Bounded native file secret transaction
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until the host-owned transaction is moved.
+
 The secrets driver provides a synchronous Get/Set/Delete API for a trusted native
 owner. It preserves raw nonce/ciphertext/tag encryption of the existing JSON
 string map. It does not expose the map, derive/export keys, implement consent,

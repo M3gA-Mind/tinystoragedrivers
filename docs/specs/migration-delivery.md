@@ -1,5 +1,7 @@
 # Confidential migration delivery
 
+> Superseded for v2.0.0 by [Storage primitives v2](primitives-v2.md); retained as v1 history until migration delivery is removed.
+
 Migration transport must preserve the legacy full-payload runner's accepted
 payload sizes and durable failure/resume behavior through a bounded-frame bus.
 No total payload ceiling, public stream mechanism, business conversion or

@@ -53,6 +53,22 @@ Every driver crate runs `tinystoragedrivers_core::conformance::run` against
 itself. A driver that disagrees with the memory driver is wrong unless the spec
 says the behavior is driver-defined.
 
+Consumer libraries depend normally and at build time only on
+`tinystoragedrivers-types` and `tinystoragedrivers-api` (and `-busproxy` for
+loadable modules). They must not depend on an engine crate or the facade.
+Primitive engine selection is a Cargo feature on that primitive crate; use
+memory-enabled primitive crates and `tinystoragedrivers-testkit` only as
+dev-dependencies. The composition root selects production engines explicitly.
+See [the v2 primitive contract](docs/specs/primitives-v2.md).
+
+Consumer libraries depend normally and at build time only on
+`tinystoragedrivers-types` and `tinystoragedrivers-api` (and `-busproxy` for
+loadable modules). They must not depend on an engine crate or the facade.
+Primitive engine selection is a Cargo feature on that primitive crate; use
+memory-enabled primitive crates and `tinystoragedrivers-testkit` only as
+dev-dependencies. The composition root selects production engines explicitly.
+See [the v2 primitive contract](docs/specs/primitives-v2.md).
+
 Add a crate by creating `crates/<name>/`. `members = ["crates/*"]` picks it up
 automatically. Inherit `version`, `edition`, `rust-version`, `license`, and
 `repository` from `[workspace.package]`, take shared dependencies from
