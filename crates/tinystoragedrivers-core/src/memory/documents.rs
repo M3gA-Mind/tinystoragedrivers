@@ -25,7 +25,6 @@ use crate::value;
 pub struct MemoryDocuments {
     db: Arc<MemoryDb>,
     scope: Scope,
-    generation: crate::ScopeGeneration,
     clock: Clock,
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
@@ -52,7 +51,6 @@ impl MemoryDocuments {
         Self {
             db,
             scope,
-            generation: crate::ScopeGeneration::default(),
             clock,
             fence,
             existing,
@@ -73,14 +71,8 @@ impl MemoryDocuments {
         (self.clock)()
     }
 
-    pub(super) fn with_generation(mut self, generation: crate::ScopeGeneration) -> Self {
-        self.generation = generation;
-        self
-    }
-
     /// Refuse a write unless this handle's fence (if any) holds.
     fn guard(&self, state: &DbState, now_ms: u64) -> Result<()> {
-        state.check_generation(self.scope.as_str(), self.generation)?;
         MemoryDb::guard(state, self.fence.as_deref(), now_ms)
     }
 
@@ -157,7 +149,6 @@ impl DocumentStore for MemoryDocuments {
         }
         spec.validate()?;
         let mut state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let merged = match state.specs.get(&spec.name) {
             Some(existing) => existing.merge(spec)?,
             None => spec.clone(),
@@ -170,7 +161,6 @@ impl DocumentStore for MemoryDocuments {
     async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
         required.validate()?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let stored = state
             .specs
             .get(&required.name)
@@ -188,7 +178,6 @@ impl DocumentStore for MemoryDocuments {
         crate::document::validate_id(id)?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state.get(self.scope.as_str(), collection, id, self.now()))
     }
 
@@ -246,7 +235,6 @@ impl DocumentStore for MemoryDocuments {
         let position = parse_cursor(collection, &self.scope, query)?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
         let start = position.as_ref().map_or(0, |cursor| {
             found.partition_point(|item| {
@@ -279,7 +267,6 @@ impl DocumentStore for MemoryDocuments {
         filter.validate()?;
         self.check_schema(collection)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(self.matching(&state, collection, filter, &[])?.len() as u64)
     }
 
@@ -441,7 +428,6 @@ impl DocumentStore for MemoryDocuments {
         self.check_schema(collection)?;
         validate_collection(collection)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let spec = state.spec(collection);
         let Some(search) = spec.search else {
             return Err(StorageError::invalid_input(
@@ -481,7 +467,6 @@ impl DocumentStore for MemoryDocuments {
         self.check_schema(collection)?;
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         // Only a fenced handle reads the clock here: dropping a collection
         // does not otherwise need it.
         if self.fence.is_some() {
@@ -501,7 +486,6 @@ impl DocumentStore for MemoryDocuments {
 
     async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let scope = self.scope.as_str();
         let names = state
             .docs

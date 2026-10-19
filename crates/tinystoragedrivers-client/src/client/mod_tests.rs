@@ -27,11 +27,7 @@ async fn a_bus_caller_is_bound_to_its_scope_and_cannot_pick_fences() {
         bus.for_scope(&other).unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
-    for host_only in [
-        Capability::Fencing,
-        Capability::ScopePurge,
-        Capability::ExistingSchema,
-    ] {
+    for host_only in [Capability::Fencing, Capability::ExistingSchema] {
         assert!(!bus.capabilities().contains(host_only));
     }
     let fence = tinystoragedrivers_core::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);

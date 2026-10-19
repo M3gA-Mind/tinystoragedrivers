@@ -55,6 +55,6 @@ signatures. They do not prove compatibility with a particular live service.
 Run .github/scripts/test-minio.sh for live local MinIO conformance, direct
 presigned transfers and a 500 MiB streaming roundtrip. The fixture verifies a
 pinned upstream release checksum, stores everything under target/, and binds
-only loopback. CI runs this same suite. Composite facade URL selection is
-available through BlobConfig and open_composite behind the facade's s3 feature.
-Host feature forwarding and desktop data import remain host integration work.
+only loopback. CI runs this same suite. S3 blob URL selection is available
+through `BlobConfig` and `open_blobs` behind the facade's `s3` feature. Host
+feature forwarding and desktop data import remain host integration work.

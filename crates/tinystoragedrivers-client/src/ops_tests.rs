@@ -353,7 +353,6 @@ fn errors_round_trip_through_their_wire_category() {
         ErrorKind::Unavailable,
         ErrorKind::Backend,
         ErrorKind::Fenced,
-        ErrorKind::ScopeGenerationRejected,
     ] {
         let native = tinystoragedrivers_core::StorageError::new(kind, "boom");
         let failure = failure_of(&native);
@@ -488,7 +487,6 @@ async fn wire_reset_categories_map_to_native_reasons_and_watches_close_off_runti
     use tinystoragedrivers_core::{WatchNotice, WatchReset};
     for (wire, native) in [
         (WireReset::CursorExpired, WatchReset::ResumeLost),
-        (WireReset::Fenced, WatchReset::GenerationChanged),
         (WireReset::Backend, WatchReset::Invalidated),
     ] {
         let (tx, rx) = tokio::sync::broadcast::channel(8);

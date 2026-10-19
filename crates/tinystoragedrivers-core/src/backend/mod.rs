@@ -7,14 +7,10 @@
 //! `MongoDB`, a separate map in memory. Owners use it to keep their data apart
 //! (`approvals`, `sessions`, `flows`) without inventing collection prefixes.
 
-mod composite;
+mod blob_backend;
 mod maintenance;
-mod purge;
-pub use composite::{BackendBlobs, BlobBackend, CompositeStorage};
+pub use blob_backend::{BackendBlobs, BlobBackend};
 pub use maintenance::{Checkpoint, MaintenanceBudget, MaintenanceReport};
-pub use purge::{
-    PurgeMode, PurgeReceipt, PurgeRequest, PurgeStage, PurgeStatus, ScopeGeneration, ScopePurge,
-};
 
 use std::fmt;
 use std::sync::Arc;
@@ -119,38 +115,6 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
             "this storage driver cannot fence writes",
         ))
     }
-
-    /// Bind an explicitly issued native data-access generation.
-    ///
-    /// # Errors
-    /// Unsupported nonzero generations on unknown drivers.
-    fn for_scope_generation(
-        &self,
-        scope: &Scope,
-        generation: ScopeGeneration,
-    ) -> Result<ScopedStorage> {
-        if generation == ScopeGeneration::default() {
-            return self.for_scope(scope);
-        }
-        purge::unsupported_generation(scope, generation)
-    }
-
-    /// Bind a generation and a fence together.
-    ///
-    /// # Errors
-    /// Unsupported generation/fencing or an invalid fence.
-    fn for_scope_fenced_generation(
-        &self,
-        scope: &Scope,
-        generation: ScopeGeneration,
-        fence: &Fence,
-    ) -> Result<ScopedStorage> {
-        if generation == ScopeGeneration::default() {
-            return self.for_scope_fenced(scope, fence);
-        }
-        purge::unsupported_generation(scope, generation)
-    }
-
     /// Reclaim the lapsed blobs of `scope` (see [`BlobStore::sweep_expired`])
     /// and return how many went.
     ///
@@ -259,7 +223,6 @@ pub struct ScopedStorage {
     streams: Arc<dyn StreamStore>,
     blobs: Arc<dyn BlobStore>,
     queues: Arc<dyn QueueStore>,
-    purge: Option<Arc<dyn ScopePurge>>,
 }
 
 impl ScopedStorage {
@@ -282,7 +245,6 @@ impl ScopedStorage {
             streams,
             blobs,
             queues,
-            purge: None,
         }
     }
 
@@ -294,48 +256,6 @@ impl ScopedStorage {
     pub fn with_queues(mut self, queues: Arc<dyn QueueStore>) -> Self {
         self.queues = queues;
         self
-    }
-
-    /// Attach the driver's native scope reset port.
-    #[must_use]
-    pub fn with_purge(mut self, purge: Arc<dyn ScopePurge>) -> Self {
-        self.purge = Some(purge);
-        self
-    }
-
-    /// Purge this addressed scope. A root reset must cover its complete owner
-    /// database manifest and persist every issued generation before reopening.
-    ///
-    /// # Errors
-    /// Unsupported on unknown adapters; otherwise the native reset's error.
-    pub async fn purge(&self, request: &PurgeRequest) -> Result<PurgeReceipt> {
-        request.validate()?;
-        match &self.purge {
-            Some(port) => port.purge(request).await,
-            None => Err(StorageError::unsupported(
-                Capability::ScopePurge,
-                "this driver cannot purge a complete scope",
-            )),
-        }
-    }
-
-    /// Read a durable reset receipt without erasing data.
-    ///
-    /// # Errors
-    /// Invalid operation identity, unsupported port or native status error.
-    pub async fn purge_status(&self, operation_id: &str) -> Result<Option<PurgeReceipt>> {
-        PurgeRequest {
-            operation_id: operation_id.into(),
-            mode: PurgeMode::Atomic,
-        }
-        .validate()?;
-        match &self.purge {
-            Some(port) => port.status(operation_id).await,
-            None => Err(StorageError::unsupported(
-                Capability::ScopePurge,
-                "this driver cannot read purge status",
-            )),
-        }
     }
 
     /// The scope every handle is bound to.

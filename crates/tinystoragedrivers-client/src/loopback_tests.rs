@@ -373,7 +373,6 @@ async fn every_reset_reason_maps_to_a_wire_category_and_back() {
         ..WatchOptions::default()
     };
     for (native, expected) in [
-        (WatchReset::GenerationChanged, WatchReset::GenerationChanged),
         (WatchReset::Overflow, WatchReset::Invalidated),
         (WatchReset::Invalidated, WatchReset::Invalidated),
     ] {

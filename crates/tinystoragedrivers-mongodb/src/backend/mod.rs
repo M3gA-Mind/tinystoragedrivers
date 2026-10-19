@@ -325,65 +325,12 @@ impl MongoStorage {
         }
     }
 
-    /// Remove the documents of `collection` in `scope` whose expiry time has
-    /// passed. Reads already treat them as absent; this reclaims the space.
-    /// Their versions are remembered, so a recreated id continues from them.
+    /// Remove expired documents and blobs through their respective stores.
     ///
     /// # Errors
     ///
-    /// An invalid collection name, or a backend error.
+    /// Invalid collection names or backend failures.
     pub async fn sweep_expired(&self, scope: &Scope, collection: &str) -> Result<u64> {
-        self.sweep_expired_generation(
-            scope,
-            tinystoragedrivers_core::ScopeGeneration::default(),
-            collection,
-        )
-        .await
-    }
-
-    /// Remove the blobs of `scope` whose lifetime has passed. Reads already
-    /// treat them as absent (and reclaim the one they touch); this reclaims the
-    /// rest, for a periodic sweeper. Returns how many files were removed.
-    ///
-    /// # Errors
-    ///
-    /// A backend error.
-    pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
-        self.sweep_expired_blobs_generation(
-            scope,
-            tinystoragedrivers_core::ScopeGeneration::default(),
-        )
-        .await
-    }
-
-    /// [`sweep_expired_blobs`](Self::sweep_expired_blobs) through an explicitly
-    /// issued scope generation, for a scope that has been reset.
-    ///
-    /// # Errors
-    ///
-    /// A retired generation, a pending reset, or a backend error.
-    pub async fn sweep_expired_blobs_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Result<u64> {
-        crate::purge::check(&self.shared, scope, generation, None).await?;
-        MongoBlobs::new(Arc::clone(&self.shared), scope.clone(), false)
-            .sweep_expired()
-            .await
-    }
-
-    /// Reclaim expired documents through an explicitly issued scope generation.
-    ///
-    /// # Errors
-    /// Invalid collection, retired generation, pending reset or backend failure.
-    pub async fn sweep_expired_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-        collection: &str,
-    ) -> Result<u64> {
-        crate::purge::check(&self.shared, scope, generation, None).await?;
         validate_collection(collection)?;
         let docs = MongoDocuments::new(Arc::clone(&self.shared), scope.clone(), None);
         if !self.shared.physical_transactions {
@@ -392,52 +339,44 @@ impl MongoStorage {
         self.shared.prepare_validation(Some(scope)).await?;
         crate::fence::in_write!(&self.shared, None, session => {
             self.shared.hold_validation(Some(scope), &mut *session).await?;
-            crate::purge::check(&self.shared, scope, generation, Some(&mut *session)).await?;
             self.shared.spec_in_session(collection, &mut *session).await?;
             docs.sweep(collection, Some(session)).await
         })
+    }
+
+    /// Remove expired blobs belonging to `scope`.
+    ///
+    /// # Errors
+    ///
+    /// A backend failure.
+    pub async fn sweep_expired_blobs(&self, scope: &Scope) -> Result<u64> {
+        MongoBlobs::new(Arc::clone(&self.shared), scope.clone(), false)
+            .sweep_expired()
+            .await
     }
 }
 
 impl MongoStorage {
     fn handles(&self, scope: &Scope, fence: Option<&Arc<Fencing>>) -> ScopedStorage {
-        self.handles_generation(
-            scope,
-            fence,
-            tinystoragedrivers_core::ScopeGeneration::default(),
-        )
-    }
-
-    fn handles_generation(
-        &self,
-        scope: &Scope,
-        fence: Option<&Arc<Fencing>>,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(
-                MongoDocuments::new(Arc::clone(&self.shared), scope.clone(), fence.cloned())
-                    .with_generation(generation),
-            ),
-            Arc::new(
-                MongoStreams::new(Arc::clone(&self.shared), scope.clone(), fence.cloned())
-                    .with_generation(generation),
-            ),
-            Arc::new(
-                MongoBlobs::new(Arc::clone(&self.shared), scope.clone(), fence.is_some())
-                    .with_generation(generation),
-            ),
+            Arc::new(MongoDocuments::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(MongoStreams::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(MongoBlobs::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.is_some(),
+            )),
         )
-        .with_purge(Arc::new(crate::purge::MongoPurge {
-            shared: Arc::clone(&self.shared),
-            scope: scope.clone(),
-            generation,
-            fenced: fence.is_some(),
-            #[cfg(test)]
-            fail_after_chunks: false,
-        }))
     }
 }
 
@@ -477,7 +416,6 @@ impl StorageBackend for MongoStorage {
                 .with(Capability::ValidatedBatch)
                 .with(Capability::ConditionalStreamAppend)
                 .with(Capability::Fencing)
-                .with(Capability::ScopePurge)
         } else {
             base
         }
@@ -510,8 +448,6 @@ impl StorageBackend for MongoStorage {
         }
         for name in [
             "_tsd_validated_batch".to_owned(),
-            crate::purge::RECEIPTS.to_owned(),
-            crate::purge::MANIFEST.to_owned(),
             STREAMS.to_owned(),
             STREAM_HEADS.to_owned(),
             format!("{BLOBS}.files"),
@@ -549,20 +485,6 @@ impl StorageBackend for MongoStorage {
         Ok(self.handles(scope, None))
     }
 
-    fn for_scope_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Result<ScopedStorage> {
-        if !self.shared.physical_transactions && generation.0 != 0 {
-            return Err(StorageError::unsupported(
-                Capability::ScopePurge,
-                "standalone cannot bind reset generations",
-            ));
-        }
-        Ok(self.handles_generation(scope, None, generation))
-    }
-
     fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
@@ -577,23 +499,6 @@ impl StorageBackend for MongoStorage {
                 fence: fence.clone(),
                 shared: Arc::clone(&self.shared),
             })),
-        ))
-    }
-
-    fn for_scope_fenced_generation(
-        &self,
-        scope: &Scope,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-        fence: &Fence,
-    ) -> Result<ScopedStorage> {
-        self.for_scope_fenced(scope, fence)?;
-        Ok(self.handles_generation(
-            scope,
-            Some(&Arc::new(Fencing {
-                fence: fence.clone(),
-                shared: Arc::clone(&self.shared),
-            })),
-            generation,
         ))
     }
 }
@@ -628,7 +533,3 @@ mod tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
-
-#[cfg(test)]
-#[path = "generation_tests.rs"]
-mod generation_tests;

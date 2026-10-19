@@ -11,7 +11,6 @@ use crate::convert::via;
 fn reset_of(reason: WatchReset) -> wire::WatchReset {
     match reason {
         WatchReset::ResumeLost => wire::WatchReset::CursorExpired,
-        WatchReset::GenerationChanged => wire::WatchReset::Fenced,
         _ => wire::WatchReset::Backend,
     }
 }

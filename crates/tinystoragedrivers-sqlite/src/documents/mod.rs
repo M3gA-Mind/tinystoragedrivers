@@ -44,8 +44,6 @@ pub(crate) fn capabilities() -> Capabilities {
         .with(Capability::FullText)
         .with(Capability::Transactions)
         .with(Capability::ValidatedBatch)
-        .with(Capability::ScopePurge)
-        .with(Capability::AtomicScopePurge)
         .with(Capability::Ttl)
         .with(Capability::Fencing)
         .with(Capability::ConditionalStreamAppend)
@@ -67,7 +65,6 @@ pub struct SqliteDocuments {
     db: Arc<Db>,
     tables: Arc<Tables>,
     scope: Scope,
-    generation: tinystoragedrivers_core::ScopeGeneration,
     clock: Clock,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
@@ -108,19 +105,10 @@ impl SqliteDocuments {
             db,
             tables,
             scope,
-            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             clock,
             fencing,
             existing,
         }
-    }
-
-    pub(crate) fn with_generation(
-        mut self,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Self {
-        self.generation = generation;
-        self
     }
 
     /// Run `f` with a context for this handle, inside an immediate
@@ -133,7 +121,6 @@ impl SqliteDocuments {
     {
         let tables = Arc::clone(&self.tables);
         let scope = self.scope.clone();
-        let generation = self.generation;
         let now_ms = (self.clock)();
         let fencing = self.fencing.clone();
         self.db
@@ -147,7 +134,6 @@ impl SqliteDocuments {
                     let tx = conn
                         .transaction()
                         .map_err(crate::error::during("start read transaction"))?;
-                    crate::purge::check(&tx, &tables, scope.as_str(), generation)?;
                     let value = f(&tx, ctx)?;
                     tx.commit()
                         .map_err(crate::error::during("finish read transaction"))?;
@@ -158,10 +144,7 @@ impl SqliteDocuments {
                 } else {
                     None
                 };
-                fence::write(conn, fencing, &tables, |tx| {
-                    crate::purge::check(tx, &tables, scope.as_str(), generation)?;
-                    f(tx, ctx)
-                })
+                fence::write(conn, fencing, &tables, |tx| f(tx, ctx))
             })
             .await
     }

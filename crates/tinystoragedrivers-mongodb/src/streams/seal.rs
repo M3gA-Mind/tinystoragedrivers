@@ -146,7 +146,7 @@ impl MongoStreams {
             // whether or not the stream exists.
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await
+                self.hold_validation(&mut *session).await
             })?;
         }
         let handle = self.segments().await?;
@@ -297,7 +297,7 @@ impl MongoStreams {
             // the stream sealed, so a stale holder is refused here.
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
+                self.hold_validation(&mut *session).await?;
                 self.hold_truncations(stream, basis.truncations, &mut *session).await?;
                 match handle.insert_one(marker.clone(), Some(session)).await {
                     Ok(()) => Ok(()),
@@ -400,7 +400,7 @@ impl MongoStreams {
         let deleted = if self.shared.physical_transactions {
             self.shared.prepare_validation(Some(&self.scope)).await?;
             in_write!(&self.shared, self.fence.as_deref(), session => {
-                self.hold_admission(&mut *session).await?;
+                self.hold_validation(&mut *session).await?;
                 self.delete_sealed_in(&handle, stream, sealed_ms, Some(session)).await
             })?
         } else {

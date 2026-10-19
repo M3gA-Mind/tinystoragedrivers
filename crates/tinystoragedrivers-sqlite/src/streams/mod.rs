@@ -30,7 +30,6 @@ pub struct SqliteStreams {
     db: Arc<Db>,
     tables: Arc<Tables>,
     scope: Scope,
-    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Checked inside every write's transaction, when set.
     fencing: Option<Arc<Fencing>>,
     /// Stamps appends and seals.
@@ -127,18 +126,9 @@ impl SqliteStreams {
             db,
             tables,
             scope,
-            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fencing,
             clock,
         }
-    }
-
-    pub(crate) fn with_generation(
-        mut self,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Self {
-        self.generation = generation;
-        self
     }
 
     /// Run `f`, inside an immediate transaction that first checks the fence
@@ -150,7 +140,6 @@ impl SqliteStreams {
     {
         let tables = Arc::clone(&self.tables);
         let scope = self.scope.clone();
-        let generation = self.generation;
         let fencing = self.fencing.clone();
         self.db
             .run(move |conn| {
@@ -158,13 +147,11 @@ impl SqliteStreams {
                     let tx = conn
                         .transaction()
                         .map_err(during("start read transaction"))?;
-                    crate::purge::check(&tx, &tables, scope.as_str(), generation)?;
                     let value = f(&tx, &tables, scope.as_str())?;
                     tx.commit().map_err(during("finish read transaction"))?;
                     return Ok(value);
                 }
                 fence::write(conn, fencing.as_deref(), &tables, |tx| {
-                    crate::purge::check(tx, &tables, scope.as_str(), generation)?;
                     f(tx, &tables, scope.as_str())
                 })
             })

@@ -22,7 +22,6 @@ use crate::scope::Scope;
 pub struct MemoryBlobs {
     db: Arc<MemoryDb>,
     scope: Scope,
-    generation: crate::ScopeGeneration,
     clock: Clock,
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
@@ -47,21 +46,14 @@ impl MemoryBlobs {
         Self {
             db,
             scope,
-            generation: crate::ScopeGeneration::default(),
             clock,
             fence,
         }
     }
 
-    pub(super) fn with_generation(mut self, generation: crate::ScopeGeneration) -> Self {
-        self.generation = generation;
-        self
-    }
-
     /// Refuse a write unless this handle's fence (if any) holds. An
     /// unfenced handle never reads the clock.
     fn guard(&self, state: &DbState) -> Result<()> {
-        state.check_generation(self.scope.as_str(), self.generation)?;
         match self.fence.as_deref() {
             None => Ok(()),
             fence => MemoryDb::guard(state, fence, (self.clock)()),
@@ -160,7 +152,6 @@ impl BlobStore for MemoryBlobs {
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_user_blob_key(key)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(self.live(&state, key).map(|(meta, bytes, _)| Blob {
             meta: meta.clone(),
             bytes: bytes.clone(),
@@ -170,7 +161,6 @@ impl BlobStore for MemoryBlobs {
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_user_blob_key(key)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let Some((_, bytes, _)) = self.live(&state, key) else {
             return Ok(None);
         };
@@ -183,7 +173,6 @@ impl BlobStore for MemoryBlobs {
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
         validate_user_blob_key(key)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(self.live(&state, key).map(|(meta, _, _)| meta.clone()))
     }
 
@@ -201,7 +190,6 @@ impl BlobStore for MemoryBlobs {
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         validate_user_blob_prefix(prefix)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let now = (self.clock)();
         Ok(state
             .blobs

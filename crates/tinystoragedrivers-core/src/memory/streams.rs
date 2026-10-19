@@ -20,7 +20,6 @@ use crate::stream::{
 pub struct MemoryStreams {
     db: Arc<MemoryDb>,
     scope: Scope,
-    generation: crate::ScopeGeneration,
     clock: Clock,
     /// Checked under the lock before every write, when set.
     fence: Option<Arc<MemoryFence>>,
@@ -45,21 +44,14 @@ impl MemoryStreams {
         Self {
             db,
             scope,
-            generation: crate::ScopeGeneration::default(),
             clock,
             fence,
         }
     }
 
-    pub(super) fn with_generation(mut self, generation: crate::ScopeGeneration) -> Self {
-        self.generation = generation;
-        self
-    }
-
     /// Refuse a write unless this handle's fence (if any) holds. An
     /// unfenced handle never reads the clock.
     fn guard(&self, state: &DbState) -> Result<()> {
-        state.check_generation(self.scope.as_str(), self.generation)?;
         match self.fence.as_deref() {
             None => Ok(()),
             fence => MemoryDb::guard(state, fence, (self.clock)()),
@@ -241,7 +233,6 @@ impl StreamStore for MemoryStreams {
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         validate_stream(stream)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         let Some(entry) = state.streams.get(&self.key(stream)) else {
             return Ok(Vec::new());
         };
@@ -264,7 +255,6 @@ impl StreamStore for MemoryStreams {
     async fn len(&self, stream: &str) -> Result<u64> {
         validate_stream(stream)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state
             .streams
             .get(&self.key(stream))
@@ -335,7 +325,6 @@ impl StreamStore for MemoryStreams {
     async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
         validate_stream(stream)?;
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state.streams.get(&self.key(stream)).map(|stored| {
             StreamInfo::new(
                 stored.base,
@@ -348,7 +337,6 @@ impl StreamStore for MemoryStreams {
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
         let state = self.db.lock()?;
-        state.check_generation(self.scope.as_str(), self.generation)?;
         Ok(state
             .streams
             .keys()

@@ -2,7 +2,7 @@
 //!
 //! Registration captures an already-admitted store and fixed collection.
 //! It never opens a backend or declares schema. Native storage owns atomic
-//! conditions, validation, leases and generations. Native messages and source
+//! conditions and validation. Native messages and source
 //! chains never cross this wire boundary.
 //!
 //! ```no_run
@@ -170,7 +170,6 @@ fn storage_failure(
         ErrorKind::Crypto => StorageKind::Crypto,
         ErrorKind::Unavailable => StorageKind::Unavailable,
         ErrorKind::Fenced => StorageKind::Fenced,
-        ErrorKind::ScopeGenerationRejected => StorageKind::ScopeGenerationRejected,
         // Future native error kinds safely retain the generic driver category.
         _ => StorageKind::Backend,
     };

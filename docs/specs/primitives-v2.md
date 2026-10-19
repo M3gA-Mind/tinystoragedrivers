@@ -293,7 +293,8 @@ and serde types; it has no engine, filesystem, database, or network code.
 receives a raw engine handle.
 
 The API's `CONTRACT_VERSION` is bumped for incompatible port-level behavior or
-type changes. The v1 bus wire version is `4`; #32 increments it to `5`. API
+type changes. The bus wire contract is currently version `6`; #32 must increment
+it to `7` for its incompatible wire changes. API
 versioning is separate from the bus contract version: an internal engine
 or Rust-only API change does not itself alter the bus wire. `is_compatible`
 accepts exactly versions the current API can safely interoperate with.
@@ -338,9 +339,6 @@ retained as historical context until the corresponding implementation leaf
 deletes them; they are not normative for v2:
 
 - `schema-v2.md`
-- `scope-purge.md`
-- `generation-admission-errors.md`
-- `write-fencing.md`
 - `migration-delivery.md`
 - `bounded-secret-transaction.md`
 - `restricted-secret-files.md`

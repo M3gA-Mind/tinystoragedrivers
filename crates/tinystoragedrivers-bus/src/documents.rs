@@ -482,8 +482,6 @@ pub enum WatchNotice {
 pub enum WatchReset {
     /// The source cannot resume from the provided cursor.
     CursorExpired,
-    /// The host fence changed.
-    Fenced,
     /// The native watch encountered an opaque failure.
     Backend,
 }

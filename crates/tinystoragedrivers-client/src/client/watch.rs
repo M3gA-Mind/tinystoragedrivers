@@ -41,7 +41,6 @@ impl BusWatch {
 fn reset_of(reason: wire::WatchReset) -> WatchReset {
     match reason {
         wire::WatchReset::CursorExpired => WatchReset::ResumeLost,
-        wire::WatchReset::Fenced => WatchReset::GenerationChanged,
         wire::WatchReset::Backend => WatchReset::Invalidated,
     }
 }

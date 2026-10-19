@@ -43,10 +43,6 @@ pub enum Capability {
     ConditionalStreamAppend,
     /// Document batches validate read-only dependencies atomically with writes.
     ValidatedBatch,
-    /// Scoped reset with persistent generation admission.
-    ScopePurge,
-    /// Every storage port is purged atomically.
-    AtomicScopePurge,
     /// Native scoped document invalidation subscriptions.
     Watch,
     /// `BlobStore::put_expiring`: a blob
@@ -85,7 +81,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 19] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -97,8 +93,6 @@ impl Capability {
         Self::CollectionEnumeration,
         Self::ConditionalStreamAppend,
         Self::ValidatedBatch,
-        Self::ScopePurge,
-        Self::AtomicScopePurge,
         Self::Watch,
         Self::BlobTtl,
         Self::RecordMetadata,
@@ -122,8 +116,6 @@ impl Capability {
             Self::CollectionEnumeration => 1 << 6,
             Self::ConditionalStreamAppend => 1 << 7,
             Self::ValidatedBatch => 1 << 9,
-            Self::ScopePurge => 1 << 10,
-            Self::AtomicScopePurge => 1 << 11,
             Self::Watch => 1 << 12,
             Self::BlobTtl => 1 << 15,
             Self::RecordMetadata => 1 << 16,
@@ -150,8 +142,6 @@ impl fmt::Display for Capability {
             Self::CollectionEnumeration => "collection_enumeration",
             Self::ConditionalStreamAppend => "conditional_stream_append",
             Self::ValidatedBatch => "validated_batch",
-            Self::ScopePurge => "scope_purge",
-            Self::AtomicScopePurge => "atomic_scope_purge",
             Self::Watch => "watch",
             Self::BlobTtl => "blob_ttl",
             Self::RecordMetadata => "record_metadata",
@@ -205,8 +195,6 @@ impl Capabilities {
                 | Capability::CollectionEnumeration.bit()
                 | Capability::ConditionalStreamAppend.bit()
                 | Capability::ValidatedBatch.bit()
-                | Capability::ScopePurge.bit()
-                | Capability::AtomicScopePurge.bit()
                 | Capability::Watch.bit()
                 | Capability::BlobTtl.bit()
                 | Capability::RecordMetadata.bit()

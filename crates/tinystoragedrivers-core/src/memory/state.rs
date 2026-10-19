@@ -71,10 +71,6 @@ impl StoredStream {
 #[derive(Debug, Clone, Default)]
 pub(super) struct DbState {
     pub(super) specs: BTreeMap<String, CollectionSpec>,
-    /// Reset authority survives tenant erasure.
-    pub(super) admissions: BTreeMap<String, (crate::ScopeGeneration, String)>,
-    /// Completed operation receipts survive later resets of the same scope.
-    pub(super) purge_receipts: BTreeMap<ScopedKey, crate::ScopeGeneration>,
     pub(super) docs: BTreeMap<ScopedKey, BTreeMap<String, StoredDoc>>,
     pub(super) streams: BTreeMap<ScopedKey, StoredStream>,
     /// Meta, bytes, and the epoch-millisecond instant a blob expires at.
@@ -109,25 +105,6 @@ impl DbState {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
-    }
-
-    pub(super) fn check_generation(
-        &self,
-        scope: &str,
-        expected: crate::ScopeGeneration,
-    ) -> Result<()> {
-        let current = self
-            .admissions
-            .get(scope)
-            .map_or(crate::ScopeGeneration::default(), |(generation, _)| {
-                *generation
-            });
-        if current != expected {
-            return Err(StorageError::scope_generation_rejected(
-                "scope writer generation has been revoked",
-            ));
-        }
-        Ok(())
     }
 
     pub(super) fn spec(&self, collection: &str) -> CollectionSpec {

@@ -76,7 +76,6 @@ pub(crate) fn commit_failure(error: &mongodb::error::Error) -> CommitFailure {
 pub(crate) struct MongoDocuments {
     shared: Arc<Shared>,
     scope: Scope,
-    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Every write runs in a transaction that holds this fence, when set.
     fence: Option<Arc<Fencing>>,
 }
@@ -95,16 +94,8 @@ impl MongoDocuments {
         Self {
             shared,
             scope,
-            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fence,
         }
-    }
-    pub(crate) fn with_generation(
-        mut self,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Self {
-        self.generation = generation;
-        self
     }
 
     /// Validate `collection` and do what cannot run inside a transaction
@@ -124,7 +115,7 @@ impl MongoDocuments {
         self.shared
             .hold_validation(Some(&self.scope), &mut *session)
             .await?;
-        crate::purge::check(&self.shared, &self.scope, self.generation, Some(session)).await
+        Ok(())
     }
 
     /// One claim attempt: pick the first match and compare-and-swap it.
@@ -277,16 +268,13 @@ impl DocumentStore for MongoDocuments {
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         if self.shared.existing {
-            return self.shared.ensure(spec, &self.scope, self.generation).await;
+            return self.shared.ensure(spec).await;
         }
-        crate::purge::admitted!(
-            self,
-            self.shared.ensure(spec, &self.scope, self.generation).await
-        )
+        self.shared.ensure(spec).await
     }
 
     async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
-        crate::purge::admitted!(self, {
+        {
             required.validate()?;
             let stored = self.shared.persisted_spec(&required.name).await?;
             if stored.merge(required)? != stored {
@@ -306,11 +294,11 @@ impl DocumentStore for MongoDocuments {
                 models.push(model);
             }
             self.shared.validate_indexes(&stored.name, &models).await
-        })
+        }
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
-        crate::purge::admitted!(self, {
+        {
             validate_collection(collection)?;
             validate_id(id)?;
             let spec = self.shared.spec(collection).await?;
@@ -320,7 +308,7 @@ impl DocumentStore for MongoDocuments {
                 .await?
                 .filter(|found| stored::is_live(&spec, found, now))
                 .map(stored::Stored::into_versioned))
-        })
+        }
     }
 
     async fn put(
@@ -342,7 +330,7 @@ impl DocumentStore for MongoDocuments {
         precondition: Precondition,
         options: WriteOptions,
     ) -> Result<Version> {
-        crate::purge::admitted!(self, {
+        {
             if !self.shared.physical_transactions {
                 return self
                     .put_one(collection, id, &doc, precondition, options, None)
@@ -357,11 +345,11 @@ impl DocumentStore for MongoDocuments {
                     .await
                     .map(|(version, _)| version)
             })
-        })
+        }
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
-        crate::purge::admitted!(self, {
+        {
             if !self.shared.physical_transactions {
                 return self.delete_one(collection, id, precondition, None).await;
             }
@@ -371,11 +359,11 @@ impl DocumentStore for MongoDocuments {
                 self.shared.spec_in_session(collection, &mut *session).await?;
                 self.delete_one(collection, id, precondition, Some(session)).await
             })
-        })
+        }
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
-        crate::purge::admitted!(self, {
+        {
             query.validate()?;
             validate_collection(collection)?;
             let position = decode_cursor(collection, &self.scope, query)?;
@@ -402,19 +390,19 @@ impl DocumentStore for MongoDocuments {
                 None
             };
             Ok(Page { items, next })
-        })
+        }
     }
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_collection(collection)?;
             filter.validate()?;
             self.count_matching(collection, filter).await
-        })
+        }
     }
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             validate_collection(collection)?;
             filter.validate()?;
             if !self.shared.physical_transactions {
@@ -430,7 +418,7 @@ impl DocumentStore for MongoDocuments {
                     Err(error) => Err(error),
                 }
             })
-        })
+        }
     }
 
     async fn claim(
@@ -440,7 +428,7 @@ impl DocumentStore for MongoDocuments {
         sort: &[Sort],
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
-        crate::purge::admitted!(self, {
+        {
             validate_doc(patch)?;
             validate_collection(collection)?;
             filter.validate()?;
@@ -472,11 +460,11 @@ impl DocumentStore for MongoDocuments {
             Err(StorageError::unavailable(
                 "every claim attempt lost to a concurrent claimer; retry",
             ))
-        })
+        }
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        crate::purge::admitted!(self, {
+        {
             if !self.shared.transactions {
                 return Err(StorageError::unsupported(
                     Capability::Transactions,
@@ -484,7 +472,7 @@ impl DocumentStore for MongoDocuments {
                 ));
             }
             self.atomic_batch_checked(Vec::new(), ops).await
-        })
+        }
     }
 
     async fn atomic_batch_checked(
@@ -492,7 +480,7 @@ impl DocumentStore for MongoDocuments {
         checks: Vec<ReadCheck>,
         ops: Vec<WriteOp>,
     ) -> Result<Vec<WriteResult>> {
-        crate::purge::admitted!(self, {
+        {
             if !self.shared.transactions {
                 return Err(StorageError::unsupported(
                     Capability::ValidatedBatch,
@@ -519,18 +507,18 @@ impl DocumentStore for MongoDocuments {
                 }
                 self.run_batch(&ops, session).await
             })
-        })
+        }
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        crate::purge::admitted!(self, {
+        {
             validate_collection(collection)?;
             self.search_hits(collection, text, limit).await
-        })
+        }
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
-        crate::purge::admitted!(self, {
+        {
             validate_collection(collection)?;
             if self.shared.existing {
                 self.shared.spec(collection).await?;
@@ -550,11 +538,11 @@ impl DocumentStore for MongoDocuments {
                 }
             })?;
             Ok(())
-        })
+        }
     }
 
     async fn collections(&self, prefix: &str) -> Result<Vec<String>> {
-        crate::purge::admitted!(self, {
+        {
             let names = self
                 .shared
                 .db
@@ -582,7 +570,7 @@ impl DocumentStore for MongoDocuments {
             }
             found.sort();
             Ok(found)
-        })
+        }
     }
 }
 

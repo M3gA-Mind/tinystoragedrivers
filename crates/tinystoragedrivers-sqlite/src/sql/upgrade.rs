@@ -162,12 +162,7 @@ fn convert(conn: &Connection, tables: &Tables, now_ms: i64) -> Result<()> {
         [LAYOUT],
     )
     .map_err(during("record layout"))?;
-    conn.execute_batch(&format!(
-        "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
-        ident(&tables.purge_receipts),
-        ident(&tables.admissions),
-    ))
-    .map_err(during("migrate purge receipts"))
+    Ok(())
 }
 
 fn load_specs(conn: &Connection, old: &V0) -> Result<Vec<CollectionSpec>> {

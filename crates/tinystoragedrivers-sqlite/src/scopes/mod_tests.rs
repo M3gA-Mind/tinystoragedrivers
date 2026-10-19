@@ -35,27 +35,6 @@ async fn lists_each_table_kind_once_in_byte_order() {
 }
 
 #[tokio::test]
-async fn a_scope_in_the_purge_ledger_alone_is_not_listed() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = SqliteStorage::open(dir.path()).unwrap();
-    let scope = Scope::new("u:erased").unwrap();
-    let handles = storage.for_scope(&scope).unwrap();
-    handles
-        .documents()
-        .put("c", "d", json!({}), Precondition::None)
-        .await
-        .unwrap();
-    handles
-        .purge(&tinystoragedrivers_core::PurgeRequest {
-            operation_id: "erase-1".into(),
-            mode: tinystoragedrivers_core::PurgeMode::Atomic,
-        })
-        .await
-        .unwrap();
-    assert_eq!(storage.scopes("").await.unwrap().len(), 0);
-}
-
-#[tokio::test]
 async fn a_stored_scope_that_is_not_a_valid_scope_is_a_backend_error() {
     let dir = tempfile::tempdir().unwrap();
     let storage = SqliteStorage::open(dir.path()).unwrap();

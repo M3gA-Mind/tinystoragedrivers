@@ -97,8 +97,6 @@ pub enum WatchReset {
     Invalidated,
     /// A bounded buffer overflowed; missed hints cannot be reconstructed.
     Overflow,
-    /// The captured scope generation is no longer admitted.
-    GenerationChanged,
 }
 
 /// A coalesced hint with no document body or decision payload.

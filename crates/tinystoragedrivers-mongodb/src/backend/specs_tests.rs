@@ -33,15 +33,7 @@ async fn live_a_newer_search_declaration_retries_the_index_build_before_publicat
     let second = CollectionSpec::new(name).searchable(["second"]);
     // The first caller built its indexes before the second caller published.
     backend.shared.build_indexes(&first, None).await.unwrap();
-    backend
-        .shared
-        .ensure(
-            &second,
-            &Scope::local(),
-            tinystoragedrivers_core::ScopeGeneration::default(),
-        )
-        .await
-        .unwrap();
+    backend.shared.ensure(&second).await.unwrap();
     let encoded = serde_json::to_string(&first).unwrap();
     backend.shared.prepare_validation(None).await.unwrap();
     let published = crate::fence::in_write!(&backend.shared, None, session => {
@@ -51,15 +43,7 @@ async fn live_a_newer_search_declaration_retries_the_index_build_before_publicat
     .unwrap();
     // This is the real outer ensure retry, using the declaration just read.
     if published.is_none() {
-        backend
-            .shared
-            .ensure(
-                &first,
-                &Scope::local(),
-                tinystoragedrivers_core::ScopeGeneration::default(),
-            )
-            .await
-            .unwrap();
+        backend.shared.ensure(&first).await.unwrap();
     }
     let docs = backend.for_scope(&Scope::local()).unwrap();
     docs.documents()

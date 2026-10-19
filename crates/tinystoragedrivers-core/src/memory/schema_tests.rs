@@ -313,41 +313,6 @@ async fn existing_schema_validates_all_operation_inputs_before_declaration_looku
 }
 
 #[tokio::test]
-async fn existing_schema_validation_refuses_retired_generation_after_purge() {
-    let root = MemoryStorage::new();
-    let scope = Scope::local();
-    let raw = root.for_scope(&scope).unwrap();
-    let spec = CollectionSpec::new("notes");
-    raw.documents().ensure_collection(&spec).await.unwrap();
-    let restricted = root.existing_schema().unwrap();
-    let stale = restricted.for_scope(&scope).unwrap();
-    stale
-        .documents()
-        .validate_collection_spec(&spec)
-        .await
-        .unwrap();
-    let receipt = raw
-        .purge(&crate::PurgeRequest {
-            operation_id: "schema_validation_reset".into(),
-            mode: crate::PurgeMode::Atomic,
-        })
-        .await
-        .unwrap();
-    let result = stale.documents().validate_collection_spec(&spec).await;
-    restricted
-        .for_scope_generation(&scope, receipt.generation)
-        .unwrap()
-        .documents()
-        .validate_collection_spec(&spec)
-        .await
-        .unwrap();
-    assert_eq!(
-        result.err().map(|e| e.kind()),
-        Some(ErrorKind::ScopeGenerationRejected)
-    );
-}
-
-#[tokio::test]
 async fn existing_schema_validates_inputs_before_missing_declarations() {
     let storage = MemoryStorage::new().existing_schema().unwrap();
     let scoped = storage.for_scope(&Scope::local()).unwrap();

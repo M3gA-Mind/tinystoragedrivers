@@ -1,22 +1,7 @@
 //! Wire data excludes storage authority.
 use super::*;
-
-#[test]
-fn scope_generation_refusal_has_a_distinct_content_free_wire_kind() {
-    let failure = StorageFailure {
-        kind: StorageKind::ScopeGenerationRejected,
-    };
-    let wire = serde_json::to_value(failure).unwrap();
-    assert_eq!(
-        wire,
-        serde_json::json!({"kind":"scope_generation_rejected"})
-    );
-    assert_eq!(
-        serde_json::from_value::<StorageFailure>(wire).unwrap(),
-        failure
-    );
-}
 use serde_json::json;
+
 #[test]
 fn requests_refuse_arbitrary_authority_fields() {
     for field in ["scope", "collection", "url", "generation", "sender"] {

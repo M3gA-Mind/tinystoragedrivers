@@ -156,7 +156,6 @@ pub(crate) fn chunk_index() -> IndexModel {
 pub(crate) struct MongoBlobs {
     shared: Arc<Shared>,
     scope: Scope,
-    generation: tinystoragedrivers_core::ScopeGeneration,
     /// Writes are refused: GridFS cannot join a fenced transaction.
     fenced: bool,
     /// The handle a stream's seal uses: it may name keys under the prefix
@@ -169,7 +168,6 @@ impl MongoBlobs {
         Self {
             shared,
             scope,
-            generation: tinystoragedrivers_core::ScopeGeneration::default(),
             fenced,
             sealed_access: false,
         }
@@ -189,13 +187,6 @@ impl MongoBlobs {
         } else {
             validate_user_blob_key(key)
         }
-    }
-    pub(crate) fn with_generation(
-        mut self,
-        generation: tinystoragedrivers_core::ScopeGeneration,
-    ) -> Self {
-        self.generation = generation;
-        self
     }
 
     /// Refuse a write on a fenced handle rather than run it unfenced.
@@ -388,7 +379,7 @@ impl MongoBlobs {
                 .now()
                 .saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))
         });
-        crate::purge::admitted!(self, {
+        {
             self.check_key(key)?;
             self.writable("a blob put")?;
             if self.shared.existing {
@@ -424,17 +415,17 @@ impl MongoBlobs {
                 len: bytes.len() as u64,
                 content_type: content_type.map(str::to_owned),
             })
-        })
+        }
     }
 }
 
 #[async_trait]
 impl BlobStore for MongoBlobs {
     async fn sweep_expired(&self) -> Result<u64> {
-        crate::purge::admitted!(self, {
+        {
             self.writable("a blob sweep")?;
             MongoBlobs::sweep_expired(self).await
-        })
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -456,7 +447,7 @@ impl BlobStore for MongoBlobs {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        crate::purge::admitted!(self, {
+        {
             self.check_key(key)?;
             let bucket = self.bucket().await?;
             for _ in 0..READ_ATTEMPTS {
@@ -471,11 +462,11 @@ impl BlobStore for MongoBlobs {
                 }
             }
             Err(replaced_too_often())
-        })
+        }
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
-        crate::purge::admitted!(self, {
+        {
             self.check_key(key)?;
             let bucket = self.bucket().await?;
             for _ in 0..READ_ATTEMPTS {
@@ -494,19 +485,19 @@ impl BlobStore for MongoBlobs {
                 }
             }
             Err(replaced_too_often())
-        })
+        }
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        crate::purge::admitted!(self, {
+        {
             self.check_key(key)?;
             let bucket = self.bucket().await?;
             Ok(self.newest(&bucket, key).await?.as_ref().map(blob_meta))
-        })
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        crate::purge::admitted!(self, {
+        {
             self.check_key(key)?;
             self.writable("a blob delete")?;
             let bucket = self.bucket().await?;
@@ -516,11 +507,11 @@ impl BlobStore for MongoBlobs {
             let ids: Vec<Bson> = files.into_iter().map(|file| file.id).collect();
             self.remove(&bucket, ids).await?;
             Ok(existed)
-        })
+        }
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
-        crate::purge::admitted!(self, {
+        {
             if !self.sealed_access {
                 validate_user_blob_prefix(prefix)?;
             }
@@ -538,7 +529,7 @@ impl BlobStore for MongoBlobs {
                 .filter(|meta| meta.key.starts_with(prefix))
                 .filter(|meta| self.sealed_access || !is_reserved_blob_key(&meta.key))
                 .collect())
-        })
+        }
     }
 }
 

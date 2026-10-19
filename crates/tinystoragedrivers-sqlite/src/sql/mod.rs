@@ -327,12 +327,7 @@ impl Tables {
             [LAYOUT],
         )
         .map_err(during("record layout"))?;
-        conn.execute_batch(&format!(
-            "INSERT OR IGNORE INTO {} (scope, operation, generation) SELECT scope, operation, generation FROM {}",
-            ident(&self.purge_receipts),
-            ident(&self.admissions),
-        ))
-        .map_err(during("migrate purge receipts"))
+        Ok(())
     }
 
     /// Add the head time columns to a layout-2 file created without them.

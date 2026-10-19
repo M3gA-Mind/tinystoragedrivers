@@ -1,7 +1,7 @@
 //! Independently configured blob storage and composite document/blob backends.
 #[cfg(not(feature = "s3"))]
 use crate::StorageError;
-use crate::{BackendBlobs, BlobBackend, CompositeStorage, Result, StorageBackend, StorageConfig};
+use crate::{BackendBlobs, BlobBackend, Result, StorageConfig};
 use std::sync::Arc;
 
 /// A blob location independent of the document/stream location.
@@ -57,24 +57,6 @@ pub async fn open_blobs(config: &BlobConfig) -> Result<Arc<dyn BlobBackend>> {
             "s3 blob URL needs the s3 feature",
         )),
     }
-}
-
-/// Open documents/streams and blobs on independent locations.
-///
-/// Use an unfenced scoped blob handle to upload first, then a fenced document
-/// handle to publish the reference. Fenced composite blob writes are refused.
-///
-/// # Errors
-///
-/// Any parse/connection failure in either configured backend.
-pub async fn open_composite(
-    records: &StorageConfig,
-    blobs: &BlobConfig,
-) -> Result<Arc<dyn StorageBackend>> {
-    Ok(Arc::new(CompositeStorage::new(
-        crate::open(records).await?,
-        open_blobs(blobs).await?,
-    )))
 }
 
 #[cfg(test)]

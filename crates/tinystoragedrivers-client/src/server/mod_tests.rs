@@ -105,8 +105,6 @@ async fn capabilities_never_list_host_only_entries() {
     let names: Vec<String> = serde_json::from_value(reply["capabilities"].clone()).unwrap();
     for host_only in [
         "fencing",
-        "scope_purge",
-        "atomic_scope_purge",
         "existing_schema",
         "maintenance",
         "scope_enumeration",

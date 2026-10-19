@@ -12,7 +12,6 @@
 
 mod blobs;
 mod documents;
-mod purge;
 mod state;
 mod streams;
 
@@ -106,53 +105,29 @@ impl MemoryStorage {
     }
 
     fn handles(&self, scope: &Scope, fence: Option<&Arc<MemoryFence>>) -> ScopedStorage {
-        self.handles_generation(scope, fence, crate::ScopeGeneration::default())
-    }
-    fn handles_generation(
-        &self,
-        scope: &Scope,
-        fence: Option<&Arc<MemoryFence>>,
-        generation: crate::ScopeGeneration,
-    ) -> ScopedStorage {
         ScopedStorage::new(
             scope.clone(),
             self.driver(),
-            Arc::new(
-                MemoryDocuments::new(
-                    Arc::clone(&self.db),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fence.cloned(),
-                    self.existing,
-                )
-                .with_generation(generation),
-            ),
-            Arc::new(
-                MemoryStreams::new(
-                    Arc::clone(&self.db),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fence.cloned(),
-                )
-                .with_generation(generation),
-            ),
-            Arc::new(
-                MemoryBlobs::new(
-                    Arc::clone(&self.db),
-                    scope.clone(),
-                    Arc::clone(&self.clock),
-                    fence.cloned(),
-                )
-                .with_generation(generation),
-            ),
+            Arc::new(MemoryDocuments::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+                self.existing,
+            )),
+            Arc::new(MemoryStreams::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+            )),
+            Arc::new(MemoryBlobs::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+            )),
         )
-        .with_purge(Arc::new(purge::MemoryPurge {
-            db: Arc::clone(&self.db),
-            scope: scope.clone(),
-            generation,
-            clock: Arc::clone(&self.clock),
-            fence: fence.cloned(),
-        }))
     }
 }
 
@@ -231,30 +206,6 @@ impl StorageBackend for MemoryStorage {
             })),
         ))
     }
-
-    fn for_scope_generation(
-        &self,
-        scope: &Scope,
-        generation: crate::ScopeGeneration,
-    ) -> Result<ScopedStorage> {
-        Ok(self.handles_generation(scope, None, generation))
-    }
-
-    fn for_scope_fenced_generation(
-        &self,
-        scope: &Scope,
-        generation: crate::ScopeGeneration,
-        fence: &Fence,
-    ) -> Result<ScopedStorage> {
-        fence.validate()?;
-        Ok(self.handles_generation(
-            scope,
-            Some(&Arc::new(MemoryFence {
-                fence: fence.clone(),
-            })),
-            generation,
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -264,10 +215,6 @@ mod tests;
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod schema_tests;
-
-#[cfg(test)]
-#[path = "generation_tests.rs"]
-mod generation_tests;
 
 #[cfg(test)]
 #[path = "blob_ttl_tests.rs"]
