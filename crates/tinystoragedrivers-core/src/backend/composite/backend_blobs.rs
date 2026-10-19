@@ -103,9 +103,16 @@ impl BackendBlobs {
         let digest = Self::digest(scope);
         let map = self.0.for_scope(&Self::map_scope()?)?;
         let documents = map.documents();
-        documents
-            .ensure_collection(&crate::CollectionSpec::new(MAP_COLLECTION))
-            .await?;
+        let spec = crate::CollectionSpec::new(MAP_COLLECTION);
+        match documents.ensure_collection(&spec).await {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == crate::ErrorKind::Unsupported(Capability::ExistingSchema) =>
+            {
+                documents.validate_collection_spec(&spec).await?;
+            }
+            Err(error) => return Err(error),
+        }
         loop {
             let current = self.mapping_entry(&digest).await?;
             if let Some((existing, generations, _)) = &current {
@@ -232,6 +239,7 @@ impl BlobBackend for BackendBlobs {
             for item in blobs.list("").await? {
                 blobs.delete(&item.key).await?;
             }
+            blobs.sweep_expired().await?;
             return Ok(());
         }
         let digest = Self::digest(scope);
@@ -243,6 +251,7 @@ impl BlobBackend for BackendBlobs {
                 let physical = self
                     .0
                     .for_scope(&Self::physical_scope(scope, generation)?)?;
+                physical.blobs().sweep_expired().await?;
                 if physical.blobs().list("").await?.is_empty() {
                     return Ok(());
                 }
@@ -259,6 +268,7 @@ impl BlobBackend for BackendBlobs {
         for item in blobs.list("").await? {
             blobs.delete(&item.key).await?;
         }
+        blobs.sweep_expired().await?;
         Ok(())
     }
 
@@ -280,6 +290,7 @@ impl BlobBackend for BackendBlobs {
         for item in legacy.list("").await? {
             legacy.delete(&item.key).await?;
         }
+        legacy.sweep_expired().await?;
         if let Some((_, generations, _)) = mapping {
             for generation in generations
                 .into_iter()
@@ -290,6 +301,7 @@ impl BlobBackend for BackendBlobs {
                 for item in blobs.list("").await? {
                     blobs.delete(&item.key).await?;
                 }
+                blobs.sweep_expired().await?;
             }
         }
         Ok(())
