@@ -349,6 +349,18 @@ impl ScopePurge for FilePurge {
         true
     }
 
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        let scope = self.scope.clone();
+        let generation = self.generation;
+        self.db
+            .run(move |db| db.check_generation(&scope, generation))
+            .await
+    }
+
     async fn validate_binding(&self) -> Result<()> {
         let scope = self.scope.clone();
         let generation = self.generation;

@@ -12,7 +12,7 @@ use std::{
 use futures_util::TryStreamExt;
 use http::Method;
 use object_store::{
-    ObjectStore,
+    ObjectStore, ObjectStoreExt,
     memory::InMemory,
     path::Path,
     signer::{SignedUrlOptions, Signer},
@@ -200,12 +200,12 @@ async fn handle_request(mut stream: TcpStream, state: Arc<FixtureState>) {
                         entries.push(meta.location.to_string());
                     }
                 }
-                let versions = entries
-                    .iter()
-                    .map(|key| {
-                        format!("<Version><Key>{key}</Key><VersionId>current</VersionId></Version>")
-                    })
-                    .collect::<String>();
+                let mut versions = String::new();
+                for key in &entries {
+                    versions.push_str("<Version><Key>");
+                    versions.push_str(key);
+                    versions.push_str("</Key><VersionId>current</VersionId></Version>");
+                }
                 (
                     "200 OK",
                     format!(

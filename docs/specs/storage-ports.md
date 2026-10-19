@@ -294,11 +294,14 @@ backend and external owner stage completes.
 Unknown adapters return `Unsupported(ScopePurge)` before erasing data.
 `ScopePurge` advertises native scope admission and reset support;
 `AtomicScopePurge` additionally promises one atomic all-port operation.
-A custom `ScopePurge` implementation must explicitly opt in to binding
-validation before CompositeStorage can rely on its generation or native-fence
-checks. The trait default is unsupported for compatibility with older custom
-ports; advertising purge alone does not prove that a handle rejects retired
-generations. A composite refuses the capability if its record or blob half
+A custom `ScopePurge` implementation must explicitly opt in to generation
+validation before CompositeStorage can rely on its generation check. Full
+binding validation is a separate opt-in that also checks a native writer fence.
+This distinction lets composite blob reads reject retired generations while
+retaining the existing fenced-read contract; writes still enforce their fence.
+Both trait defaults are unsupported for compatibility with older custom ports;
+advertising purge alone does not prove that a handle rejects retired
+generations. A composite refuses purge capability if its record or blob half
 cannot validate the required generation binding.
 A stable operation identity makes retries idempotent and its receipt survives
 the erased data. `PurgeMode::Quiescent` is a trusted host assertion that every

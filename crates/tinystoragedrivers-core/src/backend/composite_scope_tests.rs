@@ -2,6 +2,23 @@
 
 use super::*;
 
+async fn physical_blob_exists(
+    storage: &Arc<MemoryStorage>,
+    scope: &Scope,
+    generation: ScopeGeneration,
+    key: &str,
+) -> bool {
+    let physical_scope = MemoryGenerationBlobs::physical_scope(scope, generation);
+    storage
+        .for_scope(&physical_scope)
+        .unwrap()
+        .blobs()
+        .get(key)
+        .await
+        .unwrap()
+        .is_some()
+}
+
 async fn legacy_composite() -> (CompositeStorage, Scope, Fence) {
     let records = Arc::new(NoPurgeRecords(MemoryStorage::new()));
     let blobs = Arc::new(NoPurgeBlobs(BackendBlobs::new(Arc::new(
@@ -194,31 +211,9 @@ async fn nested_composite_records_keep_public_scope_access() {
     };
     let receipt = scoped.purge(&request).await.unwrap();
     assert!(
-        inner_blob_data
-            .for_scope(&MemoryGenerationBlobs::physical_scope(
-                &scope,
-                ScopeGeneration(0)
-            ))
-            .unwrap()
-            .blobs()
-            .get("inner-before")
-            .await
-            .unwrap()
-            .is_none()
+        !physical_blob_exists(&inner_blob_data, &scope, ScopeGeneration(0), "inner-before").await
     );
-    assert!(
-        outer_blob_data
-            .for_scope(&MemoryGenerationBlobs::physical_scope(
-                &scope,
-                ScopeGeneration(0)
-            ))
-            .unwrap()
-            .blobs()
-            .get("one")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(!physical_blob_exists(&outer_blob_data, &scope, ScopeGeneration(0), "one").await);
 
     let current_inner = inner
         .for_scope_generation(&scope, receipt.generation)

@@ -366,6 +366,24 @@ impl ScopedStorage {
         }
     }
 
+    /// Check native generation admission without checking a writer fence.
+    #[doc(hidden)]
+    pub async fn validate_purge_generation(&self) -> Result<()> {
+        match &self.purge {
+            Some(port) => port.validate_generation().await,
+            None => Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "this driver cannot validate a scope generation",
+            )),
+        }
+    }
+
+    pub(crate) fn supports_purge_generation_validation(&self) -> bool {
+        self.purge
+            .as_ref()
+            .is_some_and(|purge| purge.supports_generation_validation())
+    }
+
     pub(crate) fn supports_purge_binding_validation(&self) -> bool {
         self.purge
             .as_ref()

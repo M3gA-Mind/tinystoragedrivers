@@ -25,6 +25,16 @@ impl ScopePurge for MemoryPurge {
         true
     }
 
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        self.db
+            .lock()?
+            .check_generation(self.scope.as_str(), self.generation)
+    }
+
     async fn validate_binding(&self) -> Result<()> {
         let state = self.db.lock()?;
         let now = if self.fence.is_some() {

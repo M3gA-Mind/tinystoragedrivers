@@ -157,7 +157,7 @@ impl CompositeStorage {
             },
             records: records.clone(),
             coordinator: coordinator.clone(),
-            validate_generation: coordinator.is_some(),
+            validate_generation: records.supports_purge_generation_validation(),
         });
         let mut combined = ScopedStorage::new(
             scope,

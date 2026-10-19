@@ -22,7 +22,20 @@ fn parses_versions_delete_markers_and_null_version_ids() {
     assert_eq!(page.delete_markers[0].version_id, "delete-3");
     assert_eq!(
         next_markers(&page, None, None).unwrap(),
-        ("scope/key".to_owned(), "v2".to_owned())
+        ("scope/key".to_owned(), Some("v2".to_owned()))
+    );
+}
+
+#[test]
+fn truncated_version_list_can_advance_to_a_new_key_without_a_version_marker() {
+    let page = parse_page(
+        "<ListVersionsResult><IsTruncated>true</IsTruncated><NextKeyMarker>next</NextKeyMarker></ListVersionsResult>",
+    )
+    .unwrap();
+
+    assert_eq!(
+        next_markers(&page, Some("previous"), Some("old-version")).unwrap(),
+        ("next".to_owned(), None)
     );
 }
 
@@ -47,7 +60,10 @@ fn malformed_version_list_is_a_backend_error_without_returning_body_text() {
     )
     .unwrap_err();
     assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
-    assert_eq!(error.to_string(), "invalid S3 version-list response");
+    assert_eq!(
+        error.to_string(),
+        "backend: invalid S3 version-list response"
+    );
 }
 
 #[test]

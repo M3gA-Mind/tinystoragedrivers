@@ -26,7 +26,7 @@ impl GenerationBlobs {
             ));
         }
         if self.validate_generation {
-            self.records.validate_purge_binding().await?;
+            self.records.validate_purge_generation().await?;
         }
         Ok(())
     }

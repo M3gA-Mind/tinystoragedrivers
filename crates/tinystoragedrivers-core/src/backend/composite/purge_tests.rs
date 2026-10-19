@@ -298,6 +298,12 @@ async fn exhausted_generation_space_refuses_purge_without_mutation() {
     let coordinator = records.for_scope(&coordinator_scope().unwrap()).unwrap();
     let current_blobs = blobs.for_scope_generation(&scope, generation).unwrap();
     current_blobs.put("preserve", vec![6], None).await.unwrap();
+    assert_eq!(
+        CompositePurge::generations(generation, "generation-overflow", None)
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Backend
+    );
     let composite = CompositePurge {
         records: scoped,
         blobs,
@@ -314,7 +320,7 @@ async fn exhausted_generation_space_refuses_purge_without_mutation() {
         })
         .await
         .unwrap_err();
-    assert_eq!(error.kind(), crate::ErrorKind::Backend);
+    assert_eq!(error.kind(), crate::ErrorKind::ScopeGenerationRejected);
     assert_eq!(
         current_blobs.get("preserve").await.unwrap().unwrap().bytes,
         [6]

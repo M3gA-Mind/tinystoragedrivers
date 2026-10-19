@@ -105,6 +105,24 @@ pub trait ScopePurge: Send + Sync + fmt::Debug {
         false
     }
 
+    /// Whether this port can validate generation revocation independently of
+    /// an optional writer fence. Read admission may remain open when a fence
+    /// is absent or stale, while a purged generation must still be rejected.
+    fn supports_generation_validation(&self) -> bool {
+        false
+    }
+
+    /// Validate only that the bound generation is still admitted.
+    ///
+    /// # Errors
+    /// Unsupported generation validation, revoked generation or backend failure.
+    async fn validate_generation(&self) -> Result<()> {
+        Err(StorageError::unsupported(
+            Capability::ScopePurge,
+            "this driver cannot validate a scope generation",
+        ))
+    }
+
     /// Validate that the bound generation is still admitted and that its
     /// native fence (when present) remains current, without changing state.
     ///

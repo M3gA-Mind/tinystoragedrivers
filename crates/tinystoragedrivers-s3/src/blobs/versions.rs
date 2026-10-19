@@ -1,6 +1,6 @@
 //! Version-aware S3 requests used by physical scope purge and enumeration.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use http::Method;
 use object_store::{
@@ -36,14 +36,43 @@ struct VersionedObject {
 }
 
 fn parse_page(body: &str) -> Result<ListVersionsPage> {
-    quick_xml::de::from_str(body).map_err(|_| backend_error("invalid S3 version-list response"))
+    let mut reader = quick_xml::Reader::from_str(body);
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(element))
+                if element.local_name().as_ref() == b"ListVersionsResult" =>
+            {
+                break;
+            }
+            Ok(
+                quick_xml::events::Event::Start(_)
+                | quick_xml::events::Event::Empty(_)
+                | quick_xml::events::Event::Eof,
+            )
+            | Err(_) => {
+                return Err(backend_error("invalid S3 version-list response"));
+            }
+            Ok(_) => {}
+        }
+    }
+    let page: ListVersionsPage = quick_xml::de::from_str(body)
+        .map_err(|_| backend_error("invalid S3 version-list response"))?;
+    if page
+        .versions
+        .iter()
+        .chain(&page.delete_markers)
+        .any(|object| object.key.is_empty() || object.version_id.is_empty())
+    {
+        return Err(backend_error("invalid S3 version-list response"));
+    }
+    Ok(page)
 }
 
 fn next_markers(
     page: &ListVersionsPage,
     key_marker: Option<&str>,
     version_marker: Option<&str>,
-) -> Result<(String, String)> {
+) -> Result<(String, Option<String>)> {
     let next_key = page
         .next_key_marker
         .as_deref()
@@ -53,11 +82,15 @@ fn next_markers(
         .next_version_id_marker
         .as_deref()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| backend_error("truncated S3 version-list omitted its version marker"))?;
-    if key_marker == Some(next_key) && version_marker == Some(next_version) {
+        .map(str::to_owned);
+    if key_marker == Some(next_key)
+        && next_version
+            .as_deref()
+            .is_none_or(|next| version_marker == Some(next))
+    {
         return Err(backend_error("S3 version-list pagination did not advance"));
     }
-    Ok((next_key.to_owned(), next_version.to_owned()))
+    Ok((next_key.to_owned(), next_version))
 }
 
 fn unsupported_signer() -> StorageError {
@@ -145,6 +178,7 @@ pub(super) async fn purge_prefix(signer: Option<&Arc<dyn Signer>>, prefix: &str)
     let client = reqwest::Client::new();
     let mut key_marker = None;
     let mut version_marker = None;
+    let mut seen_markers = HashSet::new();
     loop {
         let page = list_page(
             &client,
@@ -155,11 +189,11 @@ pub(super) async fn purge_prefix(signer: Option<&Arc<dyn Signer>>, prefix: &str)
         )
         .await?;
         let next = if page.truncated {
-            Some(next_markers(
-                &page,
-                key_marker.as_deref(),
-                version_marker.as_deref(),
-            )?)
+            let markers = next_markers(&page, key_marker.as_deref(), version_marker.as_deref())?;
+            if !seen_markers.insert(markers.clone()) {
+                return Err(backend_error("S3 version-list pagination marker cycled"));
+            }
+            Some(markers)
         } else {
             None
         };
@@ -177,7 +211,7 @@ pub(super) async fn purge_prefix(signer: Option<&Arc<dyn Signer>>, prefix: &str)
             return Ok(());
         };
         key_marker = Some(next_key);
-        version_marker = Some(next_version);
+        version_marker = next_version;
     }
 }
 
@@ -190,6 +224,7 @@ pub(super) async fn list_keys(
     let mut key_marker = None;
     let mut version_marker = None;
     let mut keys = Vec::new();
+    let mut seen_markers = HashSet::new();
     loop {
         let page = list_page(
             &client,
@@ -200,11 +235,11 @@ pub(super) async fn list_keys(
         )
         .await?;
         let next = if page.truncated {
-            Some(next_markers(
-                &page,
-                key_marker.as_deref(),
-                version_marker.as_deref(),
-            )?)
+            let markers = next_markers(&page, key_marker.as_deref(), version_marker.as_deref())?;
+            if !seen_markers.insert(markers.clone()) {
+                return Err(backend_error("S3 version-list pagination marker cycled"));
+            }
+            Some(markers)
         } else {
             None
         };
@@ -220,7 +255,7 @@ pub(super) async fn list_keys(
             return Ok(keys);
         };
         key_marker = Some(next_key);
-        version_marker = Some(next_version);
+        version_marker = next_version;
     }
 }
 

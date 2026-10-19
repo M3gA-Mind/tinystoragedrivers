@@ -446,6 +446,20 @@ impl ScopePurge for MongoPurge {
         self.shared.transactions && !self.fenced
     }
 
+    fn supports_generation_validation(&self) -> bool {
+        self.shared.transactions
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::ScopePurge,
+                "public reset capabilities are disabled",
+            ));
+        }
+        check(&self.shared, &self.scope, self.generation, None).await
+    }
+
     async fn validate_binding(&self) -> Result<()> {
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
