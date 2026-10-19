@@ -23,6 +23,11 @@ mod s3;
 #[cfg(feature = "s3")]
 pub use s3::{S3Connection, S3ConnectionConfig};
 
+#[cfg(feature = "file")]
+mod file;
+#[cfg(feature = "file")]
+pub use file::FileConnection;
+
 #[cfg(feature = "amqp")]
 mod amqp;
 #[cfg(feature = "amqp")]

@@ -4,6 +4,7 @@ use rusqlite::ErrorCode;
 use tinystoragedrivers_types::StorageError;
 
 /// Map a SQLite failure without including query or data contents.
+#[must_use]
 pub fn map(operation: &'static str, error: rusqlite::Error) -> StorageError {
     let busy = matches!(
         error.sqlite_error_code(),
@@ -23,6 +24,7 @@ pub fn map(operation: &'static str, error: rusqlite::Error) -> StorageError {
 }
 
 /// Bind the operation name for `map_err`.
+#[must_use]
 pub fn during(operation: &'static str) -> impl Fn(rusqlite::Error) -> StorageError {
     move |error| map(operation, error)
 }

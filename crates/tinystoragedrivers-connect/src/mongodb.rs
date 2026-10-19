@@ -140,22 +140,31 @@ fn supports_transactions(hello: &Document) -> bool {
 
 fn validate_database(database: &str) -> Result<()> {
     if database.is_empty()
-        || database.len() > 63
-        || database.chars().any(|character| {
-            character.is_whitespace() || matches!(character, '/' | '\\' | '.' | '"' | '$')
-        })
+        || database.len() >= 64
+        || database
+            .chars()
+            .any(|character| character == '\0' || "/\\. \"$*<>:|?".contains(character))
     {
         return Err(StorageError::invalid_input("invalid MongoDB database name"));
     }
     Ok(())
 }
 
-fn map_error(operation: &'static str, error: impl std::error::Error + Send + Sync + 'static) -> StorageError {
+fn map_error(
+    operation: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> StorageError {
     StorageError::unavailable(format!("MongoDB failed to {operation}")).with_source(error)
 }
 
 fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
+
+#[cfg(test)]
+#[path = "mongodb_tests.rs"]
+mod tests;
