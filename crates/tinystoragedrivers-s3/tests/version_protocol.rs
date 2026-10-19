@@ -273,10 +273,14 @@ async fn get_response(
             entries.push(meta.location.to_string());
         }
     }
-    let versions = entries
-        .iter()
-        .map(|key| format!("<Version><Key>{key}</Key><VersionId>current</VersionId></Version>"))
-        .collect::<String>();
+    let mut versions = String::new();
+    for key in entries {
+        use std::fmt::Write as _;
+        let _ = write!(
+            versions,
+            "<Version><Key>{key}</Key><VersionId>current</VersionId></Version>"
+        );
+    }
     (
         "200 OK",
         format!(
