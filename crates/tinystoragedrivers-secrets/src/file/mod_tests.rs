@@ -307,6 +307,39 @@ fn a_quarantine_name_collision_preserves_both_files() {
 }
 
 #[tokio::test]
+async fn a_replaced_healthy_file_remains_available_after_quarantine_race() {
+    let dir = TempDir::new("quarantine-source-replacement");
+    let path = dir.0.join("secrets.enc");
+    let store = EncryptedFileSecrets::new(&dir.0, fixture_key())
+        .with_corrupt_file_policy(CorruptFilePolicy::QuarantineAndContinue);
+    store.set("healthy", b"credential").await.unwrap();
+    let healthy = fs::read(&path).unwrap();
+    fixture_write(&path, b"corrupt bytes").unwrap();
+
+    let replacement_bytes = healthy.clone();
+    let source_path = path.clone();
+    let _pause = quarantine_source_pause::Guard::install(move || {
+        let displaced = source_path.with_file_name("displaced-corrupt");
+        fs::rename(&source_path, displaced).unwrap();
+        fixture_write(&source_path, replacement_bytes).unwrap();
+    });
+
+    let lock = store.inner.lock().unwrap();
+    let result = store.inner.read_map_in(&lock.namespace);
+    assert!(
+        result.is_err(),
+        "the first operation reports the source race"
+    );
+    drop(lock);
+    assert_eq!(
+        store.get("healthy").await.unwrap().unwrap().as_slice(),
+        b"credential",
+        "a later read must not mistake the moved healthy source for an empty store"
+    );
+    assert_eq!(fs::read(&path).unwrap(), healthy);
+}
+
+#[tokio::test]
 async fn binary_values_are_rejected() {
     let dir = TempDir::new("binary");
     let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
@@ -974,8 +1007,40 @@ mod quarantine_pause {
     }
 }
 
+mod quarantine_source_pause {
+    use std::cell::RefCell;
+    type Callback = Box<dyn FnOnce()>;
+    thread_local! {
+        static CALLBACK: RefCell<Option<Callback>> = const { RefCell::new(None) };
+    }
+    pub(super) struct Guard;
+    impl Guard {
+        pub(super) fn install(callback: impl FnOnce() + 'static) -> Self {
+            CALLBACK.with(|slot| assert!(slot.borrow_mut().replace(Box::new(callback)).is_none()));
+            Self
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CALLBACK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    pub(super) fn run() {
+        let callback = CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+}
+
 pub(super) fn after_quarantine_absence_check(candidate: &Path) {
     quarantine_pause::after_absence_check(candidate);
+}
+
+pub(super) fn after_quarantine_source_check() {
+    quarantine_source_pause::run();
 }
 
 pub(super) fn after_staged_publication_identity() {

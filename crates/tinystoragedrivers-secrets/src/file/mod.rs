@@ -357,6 +357,8 @@ impl Inner {
                     "secrets file changed before corruption quarantine",
                 ));
             }
+            #[cfg(test)]
+            tests::after_quarantine_source_check();
             match namespace.move_noreplace(name, &archived) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -369,6 +371,7 @@ impl Inner {
                 .map_err(|error| io_error("identify the corruption archive", error))?
                 != corrupt_identity
             {
+                Self::restore_replaced_source(namespace, &archived, name)?;
                 return Err(StorageError::conflict(
                     "quarantined secrets file identity changed",
                 ));
@@ -382,6 +385,25 @@ impl Inner {
         Err(StorageError::backend(
             "could not find an unused secrets quarantine name",
         ))
+    }
+
+    fn restore_replaced_source(
+        namespace: &secure::Namespace,
+        archived: &Path,
+        source: &Path,
+    ) -> Result<()> {
+        match namespace.move_noreplace(archived, source) {
+            Ok(()) => {}
+            // A later writer won the source name. Keep its file and the
+            // mismatched archived object; neither may be overwritten.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(error) => return Err(io_error("restore the replaced secrets file", error)),
+        }
+        #[cfg(unix)]
+        namespace
+            .sync()
+            .map_err(|error| io_error("persist the restored secrets file", error))?;
+        Ok(())
     }
 
     fn write_map_in(&self, namespace: &secure::Namespace, map: &SecretMap) -> Result<()> {
@@ -456,8 +478,9 @@ fn read_private(
 
 /// Replace a private object and verify the published identity and bytes.
 /// The staged file is owner-only before any payload bytes are written, and the
-/// containing directory is synced on Unix. Windows uses write-through native
-/// replacement for the publication barrier.
+/// containing directory is synced on Unix. Windows preserves the platform's
+/// retained-handle replacement semantics; corruption quarantine separately
+/// uses write-through no-replace moves.
 ///
 /// # Errors
 ///
