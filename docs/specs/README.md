@@ -29,4 +29,5 @@ See [`storage-ports.md`](storage-ports.md),
 [Confidential migration delivery](migration-delivery.md) preserves full-payload
 migration semantics through bounded transport frames.
 
-[`queue-store.md`](queue-store.md) specifies the `QueueStore` port.
+[`queue-store.md`](queue-store.md) specifies the `QueueStore` port, and
+[`queue-rabbitmq.md`](queue-rabbitmq.md) its RabbitMQ backend.

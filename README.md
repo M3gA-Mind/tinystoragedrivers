@@ -44,7 +44,9 @@ mongodb://db.example/openhuman?retryWrites=true&blobs=s3%3A%2F%2Fbucket%2Fattach
   serialization and dedupe keys. `queue::DocumentQueue` runs one on any
   `DocumentStore`, so every document driver is a queue backend. Queues are
   declared in an editable `queues.json` manifest (`queue::QueueManifest`,
-  format in `schemas/queues.schema.json`).
+  format in `schemas/queues.schema.json`). Every scope has one at
+  `ScopedStorage::queues()`; a separate queue URL (`amqp://…`, feature
+  `rabbitmq`, `QueueConfig` and `open_queues`) moves them to RabbitMQ.
 
 A `StorageBackend` hands out a `ScopedStorage` for each `Scope`, the tenant key
 every record carries. Two scopes on one backend never see each other's data.
@@ -110,6 +112,7 @@ crates/
 ├── tinystoragedrivers-mongodb/ # MongoDB: multi-tenant, scope on every record
 ├── tinystoragedrivers-secrets/ # SecretStore port: memory, secrets.enc file,
 │                               # DocumentStore and OS keyring drivers
+├── tinystoragedrivers-rabbitmq/ # QueueStore over AMQP 0-9-1 (queues only)
 └── tinystoragedrivers/         # facade: StorageConfig URL parsing, open(),
                                 # driver features, re-exports the core
 ```
@@ -146,6 +149,13 @@ docker run -d --rm --name tsd-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_
 docker exec tsd-mongo mongosh --quiet --eval \
   'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
 export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
+```
+
+The RabbitMQ queue backend's `live_*` tests likewise need `TSD_RABBITMQ_URL`:
+
+```sh
+docker run -d --rm --name tsd-rabbit -p 127.0.0.1:5672:5672 rabbitmq:4-management
+export TSD_RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/%2f'
 ```
 
 The design and its guarantees are in

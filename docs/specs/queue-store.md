@@ -1,7 +1,8 @@
 # QueueStore: durable message queues
 
-**Status:** Implemented (document drivers, storage bus `Queues` object).
-Broker driver pending, see [the plan](../plans/queue-store.md). **Owner:** tinystoragedrivers.
+**Status:** Implemented (document drivers, storage bus `Queues` object,
+RabbitMQ in [`queue-rabbitmq.md`](queue-rabbitmq.md)); see
+[the plan](../plans/queue-store.md). **Owner:** tinystoragedrivers.
 
 ## Problem
 
@@ -129,7 +130,5 @@ its documents by default, or whatever `ScopedStorage::with_queues` installed.
 
 ## Open questions
 
-- The broker driver (RabbitMQ) cannot honor dedupe natively; it reports
-  `dedupe: false` and callers dedupe in a document store. Groups map to
-  consistent-hash or single-active-consumer queues; that mapping is settled in
-  its own spec.
+None. The broker mapping, including why RabbitMQ reports `dedupe: false` and
+`groups: false`, is settled in [`queue-rabbitmq.md`](queue-rabbitmq.md).

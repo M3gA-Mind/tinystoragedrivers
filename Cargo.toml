@@ -63,6 +63,15 @@ tinystoragedrivers-sqlite = { path = "crates/tinystoragedrivers-sqlite" }
 tinystoragedrivers-secrets = { path = "crates/tinystoragedrivers-secrets" }
 # The MongoDB driver. The facade forwards it behind its `mongodb` feature.
 tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
+# The RabbitMQ queue backend. The facade forwards it behind its `rabbitmq`
+# feature; it is a QueueStore only, never a document store.
+tinystoragedrivers-rabbitmq = { path = "crates/tinystoragedrivers-rabbitmq" }
+# The AMQP 0-9-1 client the RabbitMQ queue backend speaks through: publisher
+# confirms, basic.get leases, queue declare/purge. Tokio runtime only, and TLS
+# (`amqps://`) through rustls on ring with the webpki roots, as the MongoDB
+# client links them, so a cloud build carries one crypto backend (lapin's
+# default would add aws-lc and the platform verifier).
+lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-webpki-roots-certs"] }
 # The ports are object-safe async traits (`Arc<dyn DocumentStore>`), which
 # native `async fn` in traits cannot express on the declared MSRV.
 async-trait = "0.1"
