@@ -470,6 +470,10 @@ impl StorageBackend for FileStorage {
         true
     }
 
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        true
+    }
+
     /// Lists the scopes that have a stored file by walking `scopes/`. A walk
     /// under the database lock, so it sees whole writes only.
     async fn scopes(&self, prefix: &str) -> Result<Vec<Scope>> {

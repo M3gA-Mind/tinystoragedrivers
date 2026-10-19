@@ -119,6 +119,12 @@ impl StorageBackend for NoPurgeRecords {
 struct LegacyPurgeRecords(MemoryStorage);
 
 #[derive(Debug)]
+struct BindingOnlyPurge;
+
+#[derive(Debug)]
+struct BindingOnlyRecords(MemoryStorage);
+
+#[derive(Debug)]
 struct LegacyNativePurge;
 
 #[async_trait]
@@ -130,6 +136,19 @@ impl crate::ScopePurge for LegacyNativePurge {
             status: PurgeStatus::Complete,
             stage: crate::PurgeStage::Complete,
         })
+    }
+}
+
+#[async_trait]
+impl crate::ScopePurge for BindingOnlyPurge {
+    fn supports_binding_validation(&self) -> bool {
+        true
+    }
+    async fn validate_binding(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn purge(&self, request: &PurgeRequest) -> Result<crate::PurgeReceipt> {
+        LegacyNativePurge.purge(request).await
     }
 }
 
@@ -154,6 +173,24 @@ impl StorageBackend for LegacyPurgeRecords {
     }
 }
 
+impl StorageBackend for BindingOnlyRecords {
+    fn driver(&self) -> &'static str {
+        self.0.driver()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        true
+    }
+    fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
+        Ok(self
+            .0
+            .for_scope(scope)?
+            .with_purge(Arc::new(BindingOnlyPurge)))
+    }
+}
+
 #[tokio::test]
 async fn composite_does_not_advertise_purge_for_legacy_native_purge_ports() {
     let composite = CompositeStorage::new(
@@ -170,6 +207,25 @@ async fn composite_does_not_advertise_purge_for_legacy_native_purge_ports() {
                 mode: PurgeMode::Quiescent,
             })
             .await
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported(Capability::ScopePurge)
+    );
+}
+
+#[tokio::test]
+async fn composite_with_binding_only_records_does_not_advertise_generation_purge() {
+    let composite = CompositeStorage::new(
+        Arc::new(BindingOnlyRecords(MemoryStorage::new())),
+        Arc::new(MemoryGenerationBlobs(Arc::new(MemoryStorage::new()))),
+    );
+    assert!(!composite.capabilities().contains(Capability::ScopePurge));
+    assert_eq!(
+        composite
+            .for_scope_generation(
+                &Scope::new("u:binding-only-records").unwrap(),
+                ScopeGeneration(1),
+            )
             .unwrap_err()
             .kind(),
         crate::ErrorKind::Unsupported(Capability::ScopePurge)

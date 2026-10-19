@@ -54,6 +54,12 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
         false
     }
 
+    /// Whether scope handles can validate native generation admission
+    /// independently of an optional writer fence.
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        false
+    }
+
     /// Number of composite record layers above the native storage owner.
     #[doc(hidden)]
     fn composite_depth(&self) -> Option<usize> {

@@ -186,6 +186,10 @@ impl StorageBackend for MemoryStorage {
         true
     }
 
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        true
+    }
+
     async fn prepare_schema(&self) -> Result<()> {
         if self.existing {
             return Err(StorageError::unsupported(

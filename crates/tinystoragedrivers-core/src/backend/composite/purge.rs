@@ -362,6 +362,20 @@ impl ScopePurge for CompositePurge {
         true
     }
 
+    fn supports_generation_validation(&self) -> bool {
+        true
+    }
+
+    async fn validate_generation(&self) -> Result<()> {
+        self.records.validate_purge_generation().await?;
+        if pending(&self.coordinator, &self.scope).await? {
+            return Err(StorageError::scope_generation_rejected(
+                "scope purge is pending",
+            ));
+        }
+        Ok(())
+    }
+
     async fn validate_binding(&self) -> Result<()> {
         self.records.validate_purge_binding().await?;
         if pending(&self.coordinator, &self.scope).await? {
