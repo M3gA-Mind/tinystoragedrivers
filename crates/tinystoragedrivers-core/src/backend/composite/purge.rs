@@ -45,6 +45,7 @@ pub(super) fn ensure_public_scope(scope: &Scope) -> Result<()> {
         || scope
             .as_str()
             .starts_with(&format!("{}/", super::backend_blobs::RESERVED_MAP_SCOPE))
+        || scope.as_str() == super::backend_blobs::RESERVED_SCOPE_PREFIX
         || scope
             .as_str()
             .starts_with(&format!("{}/", super::backend_blobs::RESERVED_SCOPE_PREFIX))
