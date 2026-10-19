@@ -582,6 +582,8 @@ impl StorageBackend for ScopedProcessDeclarationMismatch {
                 } else {
                     self.other.cas
                 },
+                None,
+                None,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
@@ -755,6 +757,8 @@ impl StorageBackend for CasOnly {
                 false,
                 false,
                 true,
+                None,
+                None,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
@@ -773,7 +777,21 @@ struct UnconditionalDocs(
     bool,
     bool,
     bool,
+    Option<(crate::Fence, Arc<FenceRaceGate>)>,
+    Option<(Arc<FenceLockControl>, bool)>,
 );
+
+#[derive(Debug)]
+struct FenceRaceGate {
+    checked: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[derive(Debug)]
+struct FenceLockControl {
+    lock: tokio::sync::Mutex<()>,
+    takeover_started: tokio::sync::Semaphore,
+}
 
 #[async_trait::async_trait]
 impl crate::DocumentStore for UnconditionalDocs {
@@ -813,6 +831,46 @@ impl crate::DocumentStore for UnconditionalDocs {
         doc: serde_json::Value,
         precondition: crate::Precondition,
     ) -> Result<crate::Version> {
+        let _shared_guard = if let Some((control, _)) = &self.6 {
+            if doc.get("epoch").and_then(serde_json::Value::as_u64) == Some(2) {
+                control.takeover_started.add_permits(1);
+            }
+            Some(control.lock.lock().await)
+        } else {
+            None
+        };
+        if self.6.as_ref().is_some_and(|(_, yield_old)| *yield_old)
+            && doc.get("by").and_then(serde_json::Value::as_str) == Some("old")
+        {
+            tokio::task::yield_now().await;
+            if let Some((control, _)) = &self.6 {
+                control
+                    .takeover_started
+                    .acquire()
+                    .await
+                    .expect("takeover remains live")
+                    .forget();
+            }
+        }
+        if let Some((fence, gate)) = &self.5 {
+            fence.check(self.0.get(fence.collection(), fence.id()).await?.as_ref())?;
+            match doc.get("by").and_then(serde_json::Value::as_str) {
+                Some("old") => {
+                    gate.checked.add_permits(1);
+                    gate.release
+                        .acquire()
+                        .await
+                        .expect("race gate open")
+                        .forget();
+                }
+                Some("new") => {
+                    let version = self.0.put(collection, id, doc, precondition).await?;
+                    gate.release.add_permits(1);
+                    return Ok(version);
+                }
+                _ => {}
+            }
+        }
         self.0
             .put(
                 collection,
@@ -965,6 +1023,8 @@ impl StorageBackend for BrokenCasOnly {
                 true,
                 false,
                 true,
+                None,
+                None,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
@@ -996,6 +1056,8 @@ impl StorageBackend for BrokenClaimCas {
                 false,
                 false,
                 true,
+                None,
+                None,
             )),
             Arc::clone(storage.streams()),
             Arc::clone(storage.blobs()),
@@ -1028,6 +1090,136 @@ impl StorageBackend for BrokenFencedCas {
         // the guard as part of its writes.
         self.0.for_scope(scope)
     }
+}
+
+#[derive(Debug, Clone)]
+struct CheckThenWriteFence(MemoryStorage, Arc<FenceRaceGate>);
+
+impl StorageBackend for CheckThenWriteFence {
+    fn driver(&self) -> &'static str {
+        "check_then_write_fence"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::SharedAcrossProcesses)
+            .with(crate::Capability::CrossProcessCas)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        self.0.for_scope(scope)
+    }
+    fn for_scope_fenced(
+        &self,
+        scope: &crate::Scope,
+        fence: &crate::Fence,
+    ) -> Result<crate::ScopedStorage> {
+        let storage = self.0.for_scope(scope)?;
+        Ok(crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                None,
+                false,
+                true,
+                true,
+                Some((fence.clone(), Arc::clone(&self.1))),
+                None,
+            )),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn shared_fence_race_rejects_check_then_write_after_takeover() {
+    let gate = Arc::new(FenceRaceGate {
+        checked: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let backend = CheckThenWriteFence(MemoryStorage::new(), Arc::clone(&gate));
+    let run = tokio::spawn(async move { run_shared(|| async { backend.clone() }).await });
+    // With the strengthened suite, the old put is polled before takeover,
+    // reads epoch 1, and parks until the epoch-2 holder writes. The old suite
+    // can skip polling it until after takeover and incorrectly accept the adapter.
+    let panic = run
+        .await
+        .expect_err("stale final value must fail conformance")
+        .into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        message.contains("stale in-flight write overwrote the new holder's value"),
+        "expected the in-flight stale value check to fail, got {message:?}"
+    );
+}
+
+#[derive(Debug, Clone)]
+struct YieldingFenceLock(MemoryStorage, Arc<FenceLockControl>);
+
+impl YieldingFenceLock {
+    fn wrap(&self, scope: &crate::Scope, storage: &crate::ScopedStorage) -> crate::ScopedStorage {
+        crate::ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(UnconditionalDocs(
+                Arc::clone(storage.documents()),
+                None,
+                false,
+                true,
+                true,
+                None,
+                Some((Arc::clone(&self.1), true)),
+            )),
+            Arc::clone(storage.streams()),
+            Arc::clone(storage.blobs()),
+        )
+    }
+}
+
+impl StorageBackend for YieldingFenceLock {
+    fn driver(&self) -> &'static str {
+        "yielding_fence_lock"
+    }
+    fn capabilities(&self) -> crate::Capabilities {
+        self.0
+            .capabilities()
+            .with(crate::Capability::SharedAcrossProcesses)
+            .with(crate::Capability::CrossProcessCas)
+    }
+    fn for_scope(&self, scope: &crate::Scope) -> Result<crate::ScopedStorage> {
+        let storage = self.0.for_scope(scope)?;
+        Ok(self.wrap(scope, &storage))
+    }
+    fn for_scope_fenced(
+        &self,
+        scope: &crate::Scope,
+        fence: &crate::Fence,
+    ) -> Result<crate::ScopedStorage> {
+        let storage = self.0.for_scope_fenced(scope, fence)?;
+        Ok(self.wrap(scope, &storage))
+    }
+}
+
+#[tokio::test]
+async fn shared_fence_race_polls_a_valid_write_while_takeover_waits_for_its_lock() {
+    let backend = YieldingFenceLock(
+        MemoryStorage::new(),
+        Arc::new(FenceLockControl {
+            lock: tokio::sync::Mutex::new(()),
+            takeover_started: tokio::sync::Semaphore::new(0),
+        }),
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_shared(|| async { backend.clone() }),
+    )
+    .await
+    .expect("takeover and old fenced write must be polled concurrently");
 }
 
 #[tokio::test]

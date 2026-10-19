@@ -160,6 +160,74 @@ async fn stale_fence_race(first: &impl StorageBackend, second: &impl StorageBack
         ErrorKind::Fenced,
         "cross-open stale fence",
     );
+
+    // Race an already-started old-holder write against takeover. Either the
+    // old write linearizes before takeover or it is fenced afterward; once
+    // the new holder writes, the old value must never become final.
+    ok(
+        handle(first)
+            .documents()
+            .put(&guards, "lease", json!({"epoch": 1}), Precondition::None)
+            .await,
+        "reset fence for in-flight race",
+    );
+    let old = ok(
+        first.for_scope_fenced(&scope, &fence),
+        "open in-flight old holder",
+    );
+    let old_docs = old.documents().clone();
+    let old_data = data.clone();
+    let old_write = old_docs.put(&old_data, "race", json!({"by": "old"}), Precondition::None);
+    tokio::pin!(old_write);
+    // Poll once before takeover. A backend may already have read the old
+    // guard and be waiting to commit under only its per-open lock.
+    let first_poll =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(old_write.as_mut().poll(cx))).await;
+    let (old_result, ()) = tokio::join!(
+        async {
+            match first_poll {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => old_write.await,
+            }
+        },
+        async {
+            ok(
+                handle(second)
+                    .documents()
+                    .put(&guards, "lease", json!({"epoch": 2}), Precondition::None)
+                    .await,
+                "take over during old write",
+            );
+            let new_fence = crate::Fence::epoch(scope.clone(), &guards, "lease", "epoch", 2);
+            let new_holder = ok(
+                second.for_scope_fenced(&scope, &new_fence),
+                "open new holder",
+            );
+            ok(
+                new_holder
+                    .documents()
+                    .put(&data, "race", json!({"by": "new"}), Precondition::None)
+                    .await,
+                "new holder write after takeover",
+            );
+        }
+    );
+    assert!(
+        old_result.is_ok()
+            || old_result
+                .as_ref()
+                .is_err_and(|error| error.kind() == ErrorKind::Fenced),
+        "in-flight old-holder write must succeed before takeover or be fenced afterward: {old_result:?}"
+    );
+    let final_doc = ok(
+        handle(first).documents().get(&data, "race").await,
+        "read final fenced race value",
+    )
+    .expect("new-holder value remains present");
+    assert_eq!(
+        final_doc.doc["by"], "new",
+        "stale in-flight write overwrote the new holder's value"
+    );
 }
 
 /// Each handle sees what the other wrote, deletions included.
