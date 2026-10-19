@@ -86,7 +86,9 @@ impl FileConnection {
                 operation(&root)
             })
             .await
-            .map_err(|error| StorageError::unavailable("file storage task failed").with_source(error))?
+            .map_err(|error| {
+                StorageError::unavailable("file storage task failed").with_source(error)
+            })?
         } else {
             self.run_now(operation)
         }

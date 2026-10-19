@@ -374,37 +374,59 @@ impl SqliteTables {
 
     /// Name of the document table.
     #[must_use]
-    pub fn docs(&self) -> &str { &self.docs }
+    pub fn docs(&self) -> &str {
+        &self.docs
+    }
     /// Name of the document field projection table.
     #[must_use]
-    pub fn doc_fields(&self) -> &str { &self.fields }
+    pub fn doc_fields(&self) -> &str {
+        &self.fields
+    }
     /// Name of the legacy scope admission metadata table, retained for layout compatibility.
     #[must_use]
-    pub fn scope_admissions(&self) -> &str { &self.admissions }
+    pub fn scope_admissions(&self) -> &str {
+        &self.admissions
+    }
     /// Name of the legacy purge receipt table, retained for layout compatibility.
     #[must_use]
-    pub fn purge_receipts(&self) -> &str { &self.purge_receipts }
+    pub fn purge_receipts(&self) -> &str {
+        &self.purge_receipts
+    }
     /// Name of the collection declaration table.
     #[must_use]
-    pub fn collections(&self) -> &str { &self.specs }
+    pub fn collections(&self) -> &str {
+        &self.specs
+    }
     /// Name of the full-text search table.
     #[must_use]
-    pub fn fts(&self) -> &str { &self.fts }
+    pub fn fts(&self) -> &str {
+        &self.fts
+    }
     /// Name of the stream entry table.
     #[must_use]
-    pub fn streams(&self) -> &str { &self.streams }
+    pub fn streams(&self) -> &str {
+        &self.streams
+    }
     /// Name of the stream head table.
     #[must_use]
-    pub fn stream_heads(&self) -> &str { &self.stream_heads }
+    pub fn stream_heads(&self) -> &str {
+        &self.stream_heads
+    }
     /// Name of the blob table.
     #[must_use]
-    pub fn blobs(&self) -> &str { &self.blobs }
+    pub fn blobs(&self) -> &str {
+        &self.blobs
+    }
     /// Name of the table storing blob write timestamps added after v1.0.0.
     #[must_use]
-    pub fn blob_written(&self) -> &str { &self.blob_written }
+    pub fn blob_written(&self) -> &str {
+        &self.blob_written
+    }
     /// Name of the layout metadata table.
     #[must_use]
-    pub fn meta(&self) -> &str { &self.meta }
+    pub fn meta(&self) -> &str {
+        &self.meta
+    }
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
