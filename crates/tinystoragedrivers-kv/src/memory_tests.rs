@@ -3,7 +3,7 @@
 use super::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tinystoragedrivers_types::ErrorKind;
+use tinystoragedrivers_types::{Capability, ErrorKind};
 
 fn clock() -> (Clock, Arc<AtomicU64>) {
     let now = Arc::new(AtomicU64::new(1_000));
@@ -150,5 +150,84 @@ async fn concurrent_compare_and_swap_allows_only_one_writer() {
     assert_eq!(
         store.get("shared").await.unwrap().unwrap().version,
         Version(2)
+    );
+}
+
+#[tokio::test]
+async fn default_constructor_debug_capabilities_and_validation_are_stable() {
+    let scope = tinystoragedrivers_types::Scope::new("tenant-local").unwrap();
+    let store = MemoryKv::new(scope);
+    assert!(format!("{store:?}").contains("tenant-local"));
+    assert!(store.capabilities().contains(Capability::Kv));
+    assert!(store.capabilities().contains(Capability::Ttl));
+
+    assert!(store.get("").await.is_err());
+    assert!(store.put("bad\0key", json!(1)).await.is_err());
+    assert!(
+        store
+            .cas("bad\0key", json!(1), Precondition::None)
+            .await
+            .is_err()
+    );
+    assert!(store.delete("bad\0key", Precondition::None).await.is_err());
+    assert!(store.list("bad\0prefix", None, 1).await.is_err());
+    assert!(store.list("prefix", None, 0).await.is_err());
+    assert!(
+        store
+            .put_with_ttl("bad\0key", json!(1), Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+
+    assert!(!store.delete("missing", Precondition::None).await.unwrap());
+    assert!(
+        store
+            .delete("missing", Precondition::Version(Version::FIRST))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn invalid_listing_cursor_is_rejected_before_reading() {
+    let (store, _) = store();
+    let page = store.list("first/", None, 1).await.unwrap();
+    let cursor = page.next;
+    assert!(cursor.is_none());
+
+    let first = store.put("first/a", json!(1)).await.unwrap();
+    assert_eq!(first, Version::FIRST);
+    store.put("first/b", json!(2)).await.unwrap();
+    let cursor = store.list("first/", None, 1).await.unwrap().next.unwrap();
+    assert!(store.list("other/", Some(cursor), 1).await.is_err());
+}
+
+#[tokio::test]
+async fn lock_poisoning_and_version_exhaustion_are_reported() {
+    let (poisoned_store, _) = store();
+    let poisoned = poisoned_store.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = poisoned.state.lock().unwrap();
+        panic!("poison the in-memory KV lock for the recovery test");
+    }));
+    let error = poisoned_store.get("key").await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+
+    let (exhausted_store, _) = store();
+    exhausted_store.state.lock().unwrap().entries.insert(
+        "full".to_owned(),
+        Entry {
+            version: Version(u64::MAX),
+            value: Some(json!("last version")),
+            expires_ms: None,
+        },
+    );
+    assert_eq!(
+        exhausted_store
+            .put("full", json!("cannot increment"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Backend
     );
 }
