@@ -190,13 +190,21 @@ async fn run_portable_cases(documents: &dyn DocumentStore, streams: &dyn StreamS
             .unwrap_err();
         assert_eq!(append_error.kind(), ErrorKind::Conflict, "{append_error}");
     }
+
+    tinystoragedrivers_testkit::documents::run(documents).await;
+    tinystoragedrivers_testkit::semantics::run(documents).await;
+    tinystoragedrivers_testkit::validated::run(documents).await;
+    tinystoragedrivers_testkit::watch::run(documents).await;
+    tinystoragedrivers_testkit::streams::run(streams).await;
 }
 
 #[cfg(feature = "memory")]
 #[tokio::test]
 async fn memory_passes_portable_document_and_stream_cases() {
     let storage = crate::memory::MemoryConnection::new().for_scope(Scope::new("portable").unwrap());
-    run_portable_cases(storage.documents().as_ref(), storage.streams().as_ref()).await;
+    let streams = storage.streams();
+    run_portable_cases(storage.documents().as_ref(), streams.as_ref()).await;
+    tinystoragedrivers_testkit::seal::run(&streams).await;
 }
 
 #[cfg(feature = "sqlite")]
@@ -207,8 +215,10 @@ async fn sqlite_passes_portable_document_and_stream_cases() {
         tinystoragedrivers_connect::sqlite::SqliteConnection::open(directory.path()).unwrap();
     let scope = Scope::new("portable").unwrap();
     let documents = crate::sqlite::SqliteDocuments::new(connection.clone(), scope.clone());
-    let streams = crate::sqlite::SqliteStreams::new(connection, scope);
-    run_portable_cases(&documents, &streams).await;
+    let streams: std::sync::Arc<dyn StreamStore> =
+        std::sync::Arc::new(crate::sqlite::SqliteStreams::new(connection, scope));
+    run_portable_cases(&documents, streams.as_ref()).await;
+    tinystoragedrivers_testkit::seal::run(&streams).await;
 }
 
 #[cfg(feature = "file")]
@@ -218,8 +228,10 @@ async fn file_passes_portable_document_and_stream_cases() {
     let connection = tinystoragedrivers_connect::FileConnection::open(directory.path()).unwrap();
     let scope = Scope::new("portable").unwrap();
     let documents = crate::FileDocuments::new(connection.clone(), scope.clone());
-    let streams = crate::FileStreams::new(connection, scope);
-    run_portable_cases(&documents, &streams).await;
+    let streams: std::sync::Arc<dyn StreamStore> =
+        std::sync::Arc::new(crate::FileStreams::new(connection, scope));
+    run_portable_cases(&documents, streams.as_ref()).await;
+    tinystoragedrivers_testkit::seal::run(&streams).await;
 }
 
 #[cfg(feature = "mongodb")]
@@ -234,8 +246,11 @@ async fn mongodb_passes_portable_document_and_stream_cases() {
         .expect("test MongoDB is available");
     let scope = Scope::new("portable").unwrap();
     let documents = crate::mongodb::MongoDocuments::new(connection.clone(), scope.clone());
-    let streams = crate::mongodb::MongoStreams::new(connection.clone(), scope)
-        .with_blob_store(std::sync::Arc::new(crate::mongodb::TestBlobs::default()));
-    run_portable_cases(&documents, &streams).await;
+    let streams: std::sync::Arc<dyn StreamStore> = std::sync::Arc::new(
+        crate::mongodb::MongoStreams::new(connection.clone(), scope)
+            .with_blob_store(std::sync::Arc::new(crate::mongodb::TestBlobs::default())),
+    );
+    run_portable_cases(&documents, streams.as_ref()).await;
+    tinystoragedrivers_testkit::seal::run(&streams).await;
     connection.database().drop().await.unwrap();
 }

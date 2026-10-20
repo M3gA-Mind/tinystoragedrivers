@@ -19,10 +19,10 @@ use tinystoragedrivers_api::{BlobReader, BlobStore, BlobStream};
 use tinystoragedrivers_connect::{S3Connection, S3ConnectionConfig};
 use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability, ErrorKind,
-    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError, is_reserved_blob_key,
 };
 
-use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix};
+use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix, validate_sealed_key};
 
 const PART_SIZE: usize = 8 * 1024 * 1024;
 const WRITTEN_AT: &str = "tsd-written-at-ms";
@@ -102,6 +102,15 @@ impl S3BlobStore {
             .map_err(|_| StorageError::invalid_input("invalid S3 object key"))
     }
 
+    fn sealed_path(&self, key: &str) -> Result<Path> {
+        validate_sealed_key(key)?;
+        if key.len() > self.max_key_len {
+            return Err(StorageError::invalid_input("blob key exceeds S3 key limit"));
+        }
+        Path::parse(format!("{}{key}", self.prefix))
+            .map_err(|_| StorageError::invalid_input("invalid S3 object key"))
+    }
+
     async fn signed(&self, key: &str, ttl: Duration, method: Method) -> Result<String> {
         if ttl.is_zero() || ttl > Duration::from_secs(7 * 24 * 60 * 60) {
             return Err(StorageError::invalid_input(
@@ -121,109 +130,135 @@ impl S3BlobStore {
     async fn upload(
         &self,
         key: &str,
-        mut reader: BlobReader,
+        reader: BlobReader,
         len: u64,
         content_type: Option<&str>,
         ttl: Option<Duration>,
+        allow_sealed: bool,
     ) -> Result<BlobMeta> {
         if len > (PART_SIZE as u64).saturating_mul(10_000) {
             return Err(StorageError::invalid_input(
                 "blob exceeds multipart part limit",
             ));
         }
-        let path = self.path(key)?;
+        let path = if allow_sealed {
+            self.sealed_path(key)?
+        } else {
+            self.path(key)?
+        };
         let now = now_ms();
         let expires =
             ttl.map(|ttl| now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
         let attrs = attributes(content_type, Some(now), expires);
         if len <= PART_SIZE as u64 {
-            let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-            while let Some(chunk) = reader.try_next().await? {
-                if (bytes.len() as u64).saturating_add(chunk.len() as u64) > len {
-                    return Err(StorageError::invalid_input(
-                        "blob stream exceeds declared length",
-                    ));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            if bytes.len() as u64 != len {
-                return Err(StorageError::invalid_input(
-                    "blob stream is shorter than declared length",
-                ));
-            }
-            self.store
-                .put_opts(
-                    &path,
-                    Bytes::from(bytes).into(),
-                    PutOptions {
-                        attributes: attrs.clone(),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| map_error(&error))?;
+            self.upload_single(&path, reader, len, attrs).await?;
         } else {
-            let mut upload = self
-                .store
-                .put_multipart_opts(
-                    &path,
-                    PutMultipartOptions {
-                        attributes: attrs.clone(),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| map_error(&error))?;
-            let result: Result<()> = async {
-                let mut received = 0_u64;
-                let mut pending = BytesMut::with_capacity(PART_SIZE);
-                while let Some(chunk) = reader.try_next().await? {
-                    received = received.saturating_add(chunk.len() as u64);
-                    if received > len {
-                        return Err(StorageError::invalid_input(
-                            "blob stream exceeds declared length",
-                        ));
-                    }
-                    let mut remaining = chunk.as_ref();
-                    while !remaining.is_empty() {
-                        let room = PART_SIZE - pending.len();
-                        let take = room.min(remaining.len());
-                        pending.extend_from_slice(&remaining[..take]);
-                        remaining = &remaining[take..];
-                        if pending.len() == PART_SIZE {
-                            let part = pending.split_to(PART_SIZE).freeze();
-                            upload
-                                .put_part(part.into())
-                                .await
-                                .map_err(|error| map_error(&error))?;
-                        }
-                    }
-                }
-                if received != len {
-                    return Err(StorageError::invalid_input(
-                        "blob stream is shorter than declared length",
-                    ));
-                }
-                if !pending.is_empty() {
-                    upload
-                        .put_part(pending.freeze().into())
-                        .await
-                        .map_err(|error| map_error(&error))?;
-                }
-                upload.complete().await.map_err(|error| map_error(&error))?;
-                Ok(())
-            }
-            .await;
-            if let Err(error) = result {
-                let _ = upload.abort().await;
-                return Err(error);
-            }
+            self.upload_multipart(&path, reader, len, attrs).await?;
         }
         Ok(BlobMeta {
             key: key.to_owned(),
             len,
             content_type: content_type.map(str::to_owned),
         })
+    }
+
+    async fn upload_single(
+        &self,
+        path: &Path,
+        mut reader: BlobReader,
+        len: u64,
+        attrs: Attributes,
+    ) -> Result<()> {
+        let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        while let Some(chunk) = reader.try_next().await? {
+            if (bytes.len() as u64).saturating_add(chunk.len() as u64) > len {
+                return Err(StorageError::invalid_input(
+                    "blob stream exceeds declared length",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() as u64 != len {
+            return Err(StorageError::invalid_input(
+                "blob stream is shorter than declared length",
+            ));
+        }
+        self.store
+            .put_opts(
+                path,
+                Bytes::from(bytes).into(),
+                PutOptions {
+                    attributes: attrs,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        Ok(())
+    }
+
+    async fn upload_multipart(
+        &self,
+        path: &Path,
+        mut reader: BlobReader,
+        len: u64,
+        attrs: Attributes,
+    ) -> Result<()> {
+        let mut upload = self
+            .store
+            .put_multipart_opts(
+                path,
+                PutMultipartOptions {
+                    attributes: attrs,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        let result: Result<()> = async {
+            let mut received = 0_u64;
+            let mut pending = BytesMut::with_capacity(PART_SIZE);
+            while let Some(chunk) = reader.try_next().await? {
+                received = received.saturating_add(chunk.len() as u64);
+                if received > len {
+                    return Err(StorageError::invalid_input(
+                        "blob stream exceeds declared length",
+                    ));
+                }
+                let mut remaining = chunk.as_ref();
+                while !remaining.is_empty() {
+                    let room = PART_SIZE - pending.len();
+                    let take = room.min(remaining.len());
+                    pending.extend_from_slice(&remaining[..take]);
+                    remaining = &remaining[take..];
+                    if pending.len() == PART_SIZE {
+                        upload
+                            .put_part(pending.split_to(PART_SIZE).freeze().into())
+                            .await
+                            .map_err(|error| map_error(&error))?;
+                    }
+                }
+            }
+            if received != len {
+                return Err(StorageError::invalid_input(
+                    "blob stream is shorter than declared length",
+                ));
+            }
+            if !pending.is_empty() {
+                upload
+                    .put_part(pending.freeze().into())
+                    .await
+                    .map_err(|error| map_error(&error))?;
+            }
+            upload.complete().await.map_err(|error| map_error(&error))?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = upload.abort().await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn attributes_for(
@@ -265,6 +300,9 @@ impl BlobStore for S3BlobStore {
     fn max_key_len(&self) -> usize {
         self.max_key_len
     }
+    fn supports_sealed_blobs(&self) -> bool {
+        true
+    }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         let len = bytes.len() as u64;
@@ -272,7 +310,8 @@ impl BlobStore for S3BlobStore {
             Box::pin(futures_util::stream::once(
                 async move { Ok(Bytes::from(bytes)) },
             ));
-        self.upload(key, reader, len, content_type, None).await
+        self.upload(key, reader, len, content_type, None, false)
+            .await
     }
     async fn put_expiring(
         &self,
@@ -286,7 +325,8 @@ impl BlobStore for S3BlobStore {
             Box::pin(futures_util::stream::once(
                 async move { Ok(Bytes::from(bytes)) },
             ));
-        self.upload(key, reader, len, content_type, Some(ttl)).await
+        self.upload(key, reader, len, content_type, Some(ttl), false)
+            .await
     }
     async fn put_stream(
         &self,
@@ -295,7 +335,8 @@ impl BlobStore for S3BlobStore {
         len: u64,
         content_type: Option<&str>,
     ) -> Result<BlobMeta> {
-        self.upload(key, reader, len, content_type, None).await
+        self.upload(key, reader, len, content_type, None, false)
+            .await
     }
     async fn put_stream_expiring(
         &self,
@@ -305,7 +346,95 @@ impl BlobStore for S3BlobStore {
         content_type: Option<&str>,
         ttl: Duration,
     ) -> Result<BlobMeta> {
-        self.upload(key, reader, len, content_type, Some(ttl)).await
+        self.upload(key, reader, len, content_type, Some(ttl), false)
+            .await
+    }
+
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        let len = bytes.len() as u64;
+        let reader: BlobReader =
+            Box::pin(futures_util::stream::once(
+                async move { Ok(Bytes::from(bytes)) },
+            ));
+        self.upload(key, reader, len, content_type, None, true)
+            .await
+    }
+
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        let path = self.sealed_path(key)?;
+        let Some((meta, attrs)) = self.attributes_for(&path).await? else {
+            return Ok(None);
+        };
+        if is_expired(&attrs, now_ms()) {
+            return Ok(None);
+        }
+        let content = self
+            .store
+            .get(&path)
+            .await
+            .map_err(|error| map_error(&error))?;
+        let bytes = content
+            .bytes()
+            .await
+            .map_err(|error| map_error(&error))?
+            .to_vec();
+        Ok(Some(Blob {
+            meta: object_meta(key, meta.size, &attrs),
+            bytes,
+        }))
+    }
+
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        let path = self.sealed_path(key)?;
+        let Some((meta, attrs)) = self.attributes_for(&path).await? else {
+            return Ok(None);
+        };
+        if is_expired(&attrs, now_ms()) {
+            return Ok(None);
+        }
+        Ok(Some(object_meta(key, meta.size, &attrs)))
+    }
+
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        let path = self.sealed_path(key)?;
+        let found = self.attributes_for(&path).await?;
+        let existed = found.is_some();
+        let live = found.is_some_and(|(_, attrs)| !is_expired(&attrs, now_ms()));
+        match self.store.delete(&path).await {
+            Ok(()) => Ok(existed && live),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(map_error(&error)),
+        }
+    }
+
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_sealed_key(prefix)?;
+        let root = Path::parse(self.prefix.trim_end_matches('/'))
+            .map_err(|_| StorageError::invalid_input("invalid S3 scope prefix"))?;
+        let mut listing = self.store.list(Some(&root));
+        let mut entries = BTreeMap::new();
+        while let Some(object) = listing
+            .try_next()
+            .await
+            .map_err(|error| map_error(&error))?
+        {
+            let Some(key) = object.location.as_ref().strip_prefix(&self.prefix) else {
+                continue;
+            };
+            if is_reserved_blob_key(key)
+                && key.starts_with(prefix)
+                && let Some((meta, attrs)) = self.attributes_for(&object.location).await?
+                && !is_expired(&attrs, now_ms())
+            {
+                entries.insert(key.to_owned(), object_meta(key, meta.size, &attrs));
+            }
+        }
+        Ok(entries.into_values().collect())
     }
     async fn get_stream(&self, key: &str) -> Result<Option<BlobStream>> {
         let path = self.path(key)?;
@@ -424,6 +553,7 @@ impl BlobStore for S3BlobStore {
                 continue;
             };
             if key.starts_with(prefix)
+                && !is_reserved_blob_key(key)
                 && after.is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
             {
                 keys.insert(key.to_owned(), ());

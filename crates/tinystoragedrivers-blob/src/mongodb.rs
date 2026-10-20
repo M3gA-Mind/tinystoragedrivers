@@ -18,10 +18,10 @@ use tinystoragedrivers_api::{BlobReader, BlobStore};
 use tinystoragedrivers_connect::MongoConnection;
 use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability,
-    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError, is_reserved_blob_key,
 };
 
-use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix};
+use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix, validate_sealed_key};
 
 const BUCKET_NAME: &str = "_tsd_blobs";
 const BLOB_KEY_INDEX: &str = "_tsd_blob_key";
@@ -149,6 +149,61 @@ impl MongoBlobStore {
         u64::try_from(file.upload_date.timestamp_millis()).ok()
     }
 
+    async fn get_key(&self, key: &str, allow_sealed: bool) -> Result<Option<Blob>> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let bucket = self.bucket().await?;
+        for _ in 0..READ_ATTEMPTS {
+            let Some(file) = self.newest(key).await? else {
+                return Ok(None);
+            };
+            if Self::is_expired(&file, (self.connection.clock())()) {
+                return Ok(None);
+            }
+            if let Some(bytes) = Self::download(&bucket, &file).await? {
+                return Ok(Some(Blob {
+                    meta: Self::meta(&file),
+                    bytes,
+                }));
+            }
+        }
+        Err(replaced_too_often())
+    }
+
+    async fn head_key(&self, key: &str, allow_sealed: bool) -> Result<Option<BlobMeta>> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let Some(file) = self.newest(key).await? else {
+            return Ok(None);
+        };
+        if Self::is_expired(&file, (self.connection.clock())()) {
+            return Ok(None);
+        }
+        Ok(Some(Self::meta(&file)))
+    }
+
+    async fn delete_key(&self, key: &str, allow_sealed: bool) -> Result<bool> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let files = self.files(doc! {"filename": key}).await?;
+        let existed = files
+            .first()
+            .is_some_and(|file| !Self::is_expired(file, (self.connection.clock())()));
+        for file in files {
+            self.delete_id(file.id).await?;
+        }
+        Ok(existed)
+    }
+
     async fn upload(
         &self,
         key: &str,
@@ -156,8 +211,13 @@ impl MongoBlobStore {
         len: u64,
         content_type: Option<&str>,
         ttl: Option<Duration>,
+        allow_sealed: bool,
     ) -> Result<BlobMeta> {
-        validate_key(key)?;
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
         let now = (self.connection.clock())();
         let expiry =
             ttl.map(|ttl| now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
@@ -292,12 +352,16 @@ impl BlobStore for MongoBlobStore {
     fn max_key_len(&self) -> usize {
         MAX_KEY_LEN
     }
+    fn supports_sealed_blobs(&self) -> bool {
+        true
+    }
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         let len = bytes.len() as u64;
         let reader: BlobReader = Box::pin(futures_util::stream::once(async move {
             Ok(bytes::Bytes::from(bytes))
         }));
-        self.upload(key, reader, len, content_type, None).await
+        self.upload(key, reader, len, content_type, None, false)
+            .await
     }
     async fn put_stream(
         &self,
@@ -306,7 +370,8 @@ impl BlobStore for MongoBlobStore {
         len: u64,
         content_type: Option<&str>,
     ) -> Result<BlobMeta> {
-        self.upload(key, reader, len, content_type, None).await
+        self.upload(key, reader, len, content_type, None, false)
+            .await
     }
     async fn put_expiring(
         &self,
@@ -319,7 +384,8 @@ impl BlobStore for MongoBlobStore {
         let reader: BlobReader = Box::pin(futures_util::stream::once(async move {
             Ok(bytes::Bytes::from(bytes))
         }));
-        self.upload(key, reader, len, content_type, Some(ttl)).await
+        self.upload(key, reader, len, content_type, Some(ttl), false)
+            .await
     }
     async fn put_stream_expiring(
         &self,
@@ -329,26 +395,11 @@ impl BlobStore for MongoBlobStore {
         content_type: Option<&str>,
         ttl: Duration,
     ) -> Result<BlobMeta> {
-        self.upload(key, reader, len, content_type, Some(ttl)).await
+        self.upload(key, reader, len, content_type, Some(ttl), false)
+            .await
     }
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        validate_key(key)?;
-        let bucket = self.bucket().await?;
-        for _ in 0..READ_ATTEMPTS {
-            let Some(file) = self.newest(key).await? else {
-                return Ok(None);
-            };
-            if Self::is_expired(&file, (self.connection.clock())()) {
-                return Ok(None);
-            }
-            if let Some(bytes) = Self::download(&bucket, &file).await? {
-                return Ok(Some(Blob {
-                    meta: Self::meta(&file),
-                    bytes,
-                }));
-            }
-        }
-        Err(replaced_too_often())
+        self.get_key(key, false).await
     }
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
@@ -375,25 +426,10 @@ impl BlobStore for MongoBlobStore {
         Err(replaced_too_often())
     }
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        validate_key(key)?;
-        let Some(file) = self.newest(key).await? else {
-            return Ok(None);
-        };
-        if Self::is_expired(&file, (self.connection.clock())()) {
-            return Ok(None);
-        }
-        Ok(Some(Self::meta(&file)))
+        self.head_key(key, false).await
     }
     async fn delete(&self, key: &str) -> Result<bool> {
-        validate_key(key)?;
-        let files = self.files(doc! {"filename": key}).await?;
-        let existed = files
-            .first()
-            .is_some_and(|file| !Self::is_expired(file, (self.connection.clock())()));
-        for file in files {
-            self.delete_id(file.id).await?;
-        }
-        Ok(existed)
+        self.delete_key(key, false).await
     }
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         validate_prefix(prefix, None)?;
@@ -414,6 +450,50 @@ impl BlobStore for MongoBlobStore {
             }
         }
         Ok(output)
+    }
+
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        validate_sealed_key(key)?;
+        let len = bytes.len() as u64;
+        let reader: BlobReader = Box::pin(futures_util::stream::once(async move {
+            Ok(bytes::Bytes::from(bytes))
+        }));
+        self.upload(key, reader, len, content_type, None, true)
+            .await
+    }
+
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        self.get_key(key, true).await
+    }
+
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        self.head_key(key, true).await
+    }
+
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        self.delete_key(key, true).await
+    }
+
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_sealed_key(prefix)?;
+        let regex = format!("^{}", regex_escape(prefix));
+        let files = self.files(doc! {"filename": {"$regex": regex}}).await?;
+        let mut newest = BTreeMap::new();
+        for file in files {
+            let key = file.filename.clone().unwrap_or_default();
+            if is_reserved_blob_key(&key)
+                && key.starts_with(prefix)
+                && !Self::is_expired(&file, (self.connection.clock())())
+            {
+                newest.entry(key).or_insert(file);
+            }
+        }
+        Ok(newest.into_values().map(|file| Self::meta(&file)).collect())
     }
     async fn list_page(
         &self,
@@ -438,6 +518,7 @@ impl BlobStore for MongoBlobStore {
         for file in files {
             let key = file.filename.clone().unwrap_or_default();
             if key.starts_with(prefix)
+                && !is_reserved_blob_key(&key)
                 && after.is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
             {
                 newest.entry(key).or_insert(file);

@@ -12,19 +12,21 @@ pub trait StreamStore: Send + Sync + std::fmt::Debug {
     /// Optional stream behaviors provided by this driver.
     fn capabilities(&self) -> Capabilities;
 
-    /// Append one value and return the next offset.
+    /// Append one value and return its offset.
     ///
     /// # Errors
     /// Returns an error for an invalid stream or backend failure.
     async fn append(&self, stream: &str, value: Value) -> Result<u64>;
 
-    /// Append a batch and return the next offset.
+    /// Append a batch and return the first appended offset. An empty batch
+    /// returns the current stream end.
     ///
     /// # Errors
     /// Returns an error for invalid values or a backend failure.
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64>;
 
-    /// Append if the stream still has the expected next offset.
+    /// Append if the stream still has the expected next offset, returning the
+    /// first appended offset. An empty batch returns the current stream end.
     ///
     /// # Errors
     /// Returns `Unsupported(ConditionalStreamAppend)` by default, a conflict

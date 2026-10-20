@@ -173,3 +173,7 @@ pub(crate) fn after(position: &CursorPosition, order: &Order) -> Option<Clause> 
         params,
     })
 }
+
+#[cfg(test)]
+#[path = "order_tests.rs"]
+mod tests;

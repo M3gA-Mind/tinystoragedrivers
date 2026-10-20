@@ -112,6 +112,33 @@ fn memory_reports_port_capabilities_and_empty_reads() {
 }
 
 #[test]
+fn memory_sealed_blobs_are_scope_bound_and_hidden_from_user_lists() {
+    let store = MemoryBlobStore::new(Scope::new("local").unwrap());
+    let other = MemoryBlobStore::new(Scope::new("other").unwrap());
+    let key = "_tsd/sealed/events/g0";
+    assert!(store.supports_sealed_blobs());
+    run(store.put_sealed(key, b"sealed".to_vec(), Some("application/zstd"))).unwrap();
+    assert_eq!(
+        run(store.get_sealed(key)).unwrap().unwrap().bytes,
+        b"sealed"
+    );
+    assert_eq!(run(other.get_sealed(key)).unwrap(), None);
+    assert_eq!(run(store.head_sealed(key)).unwrap().unwrap().len, 6);
+    assert_eq!(
+        run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
+        1
+    );
+    assert!(run(store.list("")).unwrap().is_empty());
+    assert!(run(store.list_page("", None, 10)).unwrap().items.is_empty());
+    assert_eq!(
+        run(store.get(key)).unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::InvalidInput
+    );
+    assert!(run(store.delete_sealed(key)).unwrap());
+    assert!(!run(store.delete_sealed(key)).unwrap());
+}
+
+#[test]
 fn poisoned_memory_map_returns_unavailable_from_all_read_and_write_ports() {
     let store = MemoryBlobStore::new(Scope::new("local").unwrap());
     let records = Arc::clone(&store.records);
@@ -128,5 +155,5 @@ fn poisoned_memory_map_returns_unavailable_from_all_read_and_write_ports() {
     assert!(run(store.list("")).is_err());
     assert!(run(store.list_page("", None, 1)).is_err());
     assert!(run(store.sweep_expired()).is_err());
-    assert!(store.store("key", Vec::new(), None, None).is_err());
+    assert!(store.store("key", Vec::new(), None, None, false).is_err());
 }

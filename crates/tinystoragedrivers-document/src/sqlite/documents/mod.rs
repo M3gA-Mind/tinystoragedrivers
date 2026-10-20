@@ -2,12 +2,12 @@
 //!
 //! All collections of a database share one `WITHOUT ROWID` table keyed by
 //! `(scope, collection, id)`, with the body stored as JSON text (or, over 4 KiB,
-//! a zstd blob, see [`crate::sqlite::body`]) and the record
+//! a zstd blob, see `body.rs`) and the record
 //! metadata (`schema`, `created_ms`, `updated_ms`, `expires_ms`) in columns of
 //! their own. A deleted document keeps its row (`deleted = 1`, body `{}`) so
 //! its version continues if the id is written again; every read skips it. Declared
 //! index and search fields are projected into the `doc_fields` side table
-//! ([`crate::sqlite::fields`]), and search fields are mirrored into an FTS5 table. Filters push their exact
+//! (`fields.rs`), and search fields are mirrored into an FTS5 table. Filters push their exact
 //! string and boolean equalities down to SQL and are re-checked in Rust with
 //! [`Filter::matches_with`], so results agree with the memory driver.
 //!
@@ -425,3 +425,7 @@ impl DocumentStore for SqliteDocuments {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

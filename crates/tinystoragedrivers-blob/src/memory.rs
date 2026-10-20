@@ -11,10 +11,12 @@ use async_trait::async_trait;
 use tinystoragedrivers_api::BlobStore;
 use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability,
-    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError, is_reserved_blob_key,
 };
 
-use crate::key::{MAX_KEY_LEN, clamp_range, now_ms, validate_key, validate_prefix};
+use crate::key::{
+    MAX_KEY_LEN, clamp_range, now_ms, validate_key, validate_prefix, validate_sealed_key,
+};
 
 #[derive(Debug, Clone)]
 struct Record {
@@ -79,8 +81,12 @@ impl BlobStore for MemoryBlobStore {
         MAX_KEY_LEN
     }
 
+    fn supports_sealed_blobs(&self) -> bool {
+        true
+    }
+
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        self.store(key, bytes, content_type, None)
+        self.store(key, bytes, content_type, None, false)
     }
 
     async fn put_expiring(
@@ -90,7 +96,7 @@ impl BlobStore for MemoryBlobStore {
         content_type: Option<&str>,
         ttl: Duration,
     ) -> Result<BlobMeta> {
-        self.store(key, bytes, content_type, Some(ttl))
+        self.store(key, bytes, content_type, Some(ttl), false)
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
@@ -163,6 +169,75 @@ impl BlobStore for MemoryBlobStore {
         Ok(records
             .iter()
             .filter(|((scope, key), record)| {
+                scope == self.scope.as_str()
+                    && key.starts_with(prefix)
+                    && !is_reserved_blob_key(key)
+                    && Self::live(record, now)
+            })
+            .map(|((_, key), record)| Self::meta(key, record))
+            .collect())
+    }
+
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None, true)
+    }
+
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        validate_sealed_key(key)?;
+        let now = (self.clock)();
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageError::unavailable("blob map lock poisoned"))?;
+        Ok(records
+            .get(&(self.scope.as_str().to_owned(), key.to_owned()))
+            .filter(|record| Self::live(record, now))
+            .map(|record| Blob {
+                meta: Self::meta(key, record),
+                bytes: record.bytes.clone(),
+            }))
+    }
+
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        validate_sealed_key(key)?;
+        let now = (self.clock)();
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageError::unavailable("blob map lock poisoned"))?;
+        Ok(records
+            .get(&(self.scope.as_str().to_owned(), key.to_owned()))
+            .filter(|record| Self::live(record, now))
+            .map(|record| Self::meta(key, record)))
+    }
+
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        validate_sealed_key(key)?;
+        let now = (self.clock)();
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| StorageError::unavailable("blob map lock poisoned"))?;
+        Ok(records
+            .remove(&(self.scope.as_str().to_owned(), key.to_owned()))
+            .is_some_and(|record| Self::live(&record, now)))
+    }
+
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_sealed_key(prefix)?;
+        let now = (self.clock)();
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| StorageError::unavailable("blob map lock poisoned"))?;
+        Ok(records
+            .iter()
+            .filter(|((scope, key), record)| {
                 scope == self.scope.as_str() && key.starts_with(prefix) && Self::live(record, now)
             })
             .map(|((_, key), record)| Self::meta(key, record))
@@ -188,6 +263,7 @@ impl BlobStore for MemoryBlobStore {
         let mut rows = records.iter().filter(|((scope, key), _)| {
             scope == self.scope.as_str()
                 && key.starts_with(prefix)
+                && !is_reserved_blob_key(key)
                 && after.is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
         });
         let mut items = Vec::with_capacity(limit);
@@ -224,8 +300,13 @@ impl MemoryBlobStore {
         bytes: Vec<u8>,
         content_type: Option<&str>,
         ttl: Option<Duration>,
+        allow_sealed: bool,
     ) -> Result<BlobMeta> {
-        validate_key(key)?;
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
         let now = (self.clock)();
         let expires_at_ms = ttl.map(|duration| {
             now.saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
