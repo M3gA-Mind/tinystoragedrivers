@@ -167,7 +167,7 @@ impl MongoDocuments {
             }
             None => table.replace_one(cas, record).upsert(upsert).await,
         }
-        .map_err(|error| mongo_error("write a document", error))?;
+        .map_err(map_document_write_error)?;
         if result.matched_count == 0 && result.upserted_id.is_none() {
             return Err(StorageError::conflict("document changed during write"));
         }
@@ -263,7 +263,7 @@ impl MongoDocuments {
         self.collection(&spec.name)
             .create_indexes(indexes)
             .await
-            .map_err(|error| mongo_error("build collection indexes", error))?;
+            .map_err(map_index_build_error)?;
         let Some(text) = spec.search.as_ref().map(text_index).transpose()?.flatten() else {
             return Ok(());
         };
@@ -730,10 +730,33 @@ impl DocumentStore for MongoDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
-        self.collection(collection)
-            .delete_many(doc! {SCOPE: self.scope.as_str()})
+        let table = self.collection(collection);
+        let mut cursor = table
+            .find(doc! {SCOPE: self.scope.as_str()})
             .await
-            .map_err(|error| mongo_error("drop scoped documents", error))?;
+            .map_err(|error| mongo_error("read documents to drop a collection", error))?;
+        while let Some(record) = cursor
+            .try_next()
+            .await
+            .map_err(|error| mongo_error("read documents to drop a collection", error))?
+        {
+            if record.get_bool(DELETED).unwrap_or(false) {
+                continue;
+            }
+            let id = record
+                .get_str(KEY)
+                .map_err(|_| StorageError::serialization("stored document has no key"))?;
+            let version = record
+                .get_i64(VERSION)
+                .map_err(|_| StorageError::serialization("stored document has no version"))?;
+            table
+                .update_one(
+                    doc! {"_id": self.scoped_id(id), VERSION: version},
+                    doc! {"$set": {BODY: {}, DELETED: true}},
+                )
+                .await
+                .map_err(|error| mongo_error("drop scoped documents", error))?;
+        }
         Ok(())
     }
 
@@ -901,6 +924,50 @@ fn fingerprint(collection: &str, scope: &Scope, query: &Query) -> u64 {
 
 pub(super) fn mongo_error(operation: &'static str, error: mongodb::error::Error) -> StorageError {
     StorageError::unavailable(format!("MongoDB failed to {operation}")).with_source(error)
+}
+
+fn map_document_write_error(error: mongodb::error::Error) -> StorageError {
+    if let Some(index) = duplicate_key_index(&error) {
+        if index.starts_with("_tsd_ix_") {
+            return StorageError::already_exists("document violates a unique index")
+                .with_source(error);
+        }
+        if index == "_id_" || index == "_tsd_scope_key" {
+            return StorageError::conflict("document changed during write").with_source(error);
+        }
+    }
+    mongo_error("write a document", error)
+}
+
+fn map_index_build_error(error: mongodb::error::Error) -> StorageError {
+    if duplicate_key_index(&error).is_some() {
+        return StorageError::already_exists("existing documents violate a unique index")
+            .with_source(error);
+    }
+    mongo_error("build collection indexes", error)
+}
+
+fn duplicate_key_index(error: &mongodb::error::Error) -> Option<String> {
+    use mongodb::error::{ErrorKind as MongoErrorKind, WriteFailure};
+
+    let (code, message) = match error.kind.as_ref() {
+        MongoErrorKind::Command(command) => (command.code, command.message.as_str()),
+        MongoErrorKind::Write(WriteFailure::WriteError(write)) => {
+            (write.code, write.message.as_str())
+        }
+        MongoErrorKind::InsertMany(many) => {
+            let first = many.write_errors.as_ref()?.first()?;
+            (first.code, first.message.as_str())
+        }
+        _ => return None,
+    };
+    if !matches!(code, 11000 | 11001 | 12582) {
+        return None;
+    }
+    message
+        .split_once("index: ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map(str::to_owned)
 }
 
 fn decode_spec(record: &Document) -> Result<(CollectionSpec, i64)> {

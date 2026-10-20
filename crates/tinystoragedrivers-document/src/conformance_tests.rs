@@ -190,6 +190,11 @@ async fn run_portable_cases(documents: &dyn DocumentStore, streams: &dyn StreamS
             .unwrap_err();
         assert_eq!(append_error.kind(), ErrorKind::Conflict, "{append_error}");
     }
+
+    tinystoragedrivers_testkit::documents::run(documents).await;
+    tinystoragedrivers_testkit::validated::run(documents).await;
+    tinystoragedrivers_testkit::watch::run(documents).await;
+    tinystoragedrivers_testkit::streams::run(streams).await;
 }
 
 #[cfg(feature = "memory")]

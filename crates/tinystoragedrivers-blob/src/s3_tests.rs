@@ -44,6 +44,27 @@ fn s3_blob_round_trips_empty_content_and_byte_ranges() {
 }
 
 #[test]
+fn s3_sealed_blobs_use_reserved_namespace_without_exposing_it_to_users() {
+    let store = store();
+    let key = "_tsd/sealed/events/g0";
+    run(store.put_sealed(key, b"log".to_vec(), Some("application/zstd"))).unwrap();
+    assert_eq!(run(store.get_sealed(key)).unwrap().unwrap().bytes, b"log");
+    assert_eq!(run(store.head_sealed(key)).unwrap().unwrap().len, 3);
+    assert_eq!(
+        run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
+        1
+    );
+    assert!(run(store.list("")).unwrap().is_empty());
+    assert!(run(store.list_page("", None, 10)).unwrap().items.is_empty());
+    assert_eq!(
+        run(store.get(key)).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(run(store.delete_sealed(key)).unwrap());
+    assert_eq!(run(store.head_sealed(key)).unwrap(), None);
+}
+
+#[test]
 fn short_or_long_s3_stream_does_not_replace_existing_object() {
     let store = store();
     run(store.put("kept", b"original".to_vec(), None)).unwrap();

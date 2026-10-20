@@ -13,8 +13,8 @@ use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_api::StreamStore;
 use tinystoragedrivers_connect::MongoConnection;
 use tinystoragedrivers_types::{
-    CollectionSpec, ExpectedDocument, Filter, Precondition, ReadCheck, Scope, WatchNotice,
-    WatchOptions, WriteOp, WriteResult,
+    Capability, CollectionSpec, ExpectedDocument, Filter, Precondition, ReadCheck, Scope,
+    WatchNotice, WatchOptions, WriteOp, WriteResult,
 };
 
 #[derive(Debug, Default)]
@@ -38,6 +38,9 @@ impl BlobStore for TestBlobs {
     }
     fn max_key_len(&self) -> usize {
         tinystoragedrivers_types::MAX_KEY_LEN
+    }
+    fn supports_sealed_blobs(&self) -> bool {
+        true
     }
     async fn put(
         &self,
@@ -249,6 +252,55 @@ async fn test_connection(uri: &str, stem: &str) -> MongoConnection {
         .expect("test MongoDB is available")
 }
 
+#[tokio::test]
+async fn mongo_stream_seal_uses_the_real_scope_bound_blob_engine() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd26_real_blob_seal").await;
+    let scope = Scope::new("scope-a").unwrap();
+    let blobs: Arc<dyn BlobStore> = Arc::new(tinystoragedrivers_blob::MongoBlobStore::new(
+        connection.clone(),
+        scope.clone(),
+    ));
+    let streams = MongoStreams::new(connection.clone(), scope).with_blob_store(Arc::clone(&blobs));
+    streams
+        .append_batch(
+            "events",
+            vec![serde_json::json!("first"), serde_json::json!("second")],
+        )
+        .await
+        .unwrap();
+    assert!(streams.capabilities().contains(Capability::StreamSeal));
+    let sealed = streams.seal("events").await.unwrap();
+    assert_eq!((sealed.base, sealed.len), (0, 2));
+    assert_eq!(streams.seal("events").await.unwrap(), sealed);
+    assert_eq!(streams.read_window("events", 0, 10).await.unwrap().len(), 2);
+
+    let key = format!("{}/g0", crate::sealed_blob_key("events").unwrap());
+    assert_eq!(
+        blobs.get(&key).await.unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::InvalidInput
+    );
+    assert!(blobs.list("").await.unwrap().is_empty());
+    assert!(
+        blobs
+            .list_page("", None, 10)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let other_scope = tinystoragedrivers_blob::MongoBlobStore::new(
+        connection.clone(),
+        Scope::new("scope-b").unwrap(),
+    );
+    assert_eq!(other_scope.get_sealed(&key).await.unwrap(), None);
+    assert!(streams.delete_stream("events").await.unwrap());
+    assert_eq!(blobs.head_sealed(&key).await.unwrap(), None);
+    connection.database().drop().await.unwrap();
+}
+
 /// Multiple append batches keep the stream's first retained offset at zero.
 #[tokio::test]
 async fn stream_info_base_survives_multiple_append_batches() {
@@ -411,6 +463,49 @@ async fn failed_blob_upload_leaves_stream_unsealed_and_retryable() {
     );
 
     assert_eq!(streams.seal("events").await.unwrap().len, 1);
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn standalone_truncate_and_seal_linearize_without_losing_the_truncated_view() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd26_standalone_truncate_seal").await;
+    let truncate_started = Arc::new(tokio::sync::Notify::new());
+    let resume_truncate = Arc::new(tokio::sync::Notify::new());
+    let blobs = Arc::new(TestBlobs::default());
+    let streams = MongoStreams::new(connection.clone(), Scope::new("scope-a").unwrap())
+        .with_blob_store(blobs)
+        .without_transactions_for_test()
+        .pause_truncate_for_test(Arc::clone(&truncate_started), Arc::clone(&resume_truncate));
+    streams
+        .append_batch(
+            "events",
+            vec![serde_json::json!("discard"), serde_json::json!("keep")],
+        )
+        .await
+        .unwrap();
+
+    let truncating = {
+        let streams = streams.clone();
+        tokio::spawn(async move { streams.truncate_before("events", 1).await })
+    };
+    truncate_started.notified().await;
+    let sealed = streams.seal("events").await.unwrap();
+    assert_eq!((sealed.base, sealed.len), (1, 2));
+    resume_truncate.notify_one();
+    assert_eq!(
+        truncating.await.unwrap().unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        vec![tinystoragedrivers_types::StreamEntry {
+            offset: 1,
+            value: serde_json::json!("keep"),
+        }]
+    );
     connection.database().drop().await.unwrap();
 }
 

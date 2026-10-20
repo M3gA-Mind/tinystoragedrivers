@@ -200,3 +200,7 @@ impl DocumentWatch for MongoWatch {
         Ok(Some(notice))
     }
 }
+
+#[cfg(test)]
+#[path = "watch_tests.rs"]
+mod tests;
