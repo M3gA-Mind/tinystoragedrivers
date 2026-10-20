@@ -101,6 +101,46 @@ async fn independent_callers_receive_independent_storage_bindings() {
     assert!(second.kv().get("private").await.unwrap().is_none());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_broker_connection_works_without_secret_admission() {
+    let rig = rig().await;
+    let (_module, storage) = rig.module("ordinary-secret-denial").await;
+    assert!(!storage.secrets().enumerable());
+    let error = storage.secrets().get("private").await.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        tinystoragedrivers_types::ErrorKind::Unsupported(
+            tinystoragedrivers_types::Capability::Secrets
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broker_forwards_every_non_confidential_primitive_through_the_bound_host() {
+    let rig = rig().await;
+    let (_module, storage) = rig.module("broker-conformance").await;
+    conformance::documents::run(storage.documents().as_ref()).await;
+    conformance::streams::run(storage.streams().as_ref()).await;
+    conformance::kv::run(storage.kv().as_ref()).await;
+    conformance::blobs::run(storage.blobs().as_ref()).await;
+    conformance::queue::run(storage.queues().as_ref()).await;
+    conformance::watch::run(storage.documents().as_ref()).await;
+    assert!(
+        storage
+            .blobs()
+            .get_stream("absent")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        storage.secrets().get("private").await.unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::Unsupported(
+            tinystoragedrivers_types::Capability::Secrets
+        )
+    );
+}
+
 struct OneChunk(Option<Bytes>);
 
 impl Stream for OneChunk {

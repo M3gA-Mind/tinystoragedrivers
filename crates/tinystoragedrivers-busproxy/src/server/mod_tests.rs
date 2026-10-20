@@ -25,12 +25,21 @@ async fn kind(server: &StorageServer, object: &str, selector: &str, request: Val
 #[tokio::test]
 async fn unknown_objects_and_selectors_are_refused() {
     let server = server();
+    assert!(format!("{server:?}").contains("StorageServer"));
     assert_eq!(
         kind(&server, "Nope", "Get", json!({})).await,
         StorageKind::InvalidInput
     );
     assert_eq!(
         kind(&server, "Documents", "Arbitrary", json!({})).await,
+        StorageKind::InvalidInput
+    );
+    assert_eq!(
+        kind(&server, "Kv", "Arbitrary", json!({})).await,
+        StorageKind::InvalidInput
+    );
+    assert_eq!(
+        kind(&server, "Kv", "Capabilities", json!({})).await,
         StorageKind::InvalidInput
     );
     // Streamed transfers are not request/reply selectors.
@@ -100,6 +109,413 @@ async fn batches_and_inline_blobs_over_their_limits_are_refused() {
         )
         .await,
         StorageKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn document_selectors_forward_queries_claims_and_collection_lifecycle() {
+    let server = server();
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "EnsureCollection",
+            json!({"spec":{"name":"items", "indexes":[], "search":{"fields":["title"]}}}),
+        )
+        .await
+        .unwrap();
+    let put = |id: &str, title: &str| {
+        json!({"collection":"items", "document_id":id,
+            "document_json": format!("{{\"title\":\"{title}\",\"state\":\"queued\"}}"),
+            "precondition":{"kind":"none"}})
+    };
+    for id in ["a", "b"] {
+        server
+            .handle(Admission::Private, "Documents", "Put", put(id, "hello"))
+            .await
+            .unwrap();
+    }
+
+    let get = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Get",
+            json!({"collection":"items", "document_id":"a"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get["doc"]["title"], "hello");
+    assert_eq!(get["version"], 1);
+
+    let count = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Count",
+            json!({"collection":"items", "filter":{"op":"all"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    let page = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Query",
+            json!({"collection":"items", "query":{"filter":{"op":"all"}, "limit":1}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["next"].is_string());
+
+    for (selector, request) in [
+        (
+            "AtomicBatch",
+            json!({"ops":[{"op":"put", "collection":"items", "id":"batch", "doc":{"title":"hello"}, "precondition":{"kind":"none"}}]}),
+        ),
+        (
+            "AtomicBatchChecked",
+            json!({"checks":[{"collection":"items", "id":"batch", "expected":{"kind":"version", "version":1}}], "ops":[{"op":"put", "collection":"items", "id":"batch-checked", "doc":{"title":"hello"}, "precondition":{"kind":"none"}}]}),
+        ),
+    ] {
+        let result = server
+            .handle(Admission::Private, "Documents", selector, request)
+            .await
+            .unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 1);
+    }
+
+    assert_eq!(
+        kind(
+            &server,
+            "Documents",
+            "AtomicBatch",
+            json!({"checks":[{"collection":"items", "id":"a", "expected":{"kind":"version", "version":1}}], "ops":[]}),
+        )
+        .await,
+        StorageKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn document_claim_delete_search_and_collection_selectors_forward() {
+    let server = server();
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "EnsureCollection",
+            json!({"spec":{"name":"items", "indexes":[], "search":{"fields":["title"]}}}),
+        )
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        server
+            .handle(
+                Admission::Private,
+                "Documents",
+                "Put",
+                json!({"collection":"items", "document_id":id, "document_json":"{\"title\":\"hello\",\"state\":\"queued\"}", "precondition":{"kind":"none"}}),
+            )
+            .await
+            .unwrap();
+    }
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Put",
+            json!({"collection":"items", "document_id":"c", "document_json":"{\"title\":\"other\",\"state\":\"done\"}", "precondition":{"kind":"none"}}),
+        )
+        .await
+        .unwrap();
+    let claimed = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Claim",
+            json!({"collection":"items", "filter":{"op":"eq", "field":"state", "value":"queued"}, "patch":"{\"state\":\"running\"}"}),
+        )
+        .await
+        .unwrap();
+    assert!(!claimed.is_null());
+    let deleted = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "DeleteWhere",
+            json!({"collection":"items", "filter":{"op":"eq", "field":"state", "value":"queued"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+    assert!(
+        server
+            .handle(
+                Admission::Private,
+                "Documents",
+                "Delete",
+                json!({"collection":"items", "document_id":"c", "precondition":{"kind":"version", "version":1}}),
+            )
+            .await
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    );
+    let names = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Collections",
+            json!({"prefix":"it"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(names, json!(["items"]));
+}
+
+#[tokio::test]
+async fn document_search_and_collection_schema_selectors_forward() {
+    let server = server();
+    let spec = json!({"name":"events", "indexes":[], "search":{"fields":["title"]}});
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "EnsureCollection",
+            json!({"spec":spec}),
+        )
+        .await
+        .unwrap();
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Put",
+            json!({"collection":"events", "document_id":"one", "document_json":"{\"title\":\"needle\"}", "precondition":{"kind":"none"}}),
+        )
+        .await
+        .unwrap();
+    let hits = server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "Search",
+            json!({"collection":"events", "text":"needle", "limit":1}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "ValidateCollectionSpec",
+            json!({"spec":spec}),
+        )
+        .await
+        .unwrap();
+    server
+        .handle(
+            Admission::Private,
+            "Documents",
+            "DropCollection",
+            json!({"collection":"events"}),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn blob_selectors_forward_inline_reads_ranges_pages_and_deletes() {
+    let server = server();
+    server
+        .handle(
+            Admission::Private,
+            "Blobs",
+            "Put",
+            json!({"key":"docs/a", "bytes":[1,2,3,4], "content_type":"application/octet-stream"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .handle(Admission::Private, "Blobs", "Head", json!({"key":"docs/a"}),)
+            .await
+            .unwrap()["len"],
+        4
+    );
+    assert_eq!(
+        server
+            .handle(Admission::Private, "Blobs", "Get", json!({"key":"docs/a"}),)
+            .await
+            .unwrap()["bytes"],
+        json!([1, 2, 3, 4])
+    );
+    assert_eq!(
+        server
+            .handle(
+                Admission::Private,
+                "Blobs",
+                "GetRange",
+                json!({"key":"docs/a", "start":1, "end":3}),
+            )
+            .await
+            .unwrap(),
+        json!([2, 3])
+    );
+}
+
+#[tokio::test]
+async fn blob_list_page_capabilities_and_delete_selectors_forward() {
+    let server = server();
+    server
+        .handle(
+            Admission::Private,
+            "Blobs",
+            "Put",
+            json!({"key":"docs/a", "bytes":[1,2,3,4]}),
+        )
+        .await
+        .unwrap();
+    server
+        .handle(
+            Admission::Private,
+            "Blobs",
+            "Put",
+            json!({"key":"docs/temporary", "bytes":[5], "ttl_ms":60000}),
+        )
+        .await
+        .unwrap();
+    let page = server
+        .handle(
+            Admission::Private,
+            "Blobs",
+            "ListPage",
+            json!({"prefix":"docs/", "limit":1}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    for (selector, request) in [
+        ("GetRange", json!({"key":"docs/a", "start":3, "end":2})),
+        ("ListPage", json!({"prefix":"docs/", "limit":0})),
+        ("Capabilities", json!({"unexpected":true})),
+    ] {
+        assert_eq!(
+            kind(&server, "Blobs", selector, request).await,
+            StorageKind::InvalidInput
+        );
+    }
+    assert_eq!(
+        kind(
+            &server,
+            "Blobs",
+            "PresignPut",
+            json!({"key":"docs/a", "ttl_secs":60}),
+        )
+        .await,
+        StorageKind::Unsupported
+    );
+    assert_eq!(
+        server
+            .handle(
+                Admission::Private,
+                "Blobs",
+                "List",
+                json!({"prefix":"docs/"}),
+            )
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let capabilities = server
+        .handle(Admission::Private, "Blobs", "Capabilities", Value::Null)
+        .await
+        .unwrap();
+    assert!(capabilities["max_key_len"].as_u64().unwrap() > 0);
+    assert!(
+        server
+            .handle(
+                Admission::Private,
+                "Blobs",
+                "Delete",
+                json!({"key":"docs/a"}),
+            )
+            .await
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        server
+            .handle(Admission::Private, "Blobs", "Get", json!({"key":"docs/a"}),)
+            .await
+            .unwrap()
+            .is_null()
+    );
+}
+
+#[tokio::test]
+async fn kv_selectors_forward_cas_listing_and_delete() {
+    let server = server();
+    server
+        .handle(
+            Admission::Private,
+            "Kv",
+            "Put",
+            json!({"key":"item", "value":"first"}),
+        )
+        .await
+        .unwrap();
+    let cas = server
+        .handle(
+            Admission::Private,
+            "Kv",
+            "Cas",
+            json!({"key":"item", "value":"second", "expected":{"kind":"version", "version":1}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cas, json!(2));
+    let found = server
+        .handle(Admission::Private, "Kv", "Get", json!({"key":"item"}))
+        .await
+        .unwrap();
+    assert_eq!(found["doc"], "second");
+    let page = server
+        .handle(
+            Admission::Private,
+            "Kv",
+            "List",
+            json!({"prefix":"it", "limit":10}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let capabilities = server
+        .handle(Admission::Private, "Kv", "Capabilities", Value::Null)
+        .await
+        .unwrap();
+    assert!(capabilities["capabilities"].is_array());
+    assert!(
+        server
+            .handle(
+                Admission::Private,
+                "Kv",
+                "Delete",
+                json!({"key":"item", "expected":{"kind":"version", "version":2}}),
+            )
+            .await
+            .unwrap()
+            .as_bool()
+            .unwrap()
     );
 }
 
@@ -400,8 +816,98 @@ async fn put_options_land_as_metadata_that_every_read_returns() {
     assert_eq!(claimed["meta"]["schema"], 3);
 }
 
-#[path = "../watching_fake.rs"]
-mod watching_fake;
+mod watching_fake {
+    //! A memory store whose documents report a native watch fed by a channel, so a
+    //! test decides exactly which invalidations fire.
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::Value;
+    use tinystoragedrivers_api::{DocumentStore, DocumentWatch, async_trait};
+    use tinystoragedrivers_types::{
+        CollectionSpec, Filter, Page, Precondition, Query, Result, Sort, StorageError, Version,
+        Versioned, WatchNotice, WatchOptions,
+    };
+    use tokio::sync::mpsc;
+
+    /// The senders of every watch a [`Docs`] opened, in order.
+    #[derive(Debug, Default)]
+    pub(super) struct Source(pub Mutex<Vec<mpsc::UnboundedSender<Result<Option<WatchNotice>>>>>);
+
+    #[derive(Debug)]
+    pub(super) struct Docs {
+        pub inner: Arc<dyn DocumentStore>,
+        pub source: Arc<Source>,
+        pub fail_open: bool,
+    }
+
+    #[derive(Debug)]
+    struct Feed(mpsc::UnboundedReceiver<Result<Option<WatchNotice>>>);
+
+    #[async_trait]
+    impl DocumentWatch for Feed {
+        async fn next(&mut self) -> Result<Option<WatchNotice>> {
+            self.0.recv().await.unwrap_or(Ok(None))
+        }
+    }
+
+    #[async_trait]
+    impl DocumentStore for Docs {
+        fn capabilities(&self) -> tinystoragedrivers_types::Capabilities {
+            self.inner
+                .capabilities()
+                .with(tinystoragedrivers_types::Capability::Watch)
+        }
+        async fn watch(
+            &self,
+            _collection: &str,
+            _filter: &Filter,
+            _options: &WatchOptions,
+        ) -> Result<Box<dyn DocumentWatch>> {
+            if self.fail_open {
+                return Err(StorageError::backend("private native watch failure"));
+            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.source.0.lock().unwrap().push(tx);
+            Ok(Box::new(Feed(rx)))
+        }
+        async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+            self.inner.ensure_collection(spec).await
+        }
+        async fn validate_collection_spec(&self, spec: &CollectionSpec) -> Result<()> {
+            self.inner.validate_collection_spec(spec).await
+        }
+        async fn get(&self, c: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+            self.inner.get(c, id).await
+        }
+        async fn put(&self, c: &str, id: &str, doc: Value, p: Precondition) -> Result<Version> {
+            self.inner.put(c, id, doc, p).await
+        }
+        async fn delete(&self, c: &str, id: &str, p: Precondition) -> Result<bool> {
+            self.inner.delete(c, id, p).await
+        }
+        async fn query(&self, c: &str, q: &Query) -> Result<Page<Versioned<Value>>> {
+            self.inner.query(c, q).await
+        }
+        async fn count(&self, c: &str, f: &Filter) -> Result<u64> {
+            self.inner.count(c, f).await
+        }
+        async fn delete_where(&self, c: &str, f: &Filter) -> Result<u64> {
+            self.inner.delete_where(c, f).await
+        }
+        async fn claim(
+            &self,
+            c: &str,
+            f: &Filter,
+            s: &[Sort],
+            p: &Value,
+        ) -> Result<Option<Versioned<Value>>> {
+            self.inner.claim(c, f, s, p).await
+        }
+        async fn drop_collection(&self, c: &str) -> Result<()> {
+            self.inner.drop_collection(c).await
+        }
+    }
+}
 
 #[tokio::test]
 async fn a_put_without_options_is_the_pre_v4_request_and_a_forged_created_ms_is_refused() {

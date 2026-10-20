@@ -138,3 +138,7 @@ pub trait StorageTransport: Send + Sync + fmt::Debug {
     /// before opening a watch so no signal is missed.
     fn signals(&self) -> broadcast::Receiver<WatchChanged>;
 }
+
+#[cfg(test)]
+#[path = "transport_contract_tests.rs"]
+mod tests;

@@ -130,7 +130,6 @@ fn storage_failure(error: &StorageError) -> StorageFailure {
         ErrorKind::Serialization => StorageKind::Serialization,
         ErrorKind::Crypto => StorageKind::Crypto,
         ErrorKind::Unavailable => StorageKind::Unavailable,
-        ErrorKind::Backend => StorageKind::Backend,
         _ => StorageKind::Backend,
     };
     StorageFailure { kind }

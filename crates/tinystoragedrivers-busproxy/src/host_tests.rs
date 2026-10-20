@@ -7,6 +7,63 @@ use tinystoragedrivers_bus::STORAGE_INTERFACE;
 use tinystoragedrivers_testkit::MemoryBackend;
 use tinystoragedrivers_types::Scope;
 
+struct SignalEndpoint {
+    signals: Mutex<Option<tokio::sync::broadcast::Sender<WatchChanged>>>,
+    has_signals: bool,
+}
+
+#[async_trait::async_trait]
+impl StorageEndpoint for SignalEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: tinystoragedrivers_api::BlobReader,
+    ) -> Result<Value, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_api::BlobReader)>, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        if self.has_signals {
+            self.signals
+                .lock()
+                .ok()?
+                .as_ref()
+                .map(|signals| signals.subscribe())
+        } else {
+            None
+        }
+    }
+}
+
+fn signal_endpoint(
+    has_signals: bool,
+) -> (SignalEndpoint, tokio::sync::broadcast::Sender<WatchChanged>) {
+    let (signals, _) = tokio::sync::broadcast::channel(8);
+    (
+        SignalEndpoint {
+            signals: Mutex::new(Some(signals.clone())),
+            has_signals,
+        },
+        signals,
+    )
+}
+
 async fn service(object: Object) -> (ObjectService, Connection) {
     let bus = MemoryBus::new();
     Broker::new().spawn(bus.clone());
@@ -48,6 +105,26 @@ fn request_arguments_are_zero_or_one() {
     );
 }
 
+#[test]
+fn host_failures_keep_only_the_denial_label_or_storage_kind_on_the_bus() {
+    let denied: tinybus::Error = HostFailure::Denied("scope-not-authorized").into();
+    assert!(matches!(
+        denied,
+        tinybus::Error::MethodFailed { name, message }
+            if name == ERROR_DENIED && message == "scope-not-authorized"
+    ));
+
+    let storage: tinybus::Error = HostFailure::Storage(StorageFailure {
+        kind: StorageKind::Unavailable,
+    })
+    .into();
+    assert!(matches!(
+        storage,
+        tinybus::Error::MethodFailed { name, message }
+            if name == ERROR_STORAGE && message == "unavailable"
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn each_object_advertises_its_selectors_and_only_secrets_are_confidential() {
     for (object, count) in [
@@ -73,6 +150,61 @@ async fn each_object_advertises_its_selectors_and_only_secrets_are_confidential(
             object == Object::Secrets
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_claims_the_name_and_shutdown_withdraws_every_object() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let endpoint = PerCallerEndpoint::new(|_| None);
+    let served = serve(&host, Arc::new(endpoint)).await.unwrap();
+    assert!(format!("{served:?}").contains("ServedStorage"));
+    assert!(host.name_owner(HOST_NAME).await.unwrap().is_some());
+    served.shutdown().await.unwrap();
+    assert!(host.name_owner(HOST_NAME).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_taken_host_name_rolls_back_the_second_registration() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let first_host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let second_host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let first = serve(&first_host, Arc::new(PerCallerEndpoint::new(|_| None)))
+        .await
+        .unwrap();
+    let second = serve(&second_host, Arc::new(PerCallerEndpoint::new(|_| None))).await;
+    assert!(second.is_err());
+    assert_eq!(
+        first_host.name_owner(HOST_NAME).await.unwrap(),
+        Some(first_host.unique_name().unwrap())
+    );
+    first.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_object_registration_does_not_claim_the_host_name() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    host.close().await.unwrap();
+
+    let result = serve(&host, Arc::new(PerCallerEndpoint::new(|_| None))).await;
+
+    assert!(result.is_err());
+    assert_eq!(observer.name_owner(HOST_NAME).await.unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -197,4 +329,113 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     shared.forward_watch_signals(&caller);
     let second = epoch_of().expect("the rebound caller is forwarded");
     assert_ne!(first, second, "the stale forwarder is replaced on rebind");
+    for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn watch_signals_are_forwarded_only_to_the_bound_caller() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller_name = caller.unique_name().unwrap();
+    let path = watch_path(&caller_name).unwrap();
+    let rule = tinybus::MatchRule {
+        kind: Some(tinybus::MessageKind::Signal),
+        sender: None,
+        interface: Some(interface()),
+        member: Some(member(WATCH_MEMBER)),
+        path: Some(path.clone()),
+        path_namespace: None,
+    };
+    let mut caller_signals = caller.add_match(rule.clone()).await.unwrap();
+    let mut observer_signals = observer.add_match(rule).await.unwrap();
+    let (endpoint, sender) = signal_endpoint(true);
+    assert_eq!(endpoint.watch_epoch(&caller_name), 0);
+    let shared = Shared {
+        connection: host.downgrade(),
+        endpoint: Arc::new(endpoint),
+        forwarders: Mutex::new(HashMap::new()),
+    };
+
+    shared.forward_watch_signals(&caller_name);
+    for index in 0..16 {
+        sender
+            .send(WatchChanged {
+                watch_id: format!("watch-{index}"),
+                notice: tinystoragedrivers_bus::WatchNotice::Invalidated { cursor: None },
+            })
+            .unwrap();
+    }
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let message = caller_signals.recv().await.unwrap();
+            if message.body[0]["watch_id"] == "watch-15" {
+                break message;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(message.header.path, Some(path));
+    assert_eq!(
+        message.header.member.as_ref().map(MemberName::as_str),
+        Some(WATCH_MEMBER)
+    );
+    assert_eq!(message.body[0]["watch_id"], "watch-15");
+    observer.name_owner(HOST_NAME).await.unwrap();
+    assert!(observer_signals.try_recv().is_err());
+    for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
+        task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_or_closed_watch_source_does_not_leave_a_live_forwarder() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = BusName::new(":1.7").unwrap();
+    let (missing, _) = signal_endpoint(false);
+    let shared = Shared {
+        connection: connection.downgrade(),
+        endpoint: Arc::new(missing),
+        forwarders: Mutex::new(HashMap::new()),
+    };
+    shared.forward_watch_signals(&caller);
+    assert!(shared.forwarders.lock().unwrap().is_empty());
+
+    let (closed, sender) = signal_endpoint(true);
+    let closed = Arc::new(closed);
+    let shared = Shared {
+        connection: connection.downgrade(),
+        endpoint: Arc::clone(&closed) as Arc<dyn StorageEndpoint>,
+        forwarders: Mutex::new(HashMap::new()),
+    };
+    shared.forward_watch_signals(&caller);
+    drop(sender);
+    closed.signals.lock().unwrap().take();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            shared.forward_watch_signals(&caller);
+            if shared.forwarders.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("a closed watch source is removed from the forwarding table");
 }

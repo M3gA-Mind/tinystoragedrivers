@@ -71,6 +71,28 @@ async fn read_window_assembles_short_pages_cut_by_the_byte_cap() {
 }
 
 #[tokio::test]
+async fn streams_forward_seal_info_and_listing_results() {
+    let storage = loopback().await;
+    let streams = storage.streams();
+    streams.append("seal-me", json!({"value":1})).await.unwrap();
+    let initial = streams.info("seal-me").await.unwrap().unwrap();
+    assert_eq!(initial.len, 1);
+    assert!(initial.sealed_ms.is_none());
+
+    let outcome = streams.seal("seal-me").await.unwrap();
+    assert_eq!(outcome.len, 1);
+    let sealed = streams.info("seal-me").await.unwrap().unwrap();
+    assert!(sealed.sealed_ms.is_some());
+    assert!(
+        streams
+            .streams("seal")
+            .await
+            .unwrap()
+            .contains(&"seal-me".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn an_unreadable_record_is_refused_before_native_append() {
     let storage = loopback().await;
     let streams = storage.streams();

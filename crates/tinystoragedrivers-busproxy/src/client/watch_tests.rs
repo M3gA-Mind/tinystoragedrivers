@@ -86,3 +86,10 @@ async fn a_watch_close_is_best_effort_after_runtime_shutdown() {
     assert!(format!("{watch:?}").contains("BusWatch"));
     std::thread::spawn(move || drop(watch)).join().unwrap();
 }
+
+#[tokio::test]
+async fn a_watch_drop_attempts_close_while_a_runtime_is_available() {
+    let (watch, _signals) = make_watch("open-watch", 1);
+    drop(watch);
+    tokio::task::yield_now().await;
+}

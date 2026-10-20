@@ -265,3 +265,7 @@ impl DocumentStore for BusDocuments {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "documents_tests.rs"]
+mod tests;

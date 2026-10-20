@@ -158,3 +158,7 @@ impl StreamStore for BusStreams {
         self.call("Streams", &request, None).await
     }
 }
+
+#[cfg(test)]
+#[path = "streams_tests.rs"]
+mod tests;

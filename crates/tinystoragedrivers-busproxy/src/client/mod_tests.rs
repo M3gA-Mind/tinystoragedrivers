@@ -173,7 +173,42 @@ async fn connected_bundle_exposes_all_six_ports() {
     let _ = storage.kv();
     let _ = storage.blobs();
     let _ = storage.queues();
-    let _ = storage.secrets();
+    let secrets = storage.secrets();
+    assert_eq!(secrets.backend_name(), "tinybus");
+    let debug = format!("{secrets:?}");
+    assert!(debug.contains("BusSecrets"));
+    assert!(!debug.contains("secret-value"));
+}
+
+#[tokio::test]
+async fn wire_debug_and_request_plumbing_keep_the_transport_opaque() {
+    let server = StorageServer::new(memory_storage(&Scope::new("wire-plumbing").unwrap()));
+    let wire = Wire::new(Arc::new(Loopback::new(
+        Arc::new(server),
+        Admission::Private,
+    )));
+    let debug = format!("{wire:?}");
+    assert!(debug.contains("Wire"));
+    assert!(!debug.contains("wire-plumbing"));
+    let capabilities: tinystoragedrivers_bus::KvCapabilitiesReply = wire
+        .call(crate::Object::Kv, "Capabilities", &(), None)
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .capabilities
+            .iter()
+            .all(|name| name != "fencing")
+    );
+    assert!(Arc::strong_count(wire.transport()) > 0);
+    let bundle = BusStorage {
+        wire,
+        capabilities: tinystoragedrivers_types::Capabilities::none(),
+        kv_capabilities: tinystoragedrivers_types::Capabilities::none(),
+        blob_capabilities: BlobCapabilities::default(),
+        queue_features: QueueFeatures::default(),
+    };
+    assert!(format!("{bundle:?}").contains("BusStorage"));
 }
 
 #[tokio::test]

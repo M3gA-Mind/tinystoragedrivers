@@ -178,6 +178,42 @@ async fn callback_rejects_selector_fields_and_invalid_collections() {
     );
 }
 
+#[tokio::test]
+async fn serve_collection_registers_once_at_its_declared_endpoint() {
+    let storage = memory_storage(&Scope::new("callback-register").unwrap());
+    let docs = storage.documents().clone();
+    let host = ModuleHost::new(Broker::new());
+    let binding = host
+        .prepare_host_callbacks(vec![endpoint("/documents").unwrap()])
+        .await
+        .unwrap();
+    serve_collection(
+        &binding,
+        "/documents".parse().unwrap(),
+        docs.clone(),
+        "learned",
+    )
+    .await
+    .unwrap();
+    assert!(
+        serve_collection(&binding, "/documents".parse().unwrap(), docs, "learned",)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn callback_dispatch_rejects_unknown_members_without_reaching_storage() {
+    let storage = memory_storage(&Scope::new("callback-member").unwrap());
+    let (_binding, service) = service(storage.documents().clone(), "learned").await;
+    assert!(
+        service
+            .dispatch(&"List".parse().unwrap(), json!([]))
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 fn callback_failure_mapping_is_content_free() {
     use tinystoragedrivers_types::{Capability, ErrorKind, StorageError};

@@ -86,6 +86,38 @@ fn watch_signals_must_be_a_single_well_formed_notice() {
     assert!(decode_signal(&signal(json!([{"bad": 1}]))).is_none());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn connected_transport_supports_timeout_configuration_and_debug_redaction() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let endpoint = crate::PerCallerEndpoint::new(|_| {
+        Some(crate::StorageServer::new(
+            tinystoragedrivers_testkit::memory_storage(
+                &tinystoragedrivers_types::Scope::new("transport-unit").unwrap(),
+            ),
+        ))
+    });
+    let served = crate::serve(&host, Arc::new(endpoint)).await.unwrap();
+    let module = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let transport = BusTransport::connect(module)
+        .await
+        .unwrap()
+        .with_timeout(Duration::from_secs(2));
+    assert!(format!("{transport:?}").contains("BusTransport"));
+    let reply = transport
+        .call(Object::Kv, "Capabilities", Value::Null)
+        .await
+        .unwrap();
+    assert!(reply["capabilities"].is_array());
+    drop(transport);
+    served.shutdown().await.unwrap();
+}
+
 /// A host-less broker with one module connection attached to a transport.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transport_without_a_host_cannot_be_built_and_debug_hides_the_wire() {
