@@ -20,6 +20,7 @@ tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tinystoragedrivers-secrets = { workspace = true, features = ["memory"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 
 [lints]

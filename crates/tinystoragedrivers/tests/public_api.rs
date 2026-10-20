@@ -18,19 +18,28 @@ async fn a_memory_url_opens_a_conforming_backend() {
     conformance::run(backend.as_ref(), false).await;
 }
 
-#[cfg(feature = "secrets")]
+#[cfg(all(feature = "secrets", feature = "document"))]
 #[tokio::test]
 async fn the_secrets_feature_re_exports_the_secret_store_drivers() {
     use std::sync::Arc;
-    use tinystoragedrivers::Scope;
     use tinystoragedrivers::secrets::{DerivedKeys, DocumentSecrets, SecretStore, crypto};
+    use tinystoragedrivers::v2::{api, types};
 
-    let backend = tinystoragedrivers::open(&StorageConfig::parse("memory").unwrap())
-        .await
-        .unwrap();
-    let storage = backend.for_scope(&Scope::local()).unwrap();
+    let scope = types::Scope::new("facade-secrets-test").unwrap();
+    let connection = tinystoragedrivers_document::memory::MemoryConnection::new();
+    let scoped = connection.for_scope(scope.clone());
+    let unsupported = api::Storage::unsupported();
+    let storage = api::Storage::new(
+        scoped.documents(),
+        scoped.streams(),
+        Arc::clone(unsupported.kv()),
+        Arc::clone(unsupported.blobs()),
+        Arc::clone(unsupported.queues()),
+        Arc::clone(unsupported.secrets()),
+    );
     let secrets = DocumentSecrets::new(
         &storage,
+        scope,
         Arc::new(DerivedKeys::new(crypto::generate_key().unwrap())),
     );
     secrets.set("api_key", b"sk-live").await.unwrap();

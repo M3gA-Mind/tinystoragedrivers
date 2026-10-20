@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use tinystoragedrivers_api::SecretStore;
 use tinystoragedrivers_bus::{MAX_FRAME_BYTES, MAX_INLINE_BLOB_BYTES};
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope,
     ScopedStorage, StorageBackend, WatchNotice, WatchOptions, WriteOptions, conformance,
 };
-use tinystoragedrivers_secrets::{MemorySecrets, SecretStore};
+use tinystoragedrivers_secrets::MemorySecrets;
 use tokio::io::AsyncReadExt;
 
 use super::*;
@@ -322,11 +323,10 @@ async fn a_native_watch_becomes_signals_and_closes_with_the_client() {
 async fn secrets_need_the_confidential_route() {
     let private = rig(Admission::Private).await;
     let error = private.bus.secrets().set("k", b"v").await.unwrap_err();
-    assert!(matches!(
+    assert_eq!(
         error.kind(),
-        tinystoragedrivers_core::ErrorKind::Backend
-            | tinystoragedrivers_core::ErrorKind::Unsupported(_)
-    ));
+        tinystoragedrivers_api::types::ErrorKind::Backend
+    );
     assert!(private.bus.secrets().get("k").await.is_err());
 
     let confidential = rig(Admission::Confidential).await;
@@ -473,7 +473,10 @@ async fn secret_handles_never_print_and_report_their_backend() {
     let rig = rig(Admission::Confidential).await;
     let secrets = rig.bus.secrets();
     assert_eq!(secrets.backend_name(), "bus");
-    assert!(secrets.get("").await.is_err());
+    assert_eq!(
+        secrets.get("").await.unwrap_err().kind(),
+        tinystoragedrivers_api::types::ErrorKind::InvalidInput
+    );
     assert!(secrets.delete("").await.is_err());
     assert!(secrets.list("a\u{0}").await.is_err());
     assert!(secrets.set("", b"x").await.is_err());

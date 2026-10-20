@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Observe real Linux fsync failure after ledger publication and exact retry."""
+"""Observe real Linux failures across generic secret-file publication."""
 import argparse
 import datetime
 import shlex
@@ -14,7 +14,7 @@ sys.dont_write_bytecode = True
 from native_provenance import capture_provenance, profile_directory
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST = "file::migration::tests::native_io_fault_preserves_source_and_reconciles_publication"
+TEST = "file::tests::native_generic_publication_faults_preserve_or_report_the_published_bytes"
 
 
 def main():
@@ -42,15 +42,15 @@ def main():
                           env=environment, capture_output=True, text=True, check=True)
     (evidence / "baseline.stdout").write_text(base.stdout)
     (evidence / "baseline.stderr").write_text(base.stderr)
-    # Select the actual worker's first directory barrier after a ledger rename;
-    # count fsync ordinals per tracee because strace injection uses that scope.
+    # Select the actual worker's first directory barrier after publishing the
+    # generic secrets file; strace injection ordinals are per tracee.
     counters, published, ordinal = {}, set(), None
     for line in trace.read_text().splitlines():
         match = re.match(r"(\d+)\s+(.*)", line)
         if not match:
             continue
         pid, call = match.groups()
-        if call.startswith("renameat(") and '"secrets.enc.imports"' in call and call.endswith("= 0"):
+        if call.startswith("renameat(") and '"secrets.enc.' in call and '"secrets.enc"' in call and call.endswith("= 0"):
             published.add(pid)
         if call.startswith("fsync("):
             counters[pid] = counters.get(pid, 0) + 1
@@ -58,14 +58,14 @@ def main():
                 ordinal = counters[pid]
                 break
     if ordinal is None:
-        raise RuntimeError("no observed native ledger directory barrier")
+        raise RuntimeError("no observed native secret-file directory barrier")
     observed_total = 0
     for label, syscall, selected in [("stage-flush", "fsync", 1),
                                      ("publication-barrier", "fsync", ordinal),
                                      ("published-file-flush", "fsync", ordinal + 1),
                                      ("rename", "renameat", 1)]:
         injected = evidence / (label + ".trace")
-        env = {**environment, "TSD_EXPECT_NATIVE_IO_FAULT": "1"}
+        env = {**environment, "TSD_EXPECT_NATIVE_IO_FAULT": label}
         result = subprocess.run(["strace", "-f", "-qq", "-yy", "-e", "trace=fsync,renameat",
                                  "-e", f"inject={syscall}:error=EIO:when={selected}", "-o", str(injected), *command],
                                 env=env, capture_output=True, text=True)
