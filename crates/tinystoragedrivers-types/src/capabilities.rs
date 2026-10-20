@@ -53,10 +53,12 @@ pub enum Capability {
     CrossProcessCas,
     /// Secret writes support atomic preconditions.
     ConditionalSecretWrites,
+    /// Bounded keyset pagination over physical blob objects.
+    BlobListing,
 }
 
 impl Capability {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::Documents,
         Self::Streams,
         Self::Kv,
@@ -79,6 +81,7 @@ impl Capability {
         Self::SharedAcrossProcesses,
         Self::CrossProcessCas,
         Self::ConditionalSecretWrites,
+        Self::BlobListing,
     ];
     const fn bit(self) -> u32 {
         match self {
@@ -104,6 +107,7 @@ impl Capability {
             Self::SharedAcrossProcesses => 1 << 19,
             Self::CrossProcessCas => 1 << 20,
             Self::ConditionalSecretWrites => 1 << 21,
+            Self::BlobListing => 1 << 22,
         }
     }
 }
@@ -132,6 +136,7 @@ impl fmt::Display for Capability {
             Self::SharedAcrossProcesses => "shared_across_processes",
             Self::CrossProcessCas => "cross_process_cas",
             Self::ConditionalSecretWrites => "conditional_secret_writes",
+            Self::BlobListing => "blob_listing",
         })
     }
 }

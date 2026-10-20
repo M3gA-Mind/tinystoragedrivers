@@ -26,7 +26,10 @@ mod stream;
 pub mod value;
 mod watch;
 
-pub use blob::{Blob, BlobMeta, SEALED_BLOB_PREFIX, TreeEntry, TreeFile, is_reserved_blob_key};
+pub use blob::{
+    Blob, BlobListEntry, BlobListPage, BlobMeta, MAX_BLOB_LIST_PAGE_ITEMS, SEALED_BLOB_PREFIX,
+    TreeEntry, TreeFile, is_reserved_blob_key,
+};
 pub use capabilities::{Capabilities, Capability};
 pub use document::{
     CollectionSpec, Cursor, CursorPosition, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN,
