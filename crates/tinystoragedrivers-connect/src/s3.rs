@@ -26,6 +26,9 @@ impl S3ConnectionConfig {
     /// Returns `InvalidInput` for malformed URLs, embedded credentials, or
     /// unsupported parameters.
     pub fn parse(value: &str) -> Result<Self> {
+        if has_dot_segment(value) {
+            return Err(StorageError::invalid_input("invalid s3 object prefix"));
+        }
         let url = url::Url::parse(value)
             .map_err(|_| StorageError::invalid_input("invalid s3 storage URL"))?;
         if url.scheme() != "s3"
@@ -173,10 +176,6 @@ impl S3Connection {
     }
 }
 
-#[cfg(test)]
-#[path = "s3_tests.rs"]
-mod tests;
-
 fn validate_prefix(prefix: &str) -> Result<()> {
     use tinystoragedrivers_types::Key;
     if prefix.len() > tinystoragedrivers_types::MAX_KEY_LEN || prefix.contains('\0') {
@@ -191,3 +190,19 @@ fn validate_prefix(prefix: &str) -> Result<()> {
     Key::new(prefix.to_owned())?;
     Ok(())
 }
+
+fn has_dot_segment(value: &str) -> bool {
+    let Some((_, remainder)) = value.split_once("://") else {
+        return false;
+    };
+    let end = remainder.find(['?', '#']).unwrap_or(remainder.len());
+    let authority_end = remainder[..end].find('/').unwrap_or(end);
+    remainder[authority_end..end].split('/').any(|segment| {
+        let normalized = segment.to_ascii_lowercase().replace("%2e", ".");
+        normalized == "." || normalized == ".."
+    })
+}
+
+#[cfg(test)]
+#[path = "s3_tests.rs"]
+mod tests;
