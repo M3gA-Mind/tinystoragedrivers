@@ -117,3 +117,7 @@ fn is_file_path(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("db") || ext.eq_ignore_ascii_case("sqlite"))
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
