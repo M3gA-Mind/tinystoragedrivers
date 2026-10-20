@@ -10,6 +10,11 @@ description = "In-memory storage and conformance tools for tinystoragedrivers co
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 tinystoragedrivers-api = { workspace = true }
+tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite"] }
+tinystoragedrivers-kv = { workspace = true, features = ["memory"] }
+tinystoragedrivers-blob = { workspace = true, features = ["memory"] }
+tinystoragedrivers-queue = { workspace = true, features = ["memory"] }
+tinystoragedrivers-secrets = { workspace = true, features = ["memory"] }
 async-trait = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
@@ -17,9 +22,8 @@ tokio = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tinystoragedrivers-document = { path = "../tinystoragedrivers-document", version = "1.0.0", default-features = false, features = ["memory", "sqlite"] }
 tempfile = { workspace = true }
-tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "1.0.0", features = ["sqlite"] }
+tinystoragedrivers-connect = { workspace = true, features = ["sqlite"] }
 
 [lints]
 workspace = true

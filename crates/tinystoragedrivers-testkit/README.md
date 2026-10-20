@@ -1,7 +1,23 @@
 # tinystoragedrivers-testkit
 
 Shared testing tools for consumers and engine crates. Add this package as a
-`dev-dependency`; it has no storage engine dependency in its normal build.
+`dev-dependency`; its real memory engines and SQLite test support then stay out
+of consumers' normal dependency trees.
+
+Build a complete in-memory storage bundle from the six native primitive
+engines, or request multiple cached handles from one scope-aware backend:
+
+```rust,ignore
+use tinystoragedrivers_testkit::{memory_backend, memory_storage};
+use tinystoragedrivers_types::Scope;
+
+let storage = memory_storage(Scope::new("test")?);
+let backend = memory_backend();
+let scoped = backend.for_scope(&Scope::new("tenant")?)?;
+```
+
+The bundle is not a document-backed approximation. Documents, streams, KV,
+blobs, queues, and secrets each use their real memory engine.
 
 The queue conformance suite can be run against any `QueueStore`:
 

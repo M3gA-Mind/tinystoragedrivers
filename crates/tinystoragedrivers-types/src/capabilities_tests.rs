@@ -59,11 +59,11 @@ fn capability_wire_names_and_display_names_cover_every_variant() {
         (Capability::StreamSeal, "stream_seal"),
         (Capability::SharedAcrossProcesses, "shared_across_processes"),
         (Capability::CrossProcessCas, "cross_process_cas"),
+        (Capability::BlobListing, "blob_listing"),
         (
             Capability::ConditionalSecretWrites,
             "conditional_secret_writes",
         ),
-        (Capability::BlobListing, "blob_listing"),
     ];
     for (capability, name) in cases {
         assert_eq!(capability.to_string(), name);
