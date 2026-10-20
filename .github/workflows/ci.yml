@@ -320,6 +320,18 @@ jobs:
       - name: Test the queue backend against RabbitMQ
         run: cargo test -p tinystoragedrivers-rabbitmq --all-features
 
+      - name: Check queue engine feature isolation
+        run: |
+          for feature in memory document rabbitmq; do
+            cargo check -p tinystoragedrivers-queue --no-default-features --features "$feature"
+          done
+
+      - name: Test the queue primitive against RabbitMQ
+        run: cargo test -p tinystoragedrivers-queue --all-features
+
+      - name: Lint the queue primitive
+        run: cargo clippy -p tinystoragedrivers-queue --all-targets --all-features -- -D warnings
+
       - name: Test the facade's rabbitmq feature
         run: cargo test -p tinystoragedrivers --features rabbitmq
 
