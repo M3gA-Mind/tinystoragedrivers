@@ -1,7 +1,7 @@
 //! Choosing and opening a backend from a URL.
 //!
 //! A host reads one string from its configuration (`memory`,
-//! `sqlite:/var/lib/app`, `mongodb://db.internal/openhuman`) and hands it to
+//! `sqlite:/var/lib/app`, or `mongodb://db.internal/openhuman`) and hands it to
 //! [`StorageConfig::parse`] then [`open`]. A URL for a driver this build did
 //! not compile in is rejected with the Cargo feature to enable, so a
 //! misconfigured deployment fails at boot with an actionable message.
@@ -11,7 +11,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tinystoragedrivers_core::{MemoryStorage, Result, StorageBackend, StorageError};
+use tinystoragedrivers_api::{Storage, StorageBackend};
+use tinystoragedrivers_types::{Result, StorageError};
 
 /// A parsed storage location.
 ///
@@ -53,7 +54,7 @@ impl StorageConfig {
     ///
     /// Accepted forms: `memory`; `sqlite:<path>`; a bare path (absolute, or
     /// starting with `./` or `../`), read as SQLite;
-    /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`;
+    /// `mongodb://…/<database>` and `mongodb+srv://…/<database>`; and
     /// `file:<dir>`.
     ///
     /// # Errors
@@ -354,28 +355,186 @@ impl fmt::Debug for StorageConfig {
     reason = "the network drivers this dispatches to connect asynchronously"
 )]
 pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
-    match config {
-        StorageConfig::Memory => Ok(Arc::new(MemoryStorage::new())),
+    let engine = match config {
+        StorageConfig::Memory => {
+            Engine::Memory(tinystoragedrivers_document::memory::MemoryConnection::new())
+        }
         #[cfg(feature = "file")]
-        StorageConfig::File { dir } => Ok(Arc::new(tinystoragedrivers_file::FileStorage::open(
-            dir.clone(),
-        )?)),
+        StorageConfig::File { dir } => {
+            Engine::File(tinystoragedrivers_connect::FileConnection::open(dir)?)
+        }
         #[cfg(feature = "sqlite")]
-        StorageConfig::Sqlite { path } => Ok(Arc::new(
-            tinystoragedrivers_sqlite::SqliteStorage::open(path)?,
-        )),
+        StorageConfig::Sqlite { path } => {
+            Engine::Sqlite(tinystoragedrivers_connect::SqliteConnection::open(path)?)
+        }
         #[cfg(feature = "mongodb")]
-        StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
-            tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
-        )),
+        StorageConfig::MongoDb { uri, database } => {
+            let connection =
+                tinystoragedrivers_connect::MongoConnection::connect(uri, database).await?;
+            let kv_factory = tinystoragedrivers_kv::MongoKvFactory::new(connection.clone()).await?;
+            Engine::Mongo {
+                connection,
+                kv_factory,
+            }
+        }
         #[allow(
             unreachable_patterns,
             reason = "reachable unless every driver feature is enabled"
         )]
-        other => Err(StorageError::invalid_input(format!(
-            "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
-            other.driver()
-        ))),
+        other => {
+            return Err(StorageError::invalid_input(format!(
+                "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
+                other.driver()
+            )));
+        }
+    };
+    Ok(Arc::new(CompositeBackend::new(engine)))
+}
+
+#[derive(Debug)]
+enum Engine {
+    Memory(tinystoragedrivers_document::memory::MemoryConnection),
+    #[cfg(feature = "file")]
+    File(tinystoragedrivers_connect::FileConnection),
+    #[cfg(feature = "sqlite")]
+    Sqlite(tinystoragedrivers_connect::SqliteConnection),
+    #[cfg(feature = "mongodb")]
+    Mongo {
+        connection: tinystoragedrivers_connect::MongoConnection,
+        kv_factory: tinystoragedrivers_kv::MongoKvFactory,
+    },
+}
+
+#[derive(Debug)]
+struct CompositeBackend {
+    engine: Engine,
+    handles: std::sync::Mutex<std::collections::HashMap<String, Storage>>,
+}
+
+impl CompositeBackend {
+    fn new(engine: Engine) -> Self {
+        Self {
+            engine,
+            handles: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn open_scope(&self, scope: &tinystoragedrivers_types::Scope) -> Result<Storage> {
+        use std::sync::Arc;
+        use tinystoragedrivers_api::Storage;
+
+        let (documents, streams, kv, blobs, queues, secrets) = match &self.engine {
+            Engine::Memory(connection) => {
+                let scoped = connection.for_scope(scope.clone());
+                let docs = scoped.documents();
+                let streams = scoped.streams();
+                (
+                    docs.clone(),
+                    streams,
+                    Arc::new(tinystoragedrivers_kv::MemoryKv::new(scope.clone()))
+                        as Arc<dyn tinystoragedrivers_api::KvStore>,
+                    Arc::new(tinystoragedrivers_blob::MemoryBlobStore::new(scope.clone()))
+                        as Arc<dyn tinystoragedrivers_api::BlobStore>,
+                    Arc::new(tinystoragedrivers_queue::MemoryQueue::new())
+                        as Arc<dyn tinystoragedrivers_api::QueueStore>,
+                    Arc::new(tinystoragedrivers_secrets::MemorySecrets::new())
+                        as Arc<dyn tinystoragedrivers_api::SecretStore>,
+                )
+            }
+            #[cfg(feature = "file")]
+            Engine::File(connection) => {
+                let docs = Arc::new(tinystoragedrivers_document::FileDocuments::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(tinystoragedrivers_document::FileStreams::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(tinystoragedrivers_kv::FileKv::new(
+                    connection.clone(),
+                    scope.clone(),
+                )?) as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::FileBlobStore::from_connection(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&docs))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                (docs, streams, kv, blobs, queues, unsupported_secrets())
+            }
+            #[cfg(feature = "sqlite")]
+            Engine::Sqlite(connection) => {
+                let docs = Arc::new(tinystoragedrivers_document::sqlite::SqliteDocuments::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(tinystoragedrivers_document::sqlite::SqliteStreams::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(tinystoragedrivers_kv::SqliteKv::new(
+                    connection.clone(),
+                    scope.clone(),
+                )?) as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::SqliteBlobStore::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&docs))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                (docs, streams, kv, blobs, queues, unsupported_secrets())
+            }
+            #[cfg(feature = "mongodb")]
+            Engine::Mongo {
+                connection,
+                kv_factory,
+            } => {
+                let docs = Arc::new(tinystoragedrivers_document::mongodb::MongoDocuments::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(tinystoragedrivers_document::mongodb::MongoStreams::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(kv_factory.for_scope(scope))
+                    as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::MongoBlobStore::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&docs))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                (docs, streams, kv, blobs, queues, unsupported_secrets())
+            }
+        };
+        Ok(Storage::new(documents, streams, kv, blobs, queues, secrets))
+    }
+}
+
+#[cfg(any(feature = "file", feature = "sqlite", feature = "mongodb"))]
+fn unsupported_secrets() -> Arc<dyn tinystoragedrivers_api::SecretStore> {
+    Storage::unsupported().secrets().clone()
+}
+
+impl StorageBackend for CompositeBackend {
+    fn capabilities(&self) -> tinystoragedrivers_types::Capabilities {
+        tinystoragedrivers_types::Capabilities::none()
+    }
+
+    fn for_scope(&self, scope: &tinystoragedrivers_types::Scope) -> Result<Storage> {
+        let key = scope.as_str().to_owned();
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| StorageError::backend("storage scope cache was poisoned"))?;
+        if let Some(storage) = handles.get(&key) {
+            return Ok(storage.clone());
+        }
+        let storage = self.open_scope(scope)?;
+        handles.insert(key, storage.clone());
+        Ok(storage)
     }
 }
 

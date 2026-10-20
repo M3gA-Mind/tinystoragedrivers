@@ -83,11 +83,16 @@ fn persisted_record_validation_and_mongo_error_mapping_are_typed() {
 
 #[tokio::test]
 async fn unreachable_mongodb_errors_are_returned_from_each_public_operation() {
-    let client = mongodb::Client::with_uri_str(
-        "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=25&connectTimeoutMS=25",
-    )
-    .await
-    .unwrap();
+    let uri = "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=25&connectTimeoutMS=25";
+    assert_eq!(
+        MongoConnection::connect(uri, "tsd_kv_unreachable_test")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unavailable
+    );
+
+    let client = mongodb::Client::with_uri_str(uri).await.unwrap();
     let store = MongoKv {
         collection: client
             .database("tsd_kv_unreachable_test")
@@ -139,9 +144,12 @@ async fn live_native_kv_contract() {
         .unwrap();
     let scope_name = format!("kv-test-{}-{suffix}", std::process::id());
     let scope = Scope::new(&scope_name).unwrap();
-    let store = MongoKv::new(connection.clone(), scope.clone())
-        .await
-        .unwrap();
+    let factory = MongoKvFactory::new(connection.clone()).await.unwrap();
+    assert!(format!("{factory:?}").contains("MongoKvFactory"));
+    let store = factory.for_scope(&scope);
+    let reopened_scope = factory.for_scope(&scope);
+    let other_scope = Scope::new(&format!("{scope_name}-other")).unwrap();
+    let other_store = factory.for_scope(&other_scope);
     assert!(store.capabilities().contains(Capability::Kv));
     assert!(store.capabilities().contains(Capability::Ttl));
     assert!(
@@ -164,6 +172,35 @@ async fn live_native_kv_contract() {
 
     let version = store.put("p/b", json!([1, null])).await.unwrap();
     assert_eq!(version, Version::FIRST);
+    assert_eq!(
+        store.get("p/b").await.unwrap().unwrap().doc,
+        json!([1, null])
+    );
+    assert_eq!(
+        reopened_scope.get("p/b").await.unwrap().unwrap().doc,
+        json!([1, null])
+    );
+    assert!(other_store.get("p/b").await.unwrap().is_none());
+    let compatibility = MongoKv::new(
+        connection.clone(),
+        Scope::new(&format!("{scope_name}-compat")).unwrap(),
+    )
+    .await
+    .unwrap();
+    compatibility
+        .put("p/b", json!("compatibility constructor"))
+        .await
+        .unwrap();
+    assert_eq!(
+        compatibility.get("p/b").await.unwrap().unwrap().doc,
+        json!("compatibility constructor")
+    );
+    assert!(store.get("p/b").await.unwrap().is_some());
+    other_store.put("p/b", json!("other scope")).await.unwrap();
+    assert_eq!(
+        other_store.get("p/b").await.unwrap().unwrap().doc,
+        json!("other scope")
+    );
     assert_eq!(
         store.get("p/b").await.unwrap().unwrap().doc,
         json!([1, null])
@@ -253,5 +290,37 @@ async fn live_native_kv_contract() {
     );
     assert_eq!(store.put("p/expiring", json!(4)).await.unwrap(), Version(2));
 
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mongo_factory_reports_duplicate_scope_key_index_failure() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let database_name = format!("tsd_epic8131_kv_bad_index_{}_{suffix}", std::process::id());
+    let connection = MongoConnection::connect(&uri, &database_name)
+        .await
+        .unwrap();
+    let collection = connection.database().collection::<Document>(COLLECTION);
+    collection
+        .insert_many([
+            doc! {"_id": "first", "scope": "same", "key": "duplicate"},
+            doc! {"_id": "second", "scope": "same", "key": "duplicate"},
+        ])
+        .await
+        .unwrap();
+
+    let error = MongoKvFactory::new(connection.clone()).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(
+        error
+            .message()
+            .contains("MongoDB could not create the KV index")
+    );
     connection.database().drop().await.unwrap();
 }

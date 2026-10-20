@@ -19,6 +19,7 @@ Prefer tasks that can be implemented and reviewed independently. Include short
 code snippets when they remove ambiguity, but do not paste entire future files
 into the plan.
 
-See [`storage-rollout.md`](storage-rollout.md) and [`schema-v2.md`](schema-v2.md).
-
-[`queue-store.md`](queue-store.md) delivers the `QueueStore` port.
+Current specifications describe the v2 architecture in
+[`../specs/primitives-v2.md`](../specs/primitives-v2.md). The remaining plans
+track focused callback, watch, and scope-purge work; completed v1 storage and
+schema rollout plans were removed after the implementation moved to v2.

@@ -72,7 +72,7 @@ fn sqlite_reads_blob_from_historical_v1_database_fixture() {
     let path = directory.path().join("storage.db");
     std::fs::write(
         &path,
-        include_bytes!("../../tinystoragedrivers-sqlite/tests/fixtures/storage-be94f75.db"),
+        include_bytes!("../../../tests/fixtures/storage-be94f75.db"),
     )
     .unwrap();
     let (_, clock) = connection_clock(1_000);

@@ -87,6 +87,7 @@ class ReleaseLocks(unittest.TestCase):
         self.assertEqual(self.release_files(), before)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
 
+
     def test_wrong_release_package_stops_before_staging(self):
         before = self.release_files()
         result = self.run_command(sys.executable, str(HELPER), "2.0.0", "absent", check=False)
@@ -153,6 +154,28 @@ class ReleaseLocks(unittest.TestCase):
         self.assertFalse((self.root / new_lock).exists())
         self.assertEqual((self.root / "unrelated.txt").read_bytes(), unrelated)
         self.assertEqual(self.run_command("git", "diff", "--cached", "--name-only").stdout, "")
+
+
+class ReleaseWorkflowRefs(unittest.TestCase):
+    def test_release_jobs_allow_canonical_main_and_exact_fork_epic(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        condition = ("(github.repository == 'tinyhumansai/tinystoragedrivers' && "
+                    "github.ref == 'refs/heads/main') || "
+                    "(github.repository == 'senamakel/tinystoragedrivers' && "
+                    "github.ref == 'refs/heads/epic/8131-storage-primitives')")
+        self.assertEqual(workflow.count(condition), 2)
+
+        def allowed(repository, ref):
+            return (repository, ref) in {
+                ("tinyhumansai/tinystoragedrivers", "refs/heads/main"),
+                ("senamakel/tinystoragedrivers", "refs/heads/epic/8131-storage-primitives"),
+            }
+
+        self.assertTrue(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/main"))
+        self.assertTrue(allowed("senamakel/tinystoragedrivers",
+                                "refs/heads/epic/8131-storage-primitives"))
+        self.assertFalse(allowed("senamakel/tinystoragedrivers", "refs/heads/main"))
+        self.assertFalse(allowed("tinyhumansai/tinystoragedrivers", "refs/heads/feature"))
 
 
 if __name__ == "__main__":

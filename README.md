@@ -1,188 +1,78 @@
-# tinystoragedrivers
+# TinyStorageDrivers
 
-Pluggable storage for OpenHuman and the libraries it hosts. Every crate that
-persists data (sessions, workflow runs, approvals, schedules) builds its records
-on one small set of ports. The host chooses the backend once at boot, from a URL:
+TinyStorageDrivers provides storage values, async ports, independent primitive
+engines, and adapters for hosts and loadable modules. The v2 architecture keeps
+storage policy with the consumer that owns its data model. See the
+[primitives v2 contract](docs/specs/primitives-v2.md) and the
+[v2 item inventory](docs/specs/primitives-v2-inventory/README.md).
 
-| Deployment | URL | Driver |
-| --- | --- | --- |
-| Tests, stateless embedders | `memory` | in-process maps |
-| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file (feature `sqlite`) |
-| Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
-| Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
-| Secrets | none (features `secrets`, `keyring`, `keyring-secret-service`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
+## Crates
 
-Drivers are separate crates. A host compiles in only the ones it enables, as
-Cargo features on the `tinystoragedrivers` facade. A desktop build never links
-a MongoDB client, and a cloud build never links SQLite.
+The workspace contains twelve crates:
 
-## The ports
+| Crate | Role |
+| --- | --- |
+| `tinystoragedrivers-types` | Shared values, errors, scopes, capabilities, and request/result types |
+| `tinystoragedrivers-api` | Async storage ports and the `StorageBackend` / `Storage` bundle |
+| `tinystoragedrivers-document` | Document and stream primitives; memory, SQLite, MongoDB, and file engines |
+| `tinystoragedrivers-kv` | Key/value primitive; memory, SQLite, MongoDB, and file engines |
+| `tinystoragedrivers-blob` | Blob primitive; memory, filesystem, SQLite, MongoDB, and S3 engines |
+| `tinystoragedrivers-queue` | Queue primitive; memory, document-backed, and RabbitMQ engines |
+| `tinystoragedrivers-secrets` | Secret-store engines, including memory, file, document, keyring, and KMS |
+| `tinystoragedrivers-connect` | Shared engine connection setup used by primitive adapters |
+| `tinystoragedrivers` | Optional composition-root facade for URL parsing and engine assembly |
+| `tinystoragedrivers-testkit` | In-memory bundles, conformance suites, and test decorators |
+| `tinystoragedrivers-bus` | Versioned storage module wire types |
+| `tinystoragedrivers-busproxy` | Module-side connection and host-side scoped serving adapters |
 
-- **`DocumentStore`** holds versioned JSON objects in named collections. It
-  supports:
-  - filters, sorting, and cursor paging;
-  - compare-and-swap through `Precondition`;
-  - atomic `claim` for queues and leases;
-  - unique indexes;
-  - optional expiry, cross-document transactions, and full-text search.
-- **`StreamStore`** holds append-only logs with dense offsets, for transcripts,
-  journals, and audit trails.
-- **`BlobStore`** holds opaque bytes by key, for attachments and artifacts.
-- **`QueueStore`** holds durable at-least-once message queues: leases with a
-  visibility window, retries, dead letters, priorities, delays, per-group
-  serialization and dedupe keys. `queue::DocumentQueue` runs one on any
-  `DocumentStore`, so every document driver is a queue backend. Queues are
-  declared in an editable `queues.json` manifest (`queue::QueueManifest`,
-  format in `schemas/queues.schema.json`). Every scope has one at
-  `ScopedStorage::queues()`; a separate queue URL (`amqp://…`, feature
-  `rabbitmq`, `QueueConfig` and `open_queues`) moves them to RabbitMQ.
+Consumer libraries normally depend on `tinystoragedrivers-types` and
+`tinystoragedrivers-api`. Loadable modules may additionally use
+`tinystoragedrivers-busproxy`. They select neither engines nor the facade.
+Production engine features belong at a composition root; primitive engines
+and the testkit belong in consumer dev-dependencies when needed.
 
-A `StorageBackend` hands out a `ScopedStorage` for each `Scope`, the tenant key
-every record carries. Two scopes on one backend never see each other's data.
-A backend is one database: a SQLite file, a MongoDB database, a directory of
-files. Owners keep their data apart with the scope they open, not with a
-separate database.
+## Composition facade
 
-This repository holds no typed repository for any particular record. Those
-belong to the crate that owns the record, which keeps this crate free of every
-consumer's schema.
+The facade is optional and intended for application composition roots.
+`StorageConfig::parse` with `open` selects a complete backend from a storage
+URL. `BlobConfig` with `open_blobs` selects a blob port independently, and
+`QueueConfig` with `open_queues` selects a scoped queue port. Memory storage is
+always available; production features are opt-in and the default feature set
+is empty.
 
-## The schema
+The facade does not define consumer schemas, migrations, tenant naming,
+retention, lease/fencing policy, or secret-key ownership. Those remain with the
+host or module that owns the records and lifecycle. Durable backends expose an
+unsupported secret port until the host supplies an explicit secret store and
+key provider. Shared durable connections come from
+`tinystoragedrivers-connect`.
 
-Owners needing only declarations and wire contracts can use
-[`tinystoragedrivers-schema`](crates/tinystoragedrivers-schema/README.md) without
-linking the storage runtime. Core and the facade reexport these shared types
-while keeping their existing executable schema and migration APIs.
+## Development
 
-The optional `migration-delivery` feature adds transport-independent confidential
-fragmentation for external migration executors. Blob bytes and identity-stream
-entries stay local; document and independent-entry requests/replies use bounded
-frames without a new total size ceiling. See the
-[delivery contract](docs/specs/migration-delivery.md) and
-[runtime adapter requirements](crates/tinystoragedrivers-core/src/schema/delivery/README.md).
-
-Since v1.0.0, every record follows one uniform schema
-([`docs/specs/schema-v2.md`](docs/specs/schema-v2.md)):
-
-- **Scopes.** `local` or `u:<id>` for the tenant, optionally narrowed with `/agent:<id>` or `/module:<id>`; `cluster` for placement. Build them with `Scope::tenant`, `.agent` and `.module`.
-- **Names.** Collections are `<owner>.<entity>`, streams `<owner>.<stream>/<key>`, blobs `<owner>/<path>`. Ids come from `Key::of(parts)` or `Key::ulid()`.
-- **Bodies.** Bare snake_case JSON objects, every time an `*_ms` epoch millisecond. tsd keeps `schema`, `created_ms`, `updated_ms` and `expires_ms` per record (`Meta`, `WriteOptions`).
-- **Registry.** Each owning crate exports `storage_schema()`. The host composes them with `Registry::compose`, prepares them, runs their resumable migration steps (`Registry::migrate`) and applies their seal and retention policies (`Registry::maintain`).
-- **Primitives.** `Repo<T>`, `Leases`, `Kv` and `Counters` replace hand-written CAS loops, lease documents, key-value stores and counters.
-- **Streams seal.** A finished stream is folded into one compressed blob and reads exactly as before (`StreamStore::seal`).
-
-```rust
-use serde_json::json;
-use tinystoragedrivers::{Filter, Precondition, Scope, StorageConfig};
-
-async fn demo() -> tinystoragedrivers::Result<()> {
-    let backend = tinystoragedrivers::open(&StorageConfig::parse("memory")?).await?;
-    let jobs = backend.for_scope(&Scope::local())?;
-    let docs = jobs.documents();
-
-    docs.put("jobs", "nightly", json!({"state": "queued", "run_at": 0}), Precondition::Absent)
-        .await?;
-    let next = docs
-        .claim("jobs", &Filter::eq("state", "queued"), &[], &json!({"state": "running"}))
-        .await?;
-    assert_eq!(next.unwrap().id, "nightly");
-    Ok(())
-}
-```
-
-## Workspace
-
-```text
-crates/
-├── tinystoragedrivers-core/    # ports, Scope, filters, errors, memory driver,
-│                               # blocking bridge, conformance suite
-├── tinystoragedrivers-file/    # `file:<dir>`: JSON, JSONL and raw files
-├── tinystoragedrivers-sqlite/  # SQLite: generic tables, FTS5, native access
-├── tinystoragedrivers-mongodb/ # MongoDB: multi-tenant, scope on every record
-├── tinystoragedrivers-secrets/ # SecretStore port: memory, secrets.enc file,
-│                               # DocumentStore and OS keyring drivers
-├── tinystoragedrivers-rabbitmq/ # QueueStore over AMQP 0-9-1 (queues only)
-└── tinystoragedrivers/         # facade: StorageConfig URL parsing, open(),
-                                # driver features, re-exports the core
-```
-
-Each driver gets its own crate (`tinystoragedrivers-sqlite`,
-`-mongodb`, `-file`, `-secrets`) and must pass
-`tinystoragedrivers_core::conformance::run`. The suite runs the same checks
-against every driver:
-- declared process-sharing and cross-process CAS capabilities
-- precondition conflicts
-- unique-index violations
-- paging
-- claim ordering
-- stream offsets
-- blob ranges
-- scope isolation
-- scope isolation
-
-`run` checks the built-in document-driver identities. External drivers should
-use `conformance::run_with_process_capabilities` and explicitly supply their
-expected `shared_across_processes` and `cross_process_cas` declarations.
-
-## Develop
+Run `.github/scripts/test-features.sh` from the repository root to check the
+memory-only build and each single-feature build (`file`, `sqlite`, `mongodb`,
+`s3`, `rabbitmq`, `keyring`, `kms-aws`, and `kms-gcp`). CI runs this same
+locked feature matrix.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --all-targets --all-features
-cargo test --all-features
-.github/scripts/check-file-coverage.sh 90 target/coverage.json
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo deny check all
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
-The MongoDB driver's `live_*` tests run against the server named by
-`TSD_MONGO_URL` and skip without it. The coverage gate needs them, so run it
-with a single-node replica set up:
+The CI coverage gate requires at least 90% line coverage in every source file.
+MongoDB and RabbitMQ live tests need disposable services; see the relevant
+engine documentation and [AGENTS.md](AGENTS.md) for local setup guidance.
 
-```sh
-docker run -d --rm --name tsd-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
-docker exec tsd-mongo mongosh --quiet --eval \
-  'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
-export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
-```
+## Documentation
 
-The RabbitMQ queue backend's `live_*` tests likewise need `TSD_RABBITMQ_URL`:
-
-```sh
-docker run -d --rm --name tsd-rabbit -p 127.0.0.1:5672:5672 rabbitmq:4-management
-export TSD_RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/%2f'
-```
-
-The design and its guarantees are in
-[`docs/specs/storage-ports.md`](docs/specs/storage-ports.md). The order in which
-drivers land and consumers migrate is in
-[`docs/plans/storage-rollout.md`](docs/plans/storage-rollout.md). Native restricted handles and trusted schema bootstrap are described in
-[`docs/specs/existing-schema.md`](docs/specs/existing-schema.md). Restricted Mongo reset uses trusted prepared metadata; missing reset collections refuse before initialization or data erasure rather than being created by the restricted handle.
-
-## Releases
-
-`.github/workflows/release.yml` (manual dispatch) validates, bumps the single
-workspace version, refreshes the root and discovered proof-workspace lockfiles,
-tags `vX.Y.Z`, and creates a GitHub release. Before staging the exact version
-and lockfile paths, it validates each workspace with locked metadata using
-default and all features. Failed updates or validation restore the affected
-files to their original bytes and existence. See the
-[release runbook](AGENTS.md#releases). Consumers pin the tag through a git
-dependency or a submodule gitlink.
+- [Primitive contracts](docs/specs/primitives-v2.md)
+- [Storage ports and host boundaries](docs/specs/storage-ports.md)
+- [Specifications index](docs/specs/README.md)
+- [Repository contributor guide](AGENTS.md)
 
 ## License
 
 GPL-3.0-only. See [`LICENSE`](LICENSE).
-
-### Mongo live-test database permissions
-
-Run the complete live suite on a disposable MongoDB server. Transaction race
-fixtures each use their own database on the server named in `TSD_MONGO_URL`
-(`tsd_fx_*`, `tsd_<label>_<pid>` and `tsd_schema_default_*`; the URL's own
-database, or `tsd_test` when it has none, backs the rest). This prevents
-parallel schema changes from invalidating unrelated transactions.
-
-The test account must be allowed to create databases, collections and indexes,
-and read, write and delete documents in them. On an authenticated disposable
-server, `readWrite` on any database (or on those name patterns) is sufficient.
-The URL's `authSource` continues to select the authentication database
-independently.

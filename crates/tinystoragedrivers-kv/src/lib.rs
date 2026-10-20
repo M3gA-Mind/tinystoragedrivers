@@ -51,7 +51,7 @@ pub use sqlite::SqliteKv;
 #[cfg(feature = "mongodb")]
 mod mongodb;
 #[cfg(feature = "mongodb")]
-pub use mongodb::MongoKv;
+pub use mongodb::{MongoKv, MongoKvFactory};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

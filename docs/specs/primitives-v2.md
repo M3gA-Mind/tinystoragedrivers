@@ -337,13 +337,8 @@ when old hosts and modules safely ignore them. Rust API semver does not replace
 the wire-version check. Pre-1.0 alpha tags may change incompatibly, but still
 increment the wire version whenever old/new module pairs cannot interoperate.
 
-## Superseded contracts
+## Historical contracts
 
-The v1 documents below describe code that this restructure removes. They are
-retained as historical context until the corresponding implementation leaf
-deletes them; they are not normative for v2:
-
-- `schema-v2.md`
-- `migration-delivery.md`
-- `bounded-secret-transaction.md`
-- `restricted-secret-files.md`
+Earlier v1 schema and migration contracts were removed with their host-specific
+implementations. The v2 contract above is normative. Historical on-disk
+fixtures remain only where a current engine test proves compatibility.

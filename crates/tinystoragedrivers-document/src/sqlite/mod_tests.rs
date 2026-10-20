@@ -97,7 +97,7 @@ async fn reads_the_be94_legacy_fixture_without_changing_primitive_rows() {
     let path = directory.path().join("storage.db");
     std::fs::write(
         &path,
-        include_bytes!("../../../tinystoragedrivers-sqlite/tests/fixtures/storage-be94f75.db"),
+        include_bytes!("../../../../tests/fixtures/storage-be94f75.db"),
     )
     .unwrap();
 

@@ -1,7 +1,7 @@
 //! URL parsing, redaction and driver selection.
 
 use super::*;
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::{ErrorKind, Scope};
 
 #[test]
 fn parses_every_form() {
@@ -69,6 +69,22 @@ fn rejects_unusable_urls() {
 }
 
 #[test]
+fn uri_redaction_helpers_handle_absent_schemes_and_overlapping_spans() {
+    assert!(split_uri("not a URI").is_none());
+    assert_eq!(
+        split_uri("mongodb://user:pass@host/db?x=1").unwrap().path,
+        "db"
+    );
+    assert_eq!(hex_value(b'0'), Some(0));
+    assert_eq!(hex_value(b'9'), Some(9));
+    assert_eq!(hex_value(b'a'), Some(10));
+    assert_eq!(hex_value(b'F'), Some(15));
+    assert_eq!(hex_value(b'G'), None);
+    assert_eq!(redact_spans("safe", Vec::new()), "safe");
+    assert_eq!(redact_spans("abcdef", vec![1..4, 3..5]), "a***f");
+}
+
+#[test]
 fn never_prints_a_password() {
     let config = StorageConfig::parse("mongodb://app:s3cret@h:27017/db").unwrap();
     assert_eq!(config.to_string(), "mongodb://app:***@h:27017/db");
@@ -103,8 +119,8 @@ fn names_its_driver_and_renders() {
 
 #[tokio::test]
 async fn opens_memory_and_names_missing_features() {
-    let backend = open(&StorageConfig::Memory).await.unwrap();
-    assert_eq!(backend.driver(), "memory");
+    assert!(open(&StorageConfig::Memory).await.is_ok());
+    assert_eq!(StorageConfig::Memory.driver(), "memory");
     let mut missing = Vec::new();
     if cfg!(not(feature = "sqlite")) {
         missing.push("sqlite:/tmp/x");
@@ -134,7 +150,15 @@ async fn opens_a_file_url_with_the_file_feature() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig::parse(&format!("file:{}", dir.path().display())).unwrap();
     let backend = open(&config).await.unwrap();
-    assert_eq!(backend.driver(), "file");
+    let ports = backend
+        .for_scope(&Scope::new("file-config-test").unwrap())
+        .unwrap();
+    ports.kv().put("probe", serde_json::json!(1)).await.unwrap();
+    assert_eq!(
+        ports.kv().get("probe").await.unwrap().unwrap().doc,
+        serde_json::json!(1)
+    );
+    assert_eq!(config.driver(), "file");
 
     let file = dir.path().join("not-a-dir");
     std::fs::write(&file, b"x").unwrap();
@@ -218,14 +242,102 @@ async fn opens_sqlite_directories_and_files() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}", dir.path().display());
     let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
-    assert_eq!(backend.driver(), "sqlite");
+    let ports = backend
+        .for_scope(&Scope::new("sqlite-directory-test").unwrap())
+        .unwrap();
+    ports.kv().put("probe", serde_json::json!(1)).await.unwrap();
+    assert_eq!(
+        ports.kv().get("probe").await.unwrap().unwrap().doc,
+        serde_json::json!(1)
+    );
+    assert_eq!(StorageConfig::parse(&url).unwrap().driver(), "sqlite");
     assert!(dir.path().join("storage.db").exists());
     let file = dir.path().join("single.db");
     let backend = open(&StorageConfig::Sqlite { path: file.clone() })
         .await
         .unwrap();
-    assert_eq!(backend.driver(), "sqlite");
+    let ports = backend
+        .for_scope(&Scope::new("sqlite-file-test").unwrap())
+        .unwrap();
+    ports.kv().put("probe", serde_json::json!(2)).await.unwrap();
+    assert_eq!(
+        ports.kv().get("probe").await.unwrap().unwrap().doc,
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        StorageConfig::Sqlite { path: file.clone() }.driver(),
+        "sqlite"
+    );
     assert!(file.exists());
+}
+
+#[tokio::test]
+async fn memory_reopening_a_scope_preserves_values_without_cross_scope_reads() {
+    use serde_json::json;
+    use tinystoragedrivers_types::{Precondition, Scope};
+
+    let backend = open(&StorageConfig::Memory).await.unwrap();
+    let local = Scope::new("local").unwrap();
+    let other = Scope::new("other").unwrap();
+    let first = backend.for_scope(&local).unwrap();
+    first.kv().put("answer", json!(42)).await.unwrap();
+    first
+        .documents()
+        .put(
+            "notes",
+            "one",
+            json!({"body": "private"}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    first
+        .blobs()
+        .put("image", b"local".to_vec(), None)
+        .await
+        .unwrap();
+    first.secrets().set("token", b"private").await.unwrap();
+
+    let reopened = backend.for_scope(&local).unwrap();
+    assert_eq!(
+        reopened.kv().get("answer").await.unwrap().unwrap().doc,
+        json!(42)
+    );
+    assert!(
+        reopened
+            .documents()
+            .get("notes", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        reopened.blobs().get("image").await.unwrap().unwrap().bytes,
+        b"local"
+    );
+    assert_eq!(
+        reopened
+            .secrets()
+            .get("token")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"private"
+    );
+
+    let isolated = backend.for_scope(&other).unwrap();
+    assert!(isolated.kv().get("answer").await.unwrap().is_none());
+    assert!(
+        isolated
+            .documents()
+            .get("notes", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(isolated.blobs().get("image").await.unwrap().is_none());
+    assert!(isolated.secrets().get("token").await.unwrap().is_none());
 }
 
 #[test]
@@ -403,4 +515,40 @@ async fn opens_a_mongodb_url_with_the_driver() {
         "the driver, not the missing-feature arm, answered: {error}"
     );
     assert!(!error.to_string().contains("s3cret"), "{error}");
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test]
+async fn facade_opens_a_live_mongodb_backend_and_binds_scoped_ports() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let database = format!(
+        "tsd_facade_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let config = StorageConfig::MongoDb {
+        uri: uri.clone(),
+        database: database.clone(),
+    };
+    let backend = open(&config).await.unwrap();
+    let scope = Scope::new(&format!("facade-{}", std::process::id())).unwrap();
+    let ports = backend.for_scope(&scope).unwrap();
+    ports
+        .kv()
+        .put("facade-probe", serde_json::json!({"value": 7}))
+        .await
+        .unwrap();
+    assert_eq!(
+        ports.kv().get("facade-probe").await.unwrap().unwrap().doc,
+        serde_json::json!({"value": 7})
+    );
+    let connection = tinystoragedrivers_connect::MongoConnection::connect(&uri, &database)
+        .await
+        .unwrap();
+    connection.database().drop().await.unwrap();
 }

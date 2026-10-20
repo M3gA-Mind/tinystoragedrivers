@@ -1,7 +1,6 @@
 # Storage bus
 
-Status: accepted for contract design; implementation is staged by
-[`../plans/storage-bus.md`](../plans/storage-bus.md). Owner: tinystoragedrivers.
+Status: implemented. Owner: tinystoragedrivers.
 
 ## Problem and boundary
 
@@ -187,9 +186,9 @@ layout like any other schema drift.
 
 ### Record metadata, sealing and host-only operations (version 4)
 
-Uniform schema v2 ([`schema-v2.md`](schema-v2.md) sections 3 and 6) adds four
-things to the ports. The wire carries two of them and deliberately not the
-other two.
+The v2 primitive contract ([`primitives-v2.md`](primitives-v2.md)) defines the
+metadata and sealing behavior carried by the ports. The wire carries the
+supported fields and deliberately omits host-only policy.
 
 Carried (additive; every new field is optional and defaulted):
 
