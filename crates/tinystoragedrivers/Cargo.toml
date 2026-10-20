@@ -35,6 +35,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 # A throwaway directory for the `file:` URL test.
 tempfile = { workspace = true }
+# Real v2 memory document and stream handles for the public secrets facade test.
+tinystoragedrivers-document = { workspace = true, features = ["memory"] }
 
 [features]
 # Cloud envelope-encryption key providers; remain optional.
@@ -54,10 +56,13 @@ blocking = ["tinystoragedrivers-core/blocking"]
 # Re-export the core's conformance suite for downstream repository tests.
 testkit = ["tinystoragedrivers-core/testkit", "tinystoragedrivers-secrets?/testkit"]
 # `file:<dir>`: JSON documents, JSONL streams and raw blobs under a directory.
-file = ["dep:tinystoragedrivers-file"]
+file = ["dep:tinystoragedrivers-file", "secrets", "tinystoragedrivers-secrets/file"]
 # Re-export `tinystoragedrivers-secrets` as `tinystoragedrivers::secrets`:
 # encrypted secrets in memory, a `secrets.enc` file, or any `DocumentStore`.
 secrets = ["dep:tinystoragedrivers-secrets"]
+# Secret engine selection is independent of which storage URL backend is configured.
+memory = ["secrets", "tinystoragedrivers-secrets/memory"]
+document = ["secrets", "tinystoragedrivers-secrets/document"]
 # `secrets::KeyringSecrets`, over the native OS credential stores.
 keyring = ["secrets", "tinystoragedrivers-secrets/keyring"]
 # Opt-in explicit Linux Secret Service provider.

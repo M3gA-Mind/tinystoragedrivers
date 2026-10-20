@@ -9,10 +9,12 @@ use tinystoragedrivers_types::{Capability, ErrorKind};
 
 #[test]
 fn api_contract_version_is_pinned() {
-    assert_eq!(CONTRACT_VERSION, 2);
-    assert!(is_compatible(2));
+    assert_eq!(CONTRACT_VERSION, 4);
+    assert!(is_compatible(4));
     assert!(!is_compatible(0));
     assert!(!is_compatible(1));
+    assert!(!is_compatible(2));
+    assert!(!is_compatible(3));
 }
 
 #[test]
@@ -340,6 +342,18 @@ fn unconfigured_bundle_handles_return_their_primitive_capability() {
     assert_unsupported(
         run_ready(storage.secrets().set("secret", b"secret")),
         Capability::Secrets,
+    );
+    assert_unsupported(
+        run_ready(storage.secrets().get_versioned("secret")),
+        Capability::ConditionalSecretWrites,
+    );
+    assert_unsupported(
+        run_ready(
+            storage
+                .secrets()
+                .set_if("secret", b"secret", types::SecretPrecondition::Absent),
+        ),
+        Capability::ConditionalSecretWrites,
     );
     assert_unsupported(
         run_ready(storage.secrets().delete("secret")),

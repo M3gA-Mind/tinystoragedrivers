@@ -20,13 +20,13 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tinystoragedrivers_api::SecretStore;
 use tinystoragedrivers_bus::{
     BlobInfo, BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind,
     WatchChanged,
 };
 use tinystoragedrivers_core::queue::QueueManifest;
 use tinystoragedrivers_core::{ScopedStorage, StorageError};
-use tinystoragedrivers_secrets::SecretStore;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 

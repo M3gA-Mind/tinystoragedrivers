@@ -19,7 +19,7 @@ tinystoragedrivers-core.workspace = true
 tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]
-tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
+tinystoragedrivers-api.workspace = true
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 

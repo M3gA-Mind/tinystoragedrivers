@@ -1,14 +1,11 @@
 //! [`KeyringSecrets`]: secrets in the OS credential store.
 //!
 //! Each secret is one credential with the store's service name and the secret
-//! name as its user, the layout OpenHuman's `OsBackend` uses (service
-//! `openhuman`, user `"{user_id}:{key}"`), so its entries read back here.
-//! Values go through the platform's password API, as OpenHuman's do, so they
-//! are UTF-8 text and decode the same on every platform (Windows stores a
-//! password as UTF-16).
+//! name as its user. Values go through the platform's password API and are
+//! UTF-8 text on every platform (Windows stores a password as UTF-16).
 //!
 //! The OS stores cannot enumerate their entries, so [`SecretStore::list`]
-//! fails with [`ErrorKind::Backend`](tinystoragedrivers_core::ErrorKind::Backend)
+//! fails with [`ErrorKind::Backend`](tinystoragedrivers_types::ErrorKind::Backend)
 //! and [`SecretStore::enumerable`] is `false`.
 //!
 //! Every call can block (a keychain unlock prompt), so it runs on the
@@ -21,29 +18,29 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use keyring::{CredentialBuilder, Entry};
-use tinystoragedrivers_core::{Result, StorageError};
+use tinystoragedrivers_types::{Result, StorageError};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
 use crate::file::lock_file;
-use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
+use crate::store::{SecretStore, require_utf8};
 use crate::task::run_blocking;
+use tinystoragedrivers_types::{
+    validate_secret_name as validate_name, validate_secret_prefix as validate_prefix,
+};
 
-/// Serializes [`KeyringSecrets::load_or_create_key`] within the process, so
-/// two callers cannot both see an absent key and store different ones.
 static KEY_INIT: Mutex<()> = Mutex::new(());
 
 /// Secrets in the native OS credential store.
 ///
 /// ```no_run
 /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-/// use tinystoragedrivers_secrets::{EncryptedFileSecrets, KeyringSecrets, SecretStore};
+/// use tinystoragedrivers_secrets::{KeyringSecrets, SecretStore};
 ///
-/// // OpenHuman's layout: the `secrets.enc` master key lives in the keychain.
-/// let keychain = KeyringSecrets::new("openhuman");
-/// let master = keychain.load_or_create_key("app:master_key").await?;
-/// let secrets = EncryptedFileSecrets::new("/home/me/.openhuman", master);
-/// # Ok::<(), tinystoragedrivers_core::StorageError>(())
+/// let keychain = KeyringSecrets::new("my-app");
+/// keychain.set("api-token", b"secret-token").await?;
+/// assert_eq!(keychain.get("api-token").await?.unwrap().as_slice(), b"secret-token");
+/// # Ok::<(), tinystoragedrivers_types::StorageError>(())
 /// # }).unwrap();
 /// ```
 #[derive(Clone)]
@@ -137,8 +134,8 @@ impl KeyringSecrets {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
-    /// for an invalid name, [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto)
+    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_types::ErrorKind::InvalidInput)
+    /// for an invalid name, [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto)
     /// when the stored key is malformed or a new key does not read back, or
     /// the keyring error mapped by kind.
     pub async fn load_or_create_key(&self, name: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {
@@ -248,15 +245,15 @@ impl SecretStore for KeyringSecrets {
 /// What a `keyring` failure means to a caller.
 ///
 /// - `NoStorageAccess` (a locked or denied store) is
-///   [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable):
+///   [`ErrorKind::Unavailable`](tinystoragedrivers_types::ErrorKind::Unavailable):
 ///   unlocking it makes a retry succeed.
 /// - `TooLong` and `Invalid` reject the name:
-///   [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput).
+///   [`ErrorKind::InvalidInput`](tinystoragedrivers_types::ErrorKind::InvalidInput).
 /// - `BadEncoding` is a stored value that is not UTF-8:
-///   [`ErrorKind::Serialization`](tinystoragedrivers_core::ErrorKind::Serialization).
-/// - `NoEntry` is [`ErrorKind::NotFound`](tinystoragedrivers_core::ErrorKind::NotFound).
+///   [`ErrorKind::Serialization`](tinystoragedrivers_types::ErrorKind::Serialization).
+/// - `NoEntry` is [`ErrorKind::NotFound`](tinystoragedrivers_types::ErrorKind::NotFound).
 /// - `PlatformFailure`, `Ambiguous` and anything newer are
-///   [`ErrorKind::Backend`](tinystoragedrivers_core::ErrorKind::Backend).
+///   [`ErrorKind::Backend`](tinystoragedrivers_types::ErrorKind::Backend).
 ///
 /// Only platform failures keep the keyring error as the source; the others
 /// carry the stored bytes, the credential list, or the secret name, none of

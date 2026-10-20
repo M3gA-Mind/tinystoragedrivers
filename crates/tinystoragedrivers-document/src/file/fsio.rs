@@ -191,6 +191,13 @@ pub(crate) fn create_dir_durable(dir: &Path) -> Result<()> {
 /// cannot open a directory for this and orders renames itself, so it is a
 /// no-op there. Elsewhere a failure is reported: without it the new entry may
 /// not survive a crash, which a durable write must not claim.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "Windows shares the fallible sync_dir contract with Unix, where directory sync can fail"
+    )
+)]
 pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(dir)

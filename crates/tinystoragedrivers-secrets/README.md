@@ -3,13 +3,14 @@
 The contract is specified in
 [`docs/specs/secret-storage.md`](../../docs/specs/secret-storage.md).
 
-Encrypted secret storage for OpenHuman: one `SecretStore` port (`get`, `set`,
-`delete`, `list`), with drivers for each place a secret can live. Desktop and
-cloud builds share the port and the byte formats.
+Secret storage primitives: the API `SecretStore` port and engines for memory,
+encrypted files, documents, OS keyrings, and cloud KMS. Engines depend on the
+new API and types crates; host migration and key-source policy stay with the
+host.
 
 | Driver | Where the bytes live | Use |
 | --- | --- | --- |
-| `MemorySecrets` | process memory | tests |
+| `MemorySecrets` | process memory | tests and ephemeral use |
 | `EncryptedFileSecrets` | `secrets.enc`, one ChaCha20-Poly1305 blob | desktop, CLI |
 | `DocumentSecrets` | `{"ciphertext": "enc2:…"}` per secret in any `DocumentStore` | cloud, multi-tenant |
 | `KeyringSecrets` (feature `keyring`) | the OS credential store | desktop |
@@ -56,15 +57,11 @@ Every format is OpenHuman's own, so existing data opens unchanged:
 - **`secrets.enc`.** The JSON object `{"<name>": "<value>"}` encrypted as one
   raw `nonce ‖ ciphertext ‖ tag` blob. Values are text, so the file and keyring
   drivers reject non-UTF-8 values.
-- **Keys.** 32 bytes written as 64 hex characters: OpenHuman's `.secret_key`
-  file (`load_or_create_key_file`) and its keychain master key (service
-  `openhuman`, user `app:master_key`; `KeyringSecrets::load_or_create_key`).
-- **Legacy `enc:`.** Repeating-key XOR. Readable through
-  `crypto::decrypt_legacy_enc` for migration only; never written.
+- **Keys.** Key acquisition is supplied by the host through `KeyProvider` or
+  a caller-owned encrypted-file key.
 
-The crate's tests decrypt golden vectors that OpenHuman's own crypto code
-produced, and the reverse direction (this crate writes, OpenHuman's code
-reads) was checked with the same code.
+The crate's tests decrypt golden vectors that OpenHuman's crypto code
+produced, including an actual `secrets.enc` fixture from TSD 1.0.0.
 
 ## Keys per tenant
 
@@ -86,13 +83,6 @@ on every call:
   treated as empty or overwritten.
 - `KeyringSecrets` cannot enumerate (`enumerable() == false`, `list` fails with
   `ErrorKind::Backend`). A locked store is `ErrorKind::Unavailable`.
-  `load_or_create_key` creates a key only when the entry is genuinely absent,
-  and serializes creation within the process. The OS stores have no
-  create-if-absent, so `with_key_creation_lock(path)` serializes it across
-  processes through a shared lock file.
-- `load_or_create_key_file` writes and syncs a temp sibling, then publishes it
-  with a hard link that fails if the key file exists. Readers never see a
-  partial key, and racing creators adopt the winner's key.
 - File and keyring calls run on the tokio blocking pool when a runtime is
   present.
 - Error messages never contain key bytes, plaintext, or secret names.
@@ -101,28 +91,8 @@ on every call:
 
 `testkit::secrets_conformance` (feature `testkit`) runs the same suite
 against every driver. The keyring driver runs it over an in-memory
-credential builder. The real OS store is only touched by
-`live_keyring_conformance`, and only with `TSD_LIVE_KEYRING=1`, or by the isolated
-Linux Secret Service launcher:
+credential builder. Keyring tests never access a user's actual credential
+store.
 
-```sh
-cargo test --locked -p tinystoragedrivers-secrets --features keyring-secret-service --lib
-python3 .github/scripts/check-native-secret-service.py
-```
-
-Run those commands from the repository root. The launcher requires
-`dbus-run-session`, `gdbus` and `gnome-keyring-daemon`. It creates private XDG
-state under this checkout's `target/`, leaves HOME unchanged, starts an owned
-bus with service activation disabled and an owned disposable daemon, proves
-bus-owner/default-collection state, and exercises real set/get/exact readback/
-delete/NoEntry plus locked and absent-service denial. It stops and waits for
-its daemon, disposes scratch credential state and retains only boolean receipts.
-`--coverage` uses the already instrumented secrets test executable and report
-profile directory. A timeout fails the probe and terminates its owned process
-group. Kernel access, macOS Keychain and Windows Credential Manager runtime
-proof are separate; they are not inferred from this Linux probe.
-
-Private file namespaces, atomic restrictive birth, and the bounded verified file
-import API are documented in [the file module](src/file/README.md). Import
-receipts retain live object identity; authenticated backup recovery after a
-restart returns bytes, not permission to delete a newly resolved source path.
+The encrypted-file engine's format, locking, and conditional-write behavior
+are documented in [the file module](src/file/README.md).
