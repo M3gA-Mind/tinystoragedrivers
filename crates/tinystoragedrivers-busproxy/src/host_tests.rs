@@ -44,7 +44,7 @@ impl StorageEndpoint for SignalEndpoint {
                 .lock()
                 .ok()?
                 .as_ref()
-                .map(|signals| signals.subscribe())
+                .map(tokio::sync::broadcast::Sender::subscribe)
         } else {
             None
         }

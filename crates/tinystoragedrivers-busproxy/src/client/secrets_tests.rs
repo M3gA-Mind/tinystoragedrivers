@@ -4,12 +4,8 @@ use super::*;
 async fn confidential_secret_calls_round_trip_through_the_bus() {
     use std::sync::Arc;
 
-    use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
-    use tinystoragedrivers_secrets::MemorySecrets;
-
-    let backend = MemoryStorage::new();
-    let server = crate::StorageServer::new(backend.for_scope(&Scope::local()).unwrap())
-        .with_secrets(Arc::new(MemorySecrets::new()));
+    let scope = tinystoragedrivers_types::Scope::new("secret-client-roundtrip").unwrap();
+    let server = crate::StorageServer::new(tinystoragedrivers_testkit::memory_storage(&scope));
     let wire = Wire::new(Arc::new(crate::Loopback::new(
         Arc::new(server),
         crate::Admission::Confidential,

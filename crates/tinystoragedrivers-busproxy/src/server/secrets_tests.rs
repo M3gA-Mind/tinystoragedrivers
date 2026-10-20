@@ -3,14 +3,8 @@ use tinystoragedrivers_api::types::{Capability, ErrorKind, StorageError};
 
 #[tokio::test]
 async fn secret_selectors_forward_each_operation_to_the_confidential_store() {
-    use std::sync::Arc;
-
-    use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
-    use tinystoragedrivers_secrets::MemorySecrets;
-
-    let backend = MemoryStorage::new();
-    let server = StorageServer::new(backend.for_scope(&Scope::local()).unwrap())
-        .with_secrets(Arc::new(MemorySecrets::new()));
+    let scope = tinystoragedrivers_types::Scope::new("secret-forwarding").unwrap();
+    let server = StorageServer::new(tinystoragedrivers_testkit::memory_storage(&scope));
 
     let missing: Option<wire::SecretValue> = serde_json::from_value(
         server
