@@ -176,6 +176,12 @@ jobs:
       - name: Check migration delivery without dev or testkit features
         run: cargo check -p tinystoragedrivers-core --no-default-features --features migration-delivery --lib --locked
 
+      - name: Test shared storage testkit
+        run: cargo test --locked -p tinystoragedrivers-testkit
+
+      - name: Lint shared storage testkit
+        run: cargo clippy --locked -p tinystoragedrivers-testkit --all-targets --all-features -- -D warnings
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test standalone blob memory, filesystem, and SQLite features

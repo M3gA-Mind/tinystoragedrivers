@@ -41,6 +41,33 @@ fn file_blob_write_keeps_v1_raw_bytes_and_sidecar_shape() {
 }
 
 #[test]
+fn file_sealed_blobs_share_the_scope_but_stay_hidden_from_user_listing() {
+    let root = tempfile::tempdir().unwrap();
+    let store =
+        FileBlobStore::open_with_clock(root.path(), Scope::new("local").unwrap(), write_test_clock)
+            .unwrap();
+    let key = "_tsd/sealed/events/g0";
+    run(store.put_sealed(key, b"log".to_vec(), Some("application/zstd"))).unwrap();
+    assert_eq!(run(store.get_sealed(key)).unwrap().unwrap().bytes, b"log");
+    assert_eq!(run(store.head_sealed(key)).unwrap().unwrap().len, 3);
+    assert_eq!(
+        run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
+        1
+    );
+    assert_eq!(run(store.list("")).unwrap(), Vec::new());
+    assert_eq!(
+        run(store.list_page("", None, 10)).unwrap().items,
+        Vec::new()
+    );
+    assert_eq!(
+        run(store.get(key)).unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::InvalidInput
+    );
+    assert!(run(store.delete_sealed(key)).unwrap());
+    assert_eq!(run(store.head_sealed(key)).unwrap(), None);
+}
+
+#[test]
 fn file_blob_reads_v1_sidecar_without_age_and_pages_expired_records() {
     CLOCK.store(500, Ordering::SeqCst);
     let root = tempfile::tempdir().unwrap();
