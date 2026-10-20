@@ -70,8 +70,17 @@ pub trait SecretStore: Send + Sync + std::fmt::Debug {
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 
     /// Whether this backend can enumerate names.
-    fn enumerable(&self) -> bool;
+    ///
+    /// Defaults to `true` for compatibility with existing implementations;
+    /// stores without enumeration must override this and return `false`.
+    fn enumerable(&self) -> bool {
+        true
+    }
 
     /// Stable implementation label for diagnostics.
     fn backend_name(&self) -> &'static str;
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;

@@ -458,6 +458,16 @@ class FiniteAclDiagnostics(unittest.TestCase):
             spec.loader.exec_module(isolated)
 
 
+class NativeFixtureCommand(unittest.TestCase):
+    def test_production_probe_explicitly_enables_file_without_default_engines(self):
+        command = probe.fixture_test_command()
+        self.assertIn("--no-default-features", command)
+        feature_index = command.index("--features")
+        self.assertEqual(command[feature_index + 1], "file")
+        self.assertEqual(command[command.index("-p") + 1], "tinystoragedrivers-secrets")
+        self.assertEqual(command[command.index("--lib") + 1], probe.TEST)
+
+
 @unittest.skipUnless(os.name == "nt", "requires the actual native Windows PowerShell launcher")
 class NativeWindowsPathDecoder(unittest.TestCase):
     def capture_paths(self, paths, outer, private, evidence):
@@ -926,8 +936,7 @@ class NativeWindowsOuterFixture(unittest.TestCase):
                                     for ace in before["segments"][1]["aces"]),
                                 "native regression foreign write was absent")
                 def production():
-                    return subprocess.run(["cargo", "test", "--locked", "-p", "tinystoragedrivers-secrets",
-                                           "--lib", probe.TEST, "--", "--exact", "--nocapture"],
+                    return subprocess.run(probe.fixture_test_command(),
                                           cwd=probe.ROOT, env={**os.environ, "TSD_USER_DENIAL_FIXTURE": str(private)},
                                           capture_output=True, text=True)
                 rejected = production()
