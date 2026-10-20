@@ -146,13 +146,6 @@ pub(super) fn identity(file: &File) -> io::Result<Identity> {
     Ok(Identity(metadata.dev(), metadata.ino()))
 }
 
-/// An absent name is removal evidence only when the retained exact object has
-/// no namespace links. A moved source retains a link and cannot be acknowledged.
-pub(super) fn is_unlinked(file: &File) -> io::Result<bool> {
-    let metadata = file.metadata()?;
-    Ok(metadata.is_file() && metadata.nlink() == 0)
-}
-
 pub(super) fn verify_file(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file()

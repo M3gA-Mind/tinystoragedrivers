@@ -200,7 +200,7 @@ async fn google_unwrap_validates_plaintext_length_and_resource_identity() {
         } else {
             assert_eq!(
                 result.unwrap_err().kind(),
-                tinystoragedrivers_core::ErrorKind::Crypto
+                tinystoragedrivers_types::ErrorKind::Crypto
             );
         }
         let raw = request.await.unwrap();
@@ -211,7 +211,7 @@ async fn google_unwrap_validates_plaintext_length_and_resource_identity() {
             .await
             .unwrap_err()
             .kind(),
-        tinystoragedrivers_core::ErrorKind::InvalidInput
+        tinystoragedrivers_types::ErrorKind::InvalidInput
     );
     assert_eq!(format!("{kms:?}"), "GcpKms(..)");
 }
@@ -247,7 +247,7 @@ fn sensitive_payload_encoding_preserves_nested_shape() {
 
 #[tokio::test]
 async fn deterministic_kms_rejections_are_not_retryable_and_transient_statuses_are() {
-    use tinystoragedrivers_core::ErrorKind;
+    use tinystoragedrivers_types::ErrorKind;
     for (status, body, expected) in [
         (
             "400 Bad Request",

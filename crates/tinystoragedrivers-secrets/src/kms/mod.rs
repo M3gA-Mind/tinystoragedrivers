@@ -27,9 +27,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
-use tinystoragedrivers_core::{
-    ErrorKind, Precondition, Result, Scope, StorageBackend, StorageError,
-};
+use tinystoragedrivers_api::StorageBackend;
+use tinystoragedrivers_types::{ErrorKind, Precondition, Result, Scope, StorageError};
 use zeroize::Zeroizing;
 
 /// The per-scope collection holding wrapped keys.

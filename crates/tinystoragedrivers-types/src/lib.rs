@@ -21,6 +21,7 @@ mod filter;
 mod key;
 mod queue;
 mod scope;
+mod secret;
 mod stream;
 pub mod value;
 mod watch;
@@ -44,6 +45,10 @@ pub use queue::{
     QueueSpec, QueueStats, Receipt, Retry, validate_queue_name,
 };
 pub use scope::{MAX_SCOPE_LEN, Scope};
+pub use secret::{
+    MAX_SECRET_NAME_LEN, SecretPrecondition, SecretVersion, validate_secret_name,
+    validate_secret_prefix,
+};
 pub use stream::{SealOutcome, StreamEntry, StreamInfo};
 pub use watch::{MAX_WATCH_CURSOR_BYTES, WatchCursor, WatchNotice, WatchOptions, WatchReset};
 

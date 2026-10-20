@@ -4,9 +4,10 @@
 use std::panic::resume_unwind;
 use std::sync::Arc;
 
-use tinystoragedrivers_core::ScopedStorage;
+use tinystoragedrivers_api::DocumentStore;
+use tinystoragedrivers_types::Scope;
 
-use super::{CatchUnwind, secrets_conformance, unique_prefix};
+use super::{CatchUnwind, secrets_conformance, unique_prefix, versioned_secrets_conformance};
 use crate::store::SecretStore;
 use crate::{DEFAULT_COLLECTION, DerivedKeys, DocumentSecrets, crypto};
 
@@ -21,16 +22,21 @@ use crate::{DEFAULT_COLLECTION, DerivedKeys, DocumentSecrets, crypto};
 /// # Panics
 ///
 /// On the first check that fails, naming it.
-pub async fn document_secrets_conformance(storage: &ScopedStorage) {
+pub async fn document_secrets_conformance(documents: Arc<dyn DocumentStore>, scope: Scope) {
     let keys = crypto::generate_key().expect("generate a master key");
-    let store = DocumentSecrets::new(storage, Arc::new(DerivedKeys::new(keys)));
+    let store = DocumentSecrets::from_parts(
+        Arc::clone(&documents),
+        scope,
+        Arc::new(DerivedKeys::new(keys)),
+    );
     assert_eq!(store.backend_name(), "document");
     secrets_conformance(&store).await;
-    ciphertext_at_rest(storage, &store).await;
+    versioned_secrets_conformance(&store).await;
+    ciphertext_at_rest(&documents, &store).await;
 }
 
 /// The stored document is only `enc2:` ciphertext.
-async fn ciphertext_at_rest(storage: &ScopedStorage, store: &DocumentSecrets) {
+async fn ciphertext_at_rest(documents: &Arc<dyn DocumentStore>, store: &DocumentSecrets) {
     let name = format!("{}api_key", unique_prefix());
     let plaintext = "sk-live-conformance-0123456789";
     store
@@ -38,8 +44,7 @@ async fn ciphertext_at_rest(storage: &ScopedStorage, store: &DocumentSecrets) {
         .await
         .expect("set a secret");
     let outcome = CatchUnwind(Box::pin(async {
-        let doc = storage
-            .documents()
+        let doc = documents
             .get(DEFAULT_COLLECTION, &name)
             .await
             .expect("read the stored document")

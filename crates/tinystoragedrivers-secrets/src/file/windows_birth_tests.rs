@@ -331,7 +331,7 @@ fn unsafe_native_data_lock_and_ledger_are_retained_before_master_creation() {
             let Err(error) = EncryptedFileSecrets::with_key_file(private.clone()) else {
                 panic!("unsafe existing store must deny master construction");
             };
-            assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+            assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Backend);
             assert!(!private.join(KEY_FILE_NAME).exists());
             let leaf_bytes_retained = fs::read(&path).unwrap() == before_bytes;
             assert!(
