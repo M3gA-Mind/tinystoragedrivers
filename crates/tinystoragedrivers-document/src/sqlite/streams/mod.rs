@@ -7,7 +7,7 @@
 //!
 //! A sealed stream (see [`StreamStore::seal`]) keeps its entries as one
 //! compressed blob in the blob table instead of rows, and its head row's
-//! `sealed` flag says to read the blob. [`seal`] holds the protocol.
+//! `sealed` flag says to read the blob. The private `seal` module holds the protocol.
 
 use std::fmt;
 
