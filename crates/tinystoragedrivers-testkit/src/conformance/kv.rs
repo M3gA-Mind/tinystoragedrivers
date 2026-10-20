@@ -22,27 +22,30 @@ pub async fn run(kv: &dyn KvStore) {
         ErrorKind::Conflict,
         "insert requires absence",
     );
-    assert_eq!(ok(kv.get(&a).await, "get").unwrap().doc, json!({"n": 1}));
+    assert_eq!(
+        ok(kv.get(&a).await, "get").expect("put key is present").doc,
+        json!({"n": 1})
+    );
     let second = ok(
-        kv.cas(&a, json!({"n": 2}), Precondition::Version(first.clone()))
+        kv.cas(&a, json!({"n": 2}), Precondition::Version(first))
             .await,
         "cas",
     );
     assert_ne!(second, first);
     fails(
-        kv.cas(&a, json!({"n": 3}), Precondition::Version(first.clone()))
+        kv.cas(&a, json!({"n": 3}), Precondition::Version(first))
             .await,
         ErrorKind::Conflict,
         "stale CAS",
     );
     assert!(ok(
-        kv.delete(&a, Precondition::Version(second.clone())).await,
+        kv.delete(&a, Precondition::Version(second)).await,
         "delete before recreation"
     ));
     let recreated = ok(kv.put(&a, json!({"n": 5})).await, "recreate key");
     assert_ne!(recreated, second, "recreated keys must not reuse revisions");
     fails(
-        kv.cas(&a, json!({"n": 6}), Precondition::Version(second.clone()))
+        kv.cas(&a, json!({"n": 6}), Precondition::Version(second))
             .await,
         ErrorKind::Conflict,
         "stale pre-delete revision after recreation",
@@ -67,7 +70,7 @@ pub async fn run(kv: &dyn KvStore) {
     assert_eq!(page.items.len(), 1);
     let cursor = page.next.expect("second entry has a cursor");
     let next = ok(kv.list(&prefix, Some(cursor), 10).await, "list next page");
-    assert!(!next.items.is_empty());
+    assert_ne!(next.items, Vec::new(), "continuation page has items");
     assert_ne!(page.items[0].id, next.items[0].id);
     assert!(ok(
         kv.delete(&a, Precondition::Version(recreated)).await,

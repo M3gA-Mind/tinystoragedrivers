@@ -63,3 +63,7 @@ impl StorageBackend for MemoryBackend {
 pub fn memory_backend() -> MemoryBackend {
     MemoryBackend::new()
 }
+
+#[cfg(test)]
+#[path = "memory_tests.rs"]
+mod tests;
