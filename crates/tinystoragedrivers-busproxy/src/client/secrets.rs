@@ -136,3 +136,7 @@ impl SecretStore for BusSecrets {
         self.enumerable
     }
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;

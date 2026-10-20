@@ -271,6 +271,14 @@ struct GroupLock {
     until_ms: i64,
 }
 
+/// A group update made before settling a message, so it can be rolled back
+/// safely if the message receipt is no longer current.
+struct GroupPin {
+    key: String,
+    previous: Option<Versioned<GroupLock>>,
+    version: Version,
+}
+
 /// A [`QueueStore`] over a [`DocumentStore`]: one document per message in
 /// [`MESSAGES`], whose deliverable set is a single atomic
 /// [`claim`](DocumentStore::claim), plus one group lock per
@@ -485,7 +493,7 @@ impl DocumentQueue {
                     _ => Some(GroupLock {
                         queue: queue.to_owned(),
                         owner: id.to_owned(),
-                        until_ms: until,
+                        until_ms: current.map_or(until, |lock| until.max(lock.until_ms)),
                     }),
                 })
             })
@@ -493,20 +501,84 @@ impl DocumentQueue {
         Ok(taken.is_some())
     }
 
-    /// Keep `group` pinned to `id` until `until`, if `id` still holds it.
-    async fn pin_group(&self, queue: &str, group: &str, id: &str, until: i64) -> Result<()> {
+    /// Claim or extend `group` for `id` before changing the corresponding
+    /// message. A different, unexpired owner wins; callers must then leave the
+    /// message untouched.
+    async fn pin_group(
+        &self,
+        queue: &str,
+        group: &str,
+        id: &str,
+        until: i64,
+        now: i64,
+    ) -> Result<Option<GroupPin>> {
         let key = group_key(queue, group)?;
-        self.groups
-            .update(&key, |current| {
-                Ok(current
-                    .filter(|lock| lock.owner == id)
-                    .map(|lock| GroupLock {
-                        until_ms: until,
-                        ..lock
-                    }))
-            })
-            .await?;
-        Ok(())
+        for _ in 0..32 {
+            let previous = self.groups.get(&key).await?;
+            if previous
+                .as_ref()
+                .is_some_and(|found| found.doc.owner != id && found.doc.until_ms > now)
+            {
+                return Ok(None);
+            }
+            let precondition = previous.as_ref().map_or(Precondition::Absent, |found| {
+                Precondition::Version(found.version)
+            });
+            let lock = GroupLock {
+                queue: queue.to_owned(),
+                owner: id.to_owned(),
+                until_ms: previous
+                    .as_ref()
+                    .map_or(until, |found| until.max(found.doc.until_ms)),
+            };
+            match self
+                .docs
+                .put(GROUPS, &key, serde_json::to_value(&lock)?, precondition)
+                .await
+            {
+                Ok(version) => {
+                    return Ok(Some(GroupPin {
+                        key,
+                        previous,
+                        version,
+                    }));
+                }
+                Err(error) if error.kind() == ErrorKind::Conflict => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StorageError::conflict(
+            "queue group kept changing during compare-and-swap",
+        ))
+    }
+
+    /// Restore a pre-settlement group state only if this operation's pin is
+    /// still current. A later owner's lock is never removed or overwritten.
+    async fn rollback_group_pin(&self, pin: GroupPin) -> Result<()> {
+        let restore = match pin.previous {
+            Some(previous) => self
+                .docs
+                .put(
+                    GROUPS,
+                    &pin.key,
+                    serde_json::to_value(previous.doc)?,
+                    Precondition::Version(pin.version),
+                )
+                .await
+                .map(|_| ()),
+            None => self
+                .docs
+                .delete(GROUPS, &pin.key, Precondition::Version(pin.version))
+                .await
+                .map(|_| ()),
+        };
+        match restore {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::Conflict => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Free `group` if `id` holds it.
@@ -514,6 +586,42 @@ impl DocumentQueue {
         let key = group_key(queue, group)?;
         self.groups.delete_if(&key, |lock| lock.owner == id).await?;
         Ok(())
+    }
+
+    /// Return the version of `id`'s current group lock, if it still owns it.
+    async fn owned_group_version(
+        &self,
+        queue: &str,
+        group: &str,
+        id: &str,
+    ) -> Result<Option<Version>> {
+        let key = group_key(queue, group)?;
+        Ok(self
+            .groups
+            .get(&key)
+            .await?
+            .filter(|lock| lock.doc.owner == id)
+            .map(|lock| lock.version))
+    }
+
+    /// Free a group only if it is still exactly the lock observed while
+    /// settling a receipt. Owner IDs can be reused by a deduped enqueue.
+    async fn free_group_at_version(
+        &self,
+        queue: &str,
+        group: &str,
+        version: Version,
+    ) -> Result<()> {
+        let key = group_key(queue, group)?;
+        match self
+            .docs
+            .delete(GROUPS, &key, Precondition::Version(version))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::Conflict => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn free_group_of(&self, queue: &str, body: &Body, id: &str) -> Result<()> {
@@ -722,6 +830,10 @@ impl QueueStore for DocumentQueue {
             return Ok(false);
         }
         let body = found.doc;
+        let group_version = match &body.group {
+            Some(group) => self.owned_group_version(queue, group, &receipt.id).await?,
+            None => None,
+        };
         let settled = if body.dedupe_key.is_some() && spec.dedupe_window_ms > 0 {
             let tombstone = Body {
                 state: DONE.to_owned(),
@@ -747,7 +859,9 @@ impl QueueStore for DocumentQueue {
         };
         match settled {
             Ok(true) => {
-                self.free_group_of(queue, &body, &receipt.id).await?;
+                if let (Some(group), Some(version)) = (&body.group, group_version) {
+                    self.free_group_at_version(queue, group, version).await?;
+                }
                 Ok(true)
             }
             Ok(false) => Ok(false),
@@ -764,6 +878,28 @@ impl QueueStore for DocumentQueue {
             Retry::After(ms) => Some(Self::after(now, *ms)?),
             Retry::DeadLetter(_) => None,
         };
+        let current = self.messages.get(&receipt.id).await?;
+        let Some(current) = current.filter(|found| found.doc.holds(queue, receipt)) else {
+            return Ok(false);
+        };
+        let retried = matches!(retry, Retry::After(_)) && current.doc.attempt < spec.max_attempts;
+        let pin = if retried {
+            match (&current.doc.group, retry_at) {
+                (Some(group), Some(at)) => {
+                    let until = at.max(current.doc.ready_at);
+                    let Some(pin) = self
+                        .pin_group(queue, group, &receipt.id, until, now)
+                        .await?
+                    else {
+                        return Ok(false);
+                    };
+                    Some(pin)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let stored = self
             .settle(queue, receipt, |body| match (&retry, retry_at) {
                 (Retry::After(_), Some(at)) if body.attempt < spec.max_attempts => {
@@ -772,16 +908,26 @@ impl QueueStore for DocumentQueue {
                 (Retry::DeadLetter(reason), _) => body.dead(now, reason.clone()),
                 _ => body.dead(now, "max attempts exceeded"),
             })
-            .await?;
+            .await;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => {
+                if let Some(pin) = pin {
+                    self.rollback_group_pin(pin).await?;
+                }
+                return Err(error);
+            }
+        };
         let Some(before) = stored else {
+            if let Some(pin) = pin {
+                self.rollback_group_pin(pin).await?;
+            }
             return Ok(false);
         };
-        let retried = matches!(retry, Retry::After(_)) && before.attempt < spec.max_attempts;
-        if let Some(group) = &before.group {
-            match retry_at {
-                Some(at) if retried => self.pin_group(queue, group, &receipt.id, at).await?,
-                _ => self.free_group(queue, group, &receipt.id).await?,
-            }
+        if let Some(group) = &before.group
+            && !retried
+        {
+            self.free_group(queue, group, &receipt.id).await?;
         }
         Ok(true)
     }
@@ -789,19 +935,45 @@ impl QueueStore for DocumentQueue {
     async fn extend(&self, queue: &str, receipt: &Receipt, visibility_ms: u64) -> Result<bool> {
         validate_queue_name(queue)?;
         check_window("visibility window", visibility_ms)?;
-        let until = Self::after(self.now()?, visibility_ms)?;
+        let now = self.now()?;
+        let until = Self::after(now, visibility_ms)?;
+        let current = self.messages.get(&receipt.id).await?;
+        let Some(current) = current.filter(|found| found.doc.holds(queue, receipt)) else {
+            return Ok(false);
+        };
+        let pin = if let Some(group) = &current.doc.group {
+            let Some(pin) = self
+                .pin_group(queue, group, &receipt.id, until, now)
+                .await?
+            else {
+                return Ok(false);
+            };
+            Some(pin)
+        } else {
+            None
+        };
         let stored = self
             .settle(queue, receipt, |body| Body {
                 ready_at: until,
                 ..body
             })
-            .await?;
+            .await;
+        let stored = match stored {
+            Ok(stored) => stored,
+            Err(error) => {
+                if let Some(pin) = pin {
+                    self.rollback_group_pin(pin).await?;
+                }
+                return Err(error);
+            }
+        };
         let Some(before) = stored else {
+            if let Some(pin) = pin {
+                self.rollback_group_pin(pin).await?;
+            }
             return Ok(false);
         };
-        if let Some(group) = &before.group {
-            self.pin_group(queue, group, &receipt.id, until).await?;
-        }
+        let _ = before;
         Ok(true)
     }
 
