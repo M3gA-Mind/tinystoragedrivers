@@ -153,7 +153,7 @@ impl Capabilities {
     /// Returns every capability defined by this crate version.
     #[must_use]
     pub const fn all() -> Self {
-        Self((1 << 22) - 1)
+        Self((1 << 23) - 1)
     }
     /// Returns this set with one capability added.
     #[must_use]
