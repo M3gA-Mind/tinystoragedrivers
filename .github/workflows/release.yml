@@ -95,6 +95,9 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      - name: Verify storage callbacks through the compiled module
+        run: bash scripts/test-storage-callback.sh
+
       - name: Require 90% line coverage in every source file
         run: .github/scripts/check-file-coverage.sh 90 target/coverage.json
 

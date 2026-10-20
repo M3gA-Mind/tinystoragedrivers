@@ -17,11 +17,21 @@ cargo build --all-targets --all-features
 cargo test --all-features
 ```
 
-CI also requires at least 90% line coverage in every source file. After
-installing `cargo-llvm-cov`, run the same gate locally:
+CI also requires at least 90% line coverage in every source file. The coverage
+suite includes the compiled storage-callback module, so build and exercise that
+fixture first, then pass its artifact path to the gate. After installing
+`cargo-llvm-cov`, run:
 
 ```sh
-.github/scripts/check-file-coverage.sh 90 target/coverage.json
+bash scripts/test-storage-callback.sh
+proof_target="$(cargo metadata --manifest-path proof-workspaces/storage-callback/Cargo.toml --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+case "$(uname -s)" in
+  Darwin) proof_library="libstorage_callback_module_proof.dylib" ;;
+  MINGW*|MSYS*|CYGWIN*) proof_library="storage_callback_module_proof.dll" ;;
+  *) proof_library="libstorage_callback_module_proof.so" ;;
+esac
+TSD_STORAGE_CALLBACK_MODULE="$proof_target/debug/$proof_library" \
+  .github/scripts/check-file-coverage.sh 90 target/coverage.json
 ```
 
 ## Making A Change
