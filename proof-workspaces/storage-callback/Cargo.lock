@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-api"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-blob"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2048,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-connect"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "mongodb",
  "rusqlite",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-document"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -2104,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-kv"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-queue"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "tinystoragedrivers-api",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-testkit"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-types"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "serde",
  "serde_json",
