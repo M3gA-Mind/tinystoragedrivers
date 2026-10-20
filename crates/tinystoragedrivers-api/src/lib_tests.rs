@@ -10,9 +10,10 @@ use tinystoragedrivers_types::{Capability, ErrorKind};
 #[test]
 fn api_contract_version_is_pinned() {
     assert_eq!(CONTRACT_VERSION, 3);
-    assert!(is_compatible(2));
+    assert!(is_compatible(3));
     assert!(!is_compatible(0));
     assert!(!is_compatible(1));
+    assert!(!is_compatible(2));
 }
 
 #[test]
