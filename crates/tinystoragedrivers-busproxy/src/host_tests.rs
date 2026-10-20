@@ -1,6 +1,7 @@
 use super::*;
 use crate::PerCallerEndpoint;
 use crate::StorageServer;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tinybus::module::ModuleHost;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
 use tinystoragedrivers_api::StorageBackend;
@@ -11,6 +12,7 @@ use tinystoragedrivers_types::Scope;
 struct SignalEndpoint {
     signals: Mutex<Option<tokio::sync::broadcast::Sender<WatchChanged>>>,
     has_signals: bool,
+    epoch: AtomicU64,
 }
 
 #[async_trait::async_trait]
@@ -50,6 +52,10 @@ impl StorageEndpoint for SignalEndpoint {
             None
         }
     }
+
+    fn watch_epoch(&self, _sender: &BusName) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
 }
 
 fn signal_endpoint(
@@ -60,6 +66,7 @@ fn signal_endpoint(
         SignalEndpoint {
             signals: Mutex::new(Some(signals.clone())),
             has_signals,
+            epoch: AtomicU64::new(0),
         },
         signals,
     )
@@ -333,6 +340,158 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
         task.abort();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_old_watch_forwarder_is_aborted_when_its_epoch_changes() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller_name = caller.unique_name().unwrap();
+    let mut received = caller
+        .add_match(tinybus::MatchRule {
+            kind: Some(tinybus::MessageKind::Signal),
+            sender: None,
+            interface: Some(interface()),
+            member: Some(member(WATCH_MEMBER)),
+            path: Some(watch_path(&caller_name).unwrap()),
+            path_namespace: None,
+        })
+        .await
+        .unwrap();
+    let (endpoint, sender) = signal_endpoint(true);
+    let endpoint = Arc::new(endpoint);
+    let shared = Shared {
+        transport: HostTransport::Connection(host.downgrade()),
+        endpoint: Arc::clone(&endpoint) as Arc<dyn StorageEndpoint>,
+        forwarders: Mutex::new(HashMap::new()),
+    };
+
+    shared.forward_watch_signals(&caller_name);
+    let old_task = shared
+        .forwarders
+        .lock()
+        .unwrap()
+        .get(&caller_name)
+        .expect("first watch starts a forwarder")
+        .1
+        .abort_handle();
+    assert!(!old_task.is_finished(), "the old forwarder is still live");
+
+    endpoint.epoch.fetch_add(1, Ordering::SeqCst);
+    shared.forward_watch_signals(&caller_name);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !old_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacing the epoch aborts the previous forwarder");
+    assert_eq!(
+        shared
+            .forwarders
+            .lock()
+            .unwrap()
+            .get(&caller_name)
+            .unwrap()
+            .0,
+        1
+    );
+
+    sender
+        .send(WatchChanged {
+            watch_id: "new-epoch".into(),
+            notice: tinystoragedrivers_bus::WatchNotice::Invalidated { cursor: None },
+        })
+        .unwrap();
+    let message = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let message = received.recv().await.unwrap();
+            if message.body[0]["watch_id"] == "new-epoch" {
+                break message;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(message.body[0]["watch_id"], "new-epoch");
+    for (_, (_, task)) in shared.forwarders.lock().unwrap().drain() {
+        task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_stream_ref_opened_by_another_peer_is_rejected() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attacker = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let backend = MemoryBackend::new();
+    let endpoint = Arc::new(PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(
+            backend
+                .for_scope(&Scope::new("stream-owner").unwrap())
+                .unwrap(),
+        ))
+    }));
+    let shared = Arc::new(Shared {
+        transport: HostTransport::Connection(host.downgrade()),
+        endpoint,
+        forwarders: Mutex::new(HashMap::new()),
+    });
+    let path = object_path(Object::Blobs);
+    host.serve_at(
+        path.clone(),
+        ObjectService {
+            object: Object::Blobs,
+            shared,
+        },
+    )
+    .await
+    .unwrap();
+
+    let destination = host.unique_name().unwrap();
+    let forged = attacker
+        .open_stream(&destination, StreamDescriptor::with_len(1))
+        .await
+        .unwrap();
+    let proxy = caller
+        .proxy(destination.as_str(), path.as_str(), interface().as_str())
+        .unwrap();
+    let error = proxy
+        .call::<Value>(
+            "PutStream",
+            (
+                PutBlobStreamRequest {
+                    key: "forged-body".into(),
+                    len: 1,
+                    content_type: None,
+                    ttl_ms: None,
+                },
+                forged.stream_ref(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        tinybus::Error::MethodFailed { name, message }
+            if name == ERROR_STORAGE && message == "invalid_input"
+    ));
+    drop(forged);
 }
 
 #[tokio::test]
