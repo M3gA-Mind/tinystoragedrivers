@@ -13,6 +13,10 @@ pub use file::streams::FileStreams;
 pub mod memory;
 #[cfg(feature = "mongodb")]
 pub mod mongodb;
+#[cfg(feature = "polling-watch")]
+mod polling_watch;
+#[cfg(feature = "polling-watch")]
+pub use polling_watch::PollingWatch;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
@@ -79,3 +83,7 @@ fn sealed_blob_key(stream: &str) -> tinystoragedrivers_types::Result<String> {
 #[cfg(test)]
 #[path = "conformance_tests.rs"]
 mod conformance_tests;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

@@ -1,17 +1,13 @@
 //! Test support for storage-port consumers.
 //!
 //! Use this crate only from development dependencies. It provides deterministic
-//! fault schedules and clocks, plus shared conformance checks for real engines.
+//! clocks and shared document, stream, validation, and watch checks.
 
 mod conformance;
-mod fault;
-pub use conformance::{documents, queue, streams, validated, watch};
+pub use conformance::{documents, seal, semantics, streams, validated, watch};
 mod clock;
-mod no_native_ttl;
 
 pub use clock::TestClock;
-pub use fault::{Failing, FaultPlan};
-pub use no_native_ttl::NoNativeTtl;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

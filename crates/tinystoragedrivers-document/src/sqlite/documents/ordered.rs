@@ -136,3 +136,7 @@ fn and(sql: &mut String, condition: &str) {
     sql.push_str(condition);
     sql.push(')');
 }
+
+#[cfg(test)]
+#[path = "ordered_tests.rs"]
+mod tests;

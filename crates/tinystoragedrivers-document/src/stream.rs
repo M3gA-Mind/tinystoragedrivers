@@ -65,3 +65,7 @@ impl SealedLog {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;

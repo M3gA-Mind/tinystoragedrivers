@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
 use tinystoragedrivers_types::{
-    Blob, BlobMeta, Capabilities, Capability, MAX_KEY_LEN, Result, StorageError, TreeEntry,
-    TreeFile, is_reserved_blob_key,
+    Blob, BlobListPage, BlobMeta, Capabilities, Capability, MAX_BLOB_LIST_PAGE_ITEMS, MAX_KEY_LEN,
+    Result, StorageError, TreeEntry, TreeFile, is_reserved_blob_key,
 };
 
 /// An owned stream of blob chunks. Stream failures use the storage error vocabulary.
@@ -39,6 +39,15 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
 
     /// Maximum logical key length in UTF-8 bytes.
     fn max_key_len(&self) -> usize;
+
+    /// Whether this engine supports the reserved stream-seal object namespace.
+    ///
+    /// Ordinary blob adapters must keep the default `false`; primitive blob
+    /// engines that provide the hidden sealed methods may return `true`.
+    #[doc(hidden)]
+    fn supports_sealed_blobs(&self) -> bool {
+        false
+    }
 
     /// Store bytes, replacing any previous blob.
     ///
@@ -150,6 +159,81 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// # Errors
     /// Returns an error for an invalid prefix or a backend failure.
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>>;
+
+    /// Store an engine-owned object in the sealed-stream namespace.
+    ///
+    /// This hidden engine-to-engine hook allows stream adapters to use keys
+    /// reserved from user-facing blob operations. Concrete blob engines should
+    /// override it to bypass only their public namespace guard.
+    #[doc(hidden)]
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        validate_sealed_key(key, self.max_key_len(), self.supports_sealed_blobs())?;
+        self.put(key, bytes, content_type).await
+    }
+
+    /// Read an engine-owned sealed-stream object.
+    #[doc(hidden)]
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        validate_sealed_key(key, self.max_key_len(), self.supports_sealed_blobs())?;
+        self.get(key).await
+    }
+
+    /// Read metadata for an engine-owned sealed-stream object.
+    #[doc(hidden)]
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        validate_sealed_key(key, self.max_key_len(), self.supports_sealed_blobs())?;
+        self.head(key).await
+    }
+
+    /// Delete an engine-owned sealed-stream object.
+    #[doc(hidden)]
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        validate_sealed_key(key, self.max_key_len(), self.supports_sealed_blobs())?;
+        self.delete(key).await
+    }
+
+    /// List engine-owned sealed-stream objects below a reserved prefix.
+    #[doc(hidden)]
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_sealed_key(prefix, self.max_key_len(), self.supports_sealed_blobs())?;
+        Ok(self
+            .list(prefix)
+            .await?
+            .into_iter()
+            .filter(|meta| is_reserved_blob_key(&meta.key) && meta.key.starts_with(prefix))
+            .collect())
+    }
+
+    /// List physical blobs with bytewise key ordering and an exclusive cursor.
+    /// Expired physical objects are included; blobs without recorded age have
+    /// `written_at_ms: None`. The maximum page size is
+    /// [`MAX_BLOB_LIST_PAGE_ITEMS`].
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for a zero or oversized page and
+    /// `Unsupported(BlobListing)` when pagination is unavailable.
+    async fn list_page(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlobListPage> {
+        let _ = (prefix, after);
+        if limit == 0 || limit > MAX_BLOB_LIST_PAGE_ITEMS {
+            return Err(StorageError::invalid_input(
+                "invalid blob listing page size",
+            ));
+        }
+        Err(StorageError::unsupported(
+            Capability::BlobListing,
+            "paged blob listing is unsupported",
+        ))
+    }
 
     /// Reclaim expired blobs where supported. Defaults to zero.
     ///
@@ -286,6 +370,27 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         }
         Ok(deleted)
     }
+}
+
+fn validate_sealed_key(key: &str, max_key_len: usize, supported: bool) -> Result<()> {
+    if !is_reserved_blob_key(key) {
+        return Err(StorageError::invalid_input(
+            "driver-owned blob key is outside the sealed-stream namespace",
+        ));
+    }
+    if key.len() > max_key_len {
+        return Err(StorageError::invalid_input(
+            "blob key exceeds maximum length",
+        ));
+    }
+    tinystoragedrivers_types::Key::new(key.to_owned())?;
+    if !supported {
+        return Err(StorageError::unsupported(
+            Capability::StreamSeal,
+            "reserved sealed-stream blobs are unsupported",
+        ));
+    }
+    Ok(())
 }
 
 async fn collect_exact(mut reader: BlobReader, len: u64) -> Result<Vec<u8>> {

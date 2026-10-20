@@ -14,6 +14,7 @@ memory = []
 sqlite = ["dep:rusqlite", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:tokio"]
 mongodb = ["dep:mongodb", "dep:futures-util", "dep:tokio", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
 file = ["dep:tokio", "dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
+polling-watch = ["dep:tokio"]
 
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
@@ -26,7 +27,7 @@ sha2 = { workspace = true }
 data-encoding = { workspace = true }
 zstd = { workspace = true }
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"], optional = true }
 libc = { version = "0.2", optional = true }
 mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
 futures-util = { version = "0.3", optional = true }
@@ -34,6 +35,8 @@ futures-util = { version = "0.3", optional = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+tinystoragedrivers-testkit = { version = "1.0.0", path = "../tinystoragedrivers-testkit" }
+tinystoragedrivers-blob = { version = "1.0.0", path = "../tinystoragedrivers-blob", default-features = false, features = ["memory", "mongodb"] }
 
 [lints]
 workspace = true
