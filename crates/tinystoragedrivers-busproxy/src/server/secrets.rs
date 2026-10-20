@@ -1,9 +1,10 @@
 //! `Secrets` selectors; only reached on the confidential route.
 use serde_json::Value;
+use tinystoragedrivers_api::types::ErrorKind;
 use tinystoragedrivers_bus as wire;
 
 use super::documents::bounded_list;
-use super::{Reply, StorageServer, decode, encode, invalid, native};
+use super::{Reply, StorageServer, decode, encode, invalid};
 
 impl StorageServer {
     pub(super) async fn secrets(&self, selector: &str, request: Value) -> Reply {
@@ -14,7 +15,7 @@ impl StorageServer {
             }),
             "Get" => {
                 let r: wire::SecretNameRequest = decode(request)?;
-                let found = native(secrets.get(&r.name).await)?;
+                let found = native_secret(secrets.get(&r.name).await)?;
                 encode(&found.map(|value| wire::SecretValue {
                     value: value.to_vec(),
                 }))
@@ -29,7 +30,7 @@ impl StorageServer {
             }
             "Set" => {
                 let r: wire::SetSecretRequest = decode(request)?;
-                native(secrets.set(&r.name, &r.value).await)?;
+                native_secret(secrets.set(&r.name, &r.value).await)?;
                 encode(&())
             }
             "SetIf" => {
@@ -39,13 +40,31 @@ impl StorageServer {
             }
             "Delete" => {
                 let r: wire::SecretNameRequest = decode(request)?;
-                encode(&native(secrets.delete(&r.name).await)?)
+                encode(&native_secret(secrets.delete(&r.name).await)?)
             }
             "List" => {
                 let r: wire::ListSecretsRequest = decode(request)?;
-                bounded_list(&native(secrets.list(&r.prefix).await)?)
+                bounded_list(&native_secret(secrets.list(&r.prefix).await)?)
             }
             _ => Err(invalid()),
         }
     }
+}
+
+fn native_secret<T>(
+    result: tinystoragedrivers_api::types::Result<T>,
+) -> Result<T, wire::StorageFailure> {
+    result.map_err(|error| wire::StorageFailure {
+        kind: match error.kind() {
+            ErrorKind::NotFound => wire::StorageKind::NotFound,
+            ErrorKind::Conflict => wire::StorageKind::Conflict,
+            ErrorKind::AlreadyExists => wire::StorageKind::AlreadyExists,
+            ErrorKind::Unsupported(_) => wire::StorageKind::Unsupported,
+            ErrorKind::InvalidInput => wire::StorageKind::InvalidInput,
+            ErrorKind::Serialization => wire::StorageKind::Serialization,
+            ErrorKind::Crypto => wire::StorageKind::Crypto,
+            ErrorKind::Unavailable => wire::StorageKind::Unavailable,
+            _ => wire::StorageKind::Backend,
+        },
+    })
 }

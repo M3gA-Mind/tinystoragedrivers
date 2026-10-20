@@ -3,6 +3,7 @@
 //! upkeep on update and delete, and expiry as seen by claims and queries.
 
 use serde_json::{Value, json};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{empty, has, ok, unique};
 use tinystoragedrivers_api::DocumentStore;
@@ -21,6 +22,15 @@ pub async fn run(docs: &dyn DocumentStore) {
     if has(docs.capabilities(), Capability::Ttl) {
         expiry_in_claims_and_queries(docs).await;
     }
+}
+
+fn future_expiry_ms() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let century = Duration::from_secs(100 * 365 * 24 * 60 * 60).as_millis();
+    u64::try_from(now.saturating_add(century)).unwrap_or(u64::MAX)
 }
 
 async fn put(docs: &dyn DocumentStore, coll: &str, id: &str, doc: Value) {
@@ -165,7 +175,7 @@ async fn search_skips_expired(docs: &dyn DocumentStore) {
         docs,
         &coll,
         "live",
-        json!({"text": "ember", "exp": 32_503_680_000_000_u64}),
+        json!({"text": "ember", "exp": future_expiry_ms()}),
     )
     .await;
     let ids: Vec<_> = ok(docs.search(&coll, "ember", 10).await, "search")
@@ -184,7 +194,7 @@ async fn expiry_in_claims_and_queries(docs: &dyn DocumentStore) {
             .await,
         "ensure ttl",
     );
-    let far = 32_503_680_000_000_u64;
+    let far = future_expiry_ms();
     put(docs, &coll, "a", json!({"state": "q", "n": 1, "exp": 1})).await;
     put(docs, &coll, "b", json!({"state": "q", "n": 2, "exp": far})).await;
     let eligible = Filter::eq("state", "q");

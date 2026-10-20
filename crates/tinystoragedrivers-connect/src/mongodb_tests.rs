@@ -50,7 +50,7 @@ async fn connects_to_replica_set_and_exposes_shared_database_and_clock() {
     assert!(connection.transactions_available());
     assert!(clone.transactions_available());
     assert_eq!(connection.origin(), clone.origin());
-    assert!(!connection.origin().to_hex().is_empty());
+    assert_eq!(connection.origin().to_hex().len(), 24);
     assert!(connection.options().require_transactions);
 
     let fixed = connection.clone().with_clock(Arc::new(|| 987));

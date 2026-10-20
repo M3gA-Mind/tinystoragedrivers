@@ -11,7 +11,7 @@ use tinystoragedrivers_types::{
     Capabilities, Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo,
 };
 
-use super::documents::{bson_to_json, json_to_bson};
+use super::documents::{bson_to_json, json_to_bson, mongo_error};
 use crate::validate_stream;
 use tinystoragedrivers_connect::MongoConnection;
 
@@ -27,6 +27,8 @@ pub struct MongoStreams {
     clock: crate::Clock,
     transactions: bool,
     blobs: Option<Arc<dyn BlobStore>>,
+    #[cfg(test)]
+    truncate_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 impl std::fmt::Debug for MongoStreams {
@@ -55,6 +57,32 @@ impl MongoStreams {
             clock: connection.clock(),
             transactions: connection.transactions_available(),
             blobs: None,
+            #[cfg(test)]
+            truncate_pause: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_transactions_for_test(mut self) -> Self {
+        self.transactions = false;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_truncate_for_test(
+        mut self,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.truncate_pause = Some((started, resume));
+        self
+    }
+
+    #[cfg(test)]
+    async fn pause_at_truncate_boundary(&self) {
+        if let Some((started, resume)) = &self.truncate_pause {
+            started.notify_one();
+            resume.notified().await;
         }
     }
 
@@ -80,18 +108,21 @@ impl MongoStreams {
     }
 
     fn blobs(&self) -> Result<&Arc<dyn BlobStore>> {
-        self.blobs.as_ref().ok_or_else(|| {
-            StorageError::unsupported(
-                Capability::StreamSeal,
-                "Mongo stream sealing requires a shared blob adapter",
-            )
-        })
+        self.blobs
+            .as_ref()
+            .filter(|blobs| blobs.supports_sealed_blobs())
+            .ok_or_else(|| {
+                StorageError::unsupported(
+                    Capability::StreamSeal,
+                    "Mongo stream sealing requires a shared blob adapter",
+                )
+            })
     }
 
     async fn sealed_log(&self, key: &str) -> Result<crate::stream::SealedLog> {
         let blob = self
             .blobs()?
-            .get(key)
+            .get_sealed(key)
             .await?
             .ok_or_else(|| StorageError::backend("sealed stream has no blob"))?;
         crate::stream::SealedLog::decode(&blob.bytes)
@@ -113,18 +144,18 @@ impl MongoStreams {
             .client
             .start_session()
             .await
-            .map_err(|error| mongo_error("start a stream truncation", error))?;
+            .map_err(mongo_error("start a stream truncation"))?;
         session
             .start_transaction()
             .await
-            .map_err(|error| mongo_error("start a stream truncation", error))?;
+            .map_err(mongo_error("start a stream truncation"))?;
         let result = async {
             let head = self
                 .heads()
                 .find_one(self.head_filter(stream))
                 .session(&mut session)
                 .await
-                .map_err(|error| mongo_error("read a stream head", error))?;
+                .map_err(mongo_error("read a stream head"))?;
             let generation = head
                 .as_ref()
                 .and_then(|value| value.get_i64("g").ok())
@@ -135,10 +166,10 @@ impl MongoStreams {
                 .with_options(FindOptions::builder().sort(doc! {"o": 1}).build())
                 .session(&mut session)
                 .await
-                .map_err(|error| mongo_error("read stream segments", error))?;
+                .map_err(mongo_error("read stream segments"))?;
             let mut rows = Vec::new();
             while let Some(row) = cursor.next(&mut session).await {
-                rows.push(row.map_err(|error| mongo_error("read stream segments", error))?);
+                rows.push(row.map_err(mongo_error("read stream segments"))?);
             }
             let Some(last) = rows.last() else {
                 return Ok(0);
@@ -182,7 +213,9 @@ impl MongoStreams {
                 )
                 .session(&mut session)
                 .await
-                .map_err(|error| mongo_error("record a stream truncation", error))?;
+                .map_err(|error| {
+                    transaction_conflict_error("record a stream truncation", error)
+                })?;
             let last_id = last.get("_id").cloned().unwrap_or(Bson::Null);
             for row in rows {
                 let start = start_of(&row);
@@ -194,7 +227,7 @@ impl MongoStreams {
                         .delete_one(doc! {"_id": id})
                         .session(&mut session)
                         .await
-                        .map_err(|error| mongo_error("truncate a stream", error))?;
+                        .map_err(|error| transaction_conflict_error("truncate a stream", error))?;
                 } else if start.saturating_add(trimmed) < cut {
                     let next_trimmed = cut.min(end).saturating_sub(start);
                     let next_trimmed_i = i64::try_from(next_trimmed)
@@ -212,7 +245,7 @@ impl MongoStreams {
                         )
                         .session(&mut session)
                         .await
-                        .map_err(|error| mongo_error("truncate a stream", error))?;
+                        .map_err(|error| transaction_conflict_error("truncate a stream", error))?;
                 }
             }
             Ok(removed)
@@ -220,10 +253,9 @@ impl MongoStreams {
         .await;
         match result {
             Ok(removed) => {
-                session
-                    .commit_transaction()
-                    .await
-                    .map_err(|error| mongo_error("commit a stream truncation", error))?;
+                session.commit_transaction().await.map_err(|error| {
+                    transaction_conflict_error("commit a stream truncation", error)
+                })?;
                 Ok(removed)
             }
             Err(error) => {
@@ -245,11 +277,11 @@ impl MongoStreams {
             .client
             .start_session()
             .await
-            .map_err(|error| mongo_error("start a stream seal", error))?;
+            .map_err(mongo_error("start a stream seal"))?;
         session
             .start_transaction()
             .await
-            .map_err(|error| mongo_error("start a stream seal", error))?;
+            .map_err(mongo_error("start a stream seal"))?;
         let result = async {
             let mut head_filter = doc! {
                 "_id": {"_scope": self.scope.as_str(), "s": stream},
@@ -283,7 +315,7 @@ impl MongoStreams {
                 .update_one(head_filter, doc! {"$inc": {"seal_epoch": 1_i64}})
                 .session(&mut session)
                 .await
-                .map_err(|error| mongo_error("hold a stream seal", error))?;
+                .map_err(|error| transaction_conflict_error("hold a stream seal", error))?;
             if held.matched_count != 1 {
                 return Err(StorageError::conflict("stream changed while sealing"));
             }
@@ -292,10 +324,12 @@ impl MongoStreams {
                 .session(&mut session)
                 .await
                 .map_err(|error| {
-                    if error.to_string().contains("E11000") {
-                        StorageError::conflict("stream changed while sealing")
+                    if error.contains_label("TransientTransactionError")
+                        || error.to_string().contains("E11000")
+                    {
+                        StorageError::conflict("stream changed while sealing").with_source(error)
                     } else {
-                        mongo_error("mark a sealed stream", error)
+                        mongo_error("mark a sealed stream")(error)
                     }
                 })?;
             Ok(())
@@ -305,7 +339,7 @@ impl MongoStreams {
             Ok(()) => session
                 .commit_transaction()
                 .await
-                .map_err(|error| mongo_error("commit a stream seal", error)),
+                .map_err(|error| transaction_conflict_error("commit a stream seal", error)),
             Err(error) => {
                 let _ = session.abort_transaction().await;
                 Err(error)
@@ -318,7 +352,7 @@ impl MongoStreams {
             .heads()
             .find_one(self.head_filter(stream))
             .await
-            .map_err(|error| mongo_error("read a stream head", error))?
+            .map_err(mongo_error("read a stream head"))?
             .and_then(|head| head.get_i64("g").ok())
             .unwrap_or(0))
     }
@@ -337,7 +371,7 @@ impl MongoStreams {
             .heads()
             .update_one(filter, doc! {"$inc": {"g": 1_i64}})
             .await
-            .map_err(|error| mongo_error("advance a stream generation", error))?;
+            .map_err(mongo_error("advance a stream generation"))?;
         if result.matched_count != 1 {
             return Err(StorageError::conflict("stream generation changed"));
         }
@@ -360,12 +394,12 @@ impl MongoStreams {
             .find(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation})
             .with_options(options)
             .await
-            .map_err(|error| mongo_error("read stream segments", error))?;
+            .map_err(mongo_error("read stream segments"))?;
         let mut rows = Vec::new();
         while let Some(row) = cursor
             .try_next()
             .await
-            .map_err(|error| mongo_error("read stream segments", error))?
+            .map_err(mongo_error("read stream segments"))?
         {
             rows.push(row);
         }
@@ -418,7 +452,11 @@ impl StreamStore for MongoStreams {
         } else {
             capabilities
         };
-        if self.blobs.is_some() {
+        if self
+            .blobs
+            .as_ref()
+            .is_some_and(|blobs| blobs.supports_sealed_blobs())
+        {
             capabilities.with(Capability::StreamSeal)
         } else {
             capabilities
@@ -514,14 +552,6 @@ impl StreamStore for MongoStreams {
         if removed == 0 {
             return Ok(0);
         }
-        self.heads()
-            .update_one(
-                doc! {"_id": {"_scope": self.scope.as_str(), "s": stream}, "_scope": self.scope.as_str(), "s": stream},
-                doc! {"$inc": {"truncate_epoch": 1_i64}, "$max": {"g": 0_i64}},
-            )
-            .upsert(true)
-            .await
-            .map_err(|error| mongo_error("record a stream truncation", error))?;
         if self
             .segment_rows(stream)
             .await?
@@ -552,7 +582,7 @@ impl StreamStore for MongoStreams {
                 self.segments()
                     .delete_one(doc! {"_id": id})
                     .await
-                    .map_err(|error| mongo_error("truncate a stream", error))?;
+                    .map_err(mongo_error("truncate a stream"))?;
             } else if start.saturating_add(trimmed) < cut {
                 let next_trimmed = cut.min(end).saturating_sub(start);
                 let next_trimmed_i = i64::try_from(next_trimmed)
@@ -569,8 +599,29 @@ impl StreamStore for MongoStreams {
                         doc! {"$set": {"t": next_trimmed_i, "vs": retained}},
                     )
                     .await
-                    .map_err(|error| mongo_error("truncate a stream", error))?;
+                    .map_err(mongo_error("truncate a stream"))?;
             }
+        }
+        // Match the legacy standalone protocol: publish the epoch only after
+        // the segment edits are complete. A seal that snapshots before this
+        // point either sees the edited rows or is rejected by the epoch check.
+        #[cfg(test)]
+        self.pause_at_truncate_boundary().await;
+        self.heads()
+            .update_one(
+                doc! {"_id": {"_scope": self.scope.as_str(), "s": stream}, "_scope": self.scope.as_str(), "s": stream},
+                doc! {"$inc": {"truncate_epoch": 1_i64}, "$max": {"g": 0_i64}},
+            )
+            .upsert(true)
+            .await
+            .map_err(mongo_error("record a stream truncation"))?;
+        if self
+            .segment_rows(stream)
+            .await?
+            .last()
+            .is_some_and(|row| row.get_bool("seal").unwrap_or(false))
+        {
+            return Err(StorageError::conflict("stream was sealed while truncating"));
         }
         Ok(removed)
     }
@@ -586,13 +637,17 @@ impl StreamStore for MongoStreams {
         self.segments()
             .delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation})
             .await
-            .map_err(|error| mongo_error("delete stream segments", error))?;
-        if let Some(blobs) = &self.blobs {
+            .map_err(mongo_error("delete stream segments"))?;
+        if let Some(blobs) = self
+            .blobs
+            .as_ref()
+            .filter(|blobs| blobs.supports_sealed_blobs())
+        {
             let canonical = Self::generation_blob_key(stream, generation)?;
-            blobs.delete(&canonical).await?;
+            blobs.delete_sealed(&canonical).await?;
             let attempt_prefix = format!("{canonical}/");
-            for meta in blobs.list(&attempt_prefix).await? {
-                blobs.delete(&meta.key).await?;
+            for meta in blobs.list_sealed(&attempt_prefix).await? {
+                blobs.delete_sealed(&meta.key).await?;
             }
         }
         Ok(exists)
@@ -603,12 +658,12 @@ impl StreamStore for MongoStreams {
             .heads()
             .find(doc! {"_scope": self.scope.as_str()})
             .await
-            .map_err(|error| mongo_error("list stream heads", error))?;
+            .map_err(mongo_error("list stream heads"))?;
         let mut names = Vec::new();
         while let Some(row) = cursor
             .try_next()
             .await
-            .map_err(|error| mongo_error("list stream heads", error))?
+            .map_err(mongo_error("list stream heads"))?
         {
             if let Ok(name) = row.get_str("s")
                 && name.starts_with(prefix)
@@ -663,14 +718,14 @@ impl StreamStore for MongoStreams {
             .heads()
             .find_one(self.head_filter(stream))
             .await
-            .map_err(|error| mongo_error("read a stream truncation epoch", error))?
+            .map_err(mongo_error("read a stream truncation epoch"))?
             .and_then(|head| head.get_i64("truncate_epoch").ok())
             .unwrap_or(0);
         let append_epoch = self
             .heads()
             .find_one(self.head_filter(stream))
             .await
-            .map_err(|error| mongo_error("read a stream append epoch", error))?
+            .map_err(mongo_error("read a stream append epoch"))?
             .and_then(|head| head.get_i64("append_epoch").ok())
             .unwrap_or(0);
         let rows = self.segment_rows_in_generation(stream, generation).await?;
@@ -681,10 +736,10 @@ impl StreamStore for MongoStreams {
             let key = Self::marker_blob_key(last, stream, generation)?;
             let log = self.sealed_log(&key).await?;
             let blob = blobs
-                .head(&key)
+                .head_sealed(&key)
                 .await?
                 .ok_or_else(|| StorageError::backend("sealed stream has no blob"))?;
-            self.segments().delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": {"$ne": true}}).await.map_err(|error| mongo_error("finish stream sealing", error))?;
+            self.segments().delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": {"$ne": true}}).await.map_err(mongo_error("finish stream sealing"))?;
             return Ok(SealOutcome::new(log.base(), log.len(), blob.len));
         }
         let len = last
@@ -734,7 +789,7 @@ impl StreamStore for MongoStreams {
         let unique_key = format!("{key}/{}", mongodb::bson::oid::ObjectId::new().to_hex());
         let encoded = log.encode()?;
         blobs
-            .put(&unique_key, encoded.clone(), Some("application/zstd"))
+            .put_sealed(&unique_key, encoded.clone(), Some("application/zstd"))
             .await?;
         let mut marker = doc! {
             "_scope": self.scope.as_str(), "s": stream, "g": generation,
@@ -754,28 +809,28 @@ impl StreamStore for MongoStreams {
                 if error.to_string().contains("E11000") {
                     return Err(StorageError::conflict("stream changed while sealing"));
                 }
-                return Err(mongo_error("mark a sealed stream", error));
+                return Err(mongo_error("mark a sealed stream")(error));
             }
             let latest_epoch = self
                 .heads()
                 .find_one(self.head_filter(stream))
                 .await
-                .map_err(|error| mongo_error("verify a stream truncation epoch", error))?
+                .map_err(mongo_error("verify a stream truncation epoch"))?
                 .and_then(|head| head.get_i64("truncate_epoch").ok())
                 .unwrap_or(0);
             let latest_append_epoch = self
                 .heads()
                 .find_one(self.head_filter(stream))
                 .await
-                .map_err(|error| mongo_error("verify a stream append epoch", error))?
+                .map_err(mongo_error("verify a stream append epoch"))?
                 .and_then(|head| head.get_i64("append_epoch").ok())
                 .unwrap_or(0);
             if latest_epoch != epoch || latest_append_epoch != append_epoch {
-                self.segments().delete_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": true}).await.map_err(|error| mongo_error("roll back stream sealing", error))?;
+                self.segments().delete_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": true}).await.map_err(mongo_error("roll back stream sealing"))?;
                 return Err(StorageError::conflict("stream was truncated while sealing"));
             }
         }
-        self.segments().delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": {"$ne": true}}).await.map_err(|error| mongo_error("finish stream sealing", error))?;
+        self.segments().delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": {"$ne": true}}).await.map_err(mongo_error("finish stream sealing"))?;
         Ok(SealOutcome::new(base, len, encoded.len() as u64))
     }
 
@@ -793,9 +848,9 @@ impl StreamStore for MongoStreams {
         self.segments()
             .delete_many(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation})
             .await
-            .map_err(|error| mongo_error("delete a sealed stream", error))?;
+            .map_err(mongo_error("delete a sealed stream"))?;
         let blob_key = Self::marker_blob_key(&marker, stream, generation)?;
-        self.blobs()?.delete(&blob_key).await?;
+        self.blobs()?.delete_sealed(&blob_key).await?;
         Ok(true)
     }
 }
@@ -838,7 +893,7 @@ impl MongoStreams {
                     .build(),
             )
             .await;
-        indexes.map_err(|error| mongo_error("prepare stream segments", error))?;
+        indexes.map_err(mongo_error("prepare stream segments"))?;
         for _ in 0..128 {
             self.heads()
                 .update_one(
@@ -847,7 +902,7 @@ impl MongoStreams {
                 )
                 .upsert(true)
                 .await
-                .map_err(|error| mongo_error("prepare a stream head", error))?;
+                .map_err(mongo_error("prepare a stream head"))?;
             let (_, start, _) = self.extent(stream).await?;
             if expected.is_some_and(|offset| offset != start) {
                 return Err(StorageError::conflict("stream offset changed"));
@@ -874,7 +929,7 @@ impl MongoStreams {
                 Err(error) if error.to_string().contains("E11000") => {
                     return Err(StorageError::conflict("stream offset changed"));
                 }
-                Err(error) => return Err(mongo_error("append stream entries", error)),
+                Err(error) => return Err(mongo_error("append stream entries")(error)),
             }
         }
         Err(StorageError::unavailable(
@@ -911,18 +966,18 @@ impl MongoStreams {
                     .build(),
             )
             .await
-            .map_err(|error| mongo_error("prepare stream segments", error))?;
+            .map_err(mongo_error("prepare stream segments"))?;
 
         for _ in 0..128 {
             let mut session = self
                 .client
                 .start_session()
                 .await
-                .map_err(|error| mongo_error("start a stream append", error))?;
+                .map_err(mongo_error("start a stream append"))?;
             session
                 .start_transaction()
                 .await
-                .map_err(|error| mongo_error("start a stream append", error))?;
+                .map_err(mongo_error("start a stream append"))?;
             let result = async {
                 let head_id = doc! {"_scope": self.scope.as_str(), "s": stream};
                 self.heads()
@@ -933,13 +988,13 @@ impl MongoStreams {
                     .upsert(true)
                     .session(&mut session)
                     .await
-                    .map_err(|error| mongo_error("prepare a stream head", error))?;
+                    .map_err(mongo_error("prepare a stream head"))?;
                 let head = self
                     .heads()
                     .find_one(self.head_filter(stream))
                     .session(&mut session)
                     .await
-                    .map_err(|error| mongo_error("read a stream head", error))?;
+                    .map_err(mongo_error("read a stream head"))?;
                 let generation = head
                     .as_ref()
                     .and_then(|value| value.get_i64("g").ok())
@@ -951,10 +1006,10 @@ impl MongoStreams {
                     .with_options(options)
                     .session(&mut session)
                     .await
-                    .map_err(|error| mongo_error("read stream segments", error))?;
+                    .map_err(mongo_error("read stream segments"))?;
                 let mut rows = Vec::new();
                 while let Some(row) = cursor.next(&mut session).await {
-                    rows.push(row.map_err(|error| mongo_error("read stream segments", error))?);
+                    rows.push(row.map_err(mongo_error("read stream segments"))?);
                 }
                 if rows.last().is_some_and(|row| row.get_bool("seal").unwrap_or(false)) {
                     return Err(StorageError::conflict("stream is sealed"));
@@ -978,7 +1033,7 @@ impl MongoStreams {
                     )
                     .session(&mut session)
                     .await
-                    .map_err(|error| mongo_error("claim a stream append", error))?;
+                    .map_err(mongo_error("claim a stream append"))?;
                 if append_claim.matched_count != 1 {
                     return Err(StorageError::conflict("stream generation changed"));
                 }
@@ -996,7 +1051,7 @@ impl MongoStreams {
                         if error.to_string().contains("E11000") {
                             StorageError::conflict("stream offset changed")
                         } else {
-                            mongo_error("append stream entries", error)
+                            mongo_error("append stream entries")(error)
                         }
                     })?;
                 Ok(start)
@@ -1006,11 +1061,16 @@ impl MongoStreams {
                 Ok(offset) => match session.commit_transaction().await {
                     Ok(()) => return Ok(offset),
                     Err(error) if error.to_string().contains("TransientTransactionError") => {}
-                    Err(error) => return Err(mongo_error("commit a stream append", error)),
+                    Err(error) => return Err(mongo_error("commit a stream append")(error)),
                 },
                 Err(error) => {
+                    let retry = std::error::Error::source(&error)
+                        .and_then(|source| source.downcast_ref::<mongodb::error::Error>())
+                        .is_some_and(|source| source.contains_label("TransientTransactionError"));
                     let _ = session.abort_transaction().await;
-                    return Err(error);
+                    if !retry {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1020,6 +1080,17 @@ impl MongoStreams {
     }
 }
 
-fn mongo_error(operation: &'static str, error: mongodb::error::Error) -> StorageError {
-    StorageError::unavailable(format!("MongoDB failed to {operation}")).with_source(error)
+fn transaction_conflict_error(
+    operation: &'static str,
+    error: mongodb::error::Error,
+) -> StorageError {
+    if error.contains_label("TransientTransactionError") {
+        StorageError::conflict("stream changed while sealing").with_source(error)
+    } else {
+        mongo_error(operation)(error)
+    }
 }
+
+#[cfg(test)]
+#[path = "streams_tests.rs"]
+mod tests;

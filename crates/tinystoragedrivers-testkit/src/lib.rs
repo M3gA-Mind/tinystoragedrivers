@@ -5,7 +5,9 @@
 
 pub mod conformance;
 mod fault;
-pub use conformance::{blobs, documents, kv, queue, secrets, semantics, streams, validated, watch};
+pub use conformance::{
+    blobs, documents, kv, queue, seal, secrets, semantics, streams, validated, watch,
+};
 mod memory;
 pub use memory::{MemoryBackend, memory_backend, memory_storage};
 mod clock;

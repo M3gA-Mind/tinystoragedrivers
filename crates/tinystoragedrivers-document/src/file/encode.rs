@@ -146,3 +146,7 @@ pub(crate) fn fnv1a_128(bytes: &[u8]) -> u128 {
         (hash ^ u128::from(*byte)).wrapping_mul(PRIME)
     })
 }
+
+#[cfg(test)]
+#[path = "encode_tests.rs"]
+mod tests;

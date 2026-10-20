@@ -226,10 +226,7 @@ async fn a_closed_transport_is_reported_as_unavailable() {
 
 #[test]
 fn only_an_explicit_confidential_admission_denial_is_optional_secrets() {
-    let denied = wire_error(
-        crate::WireError::NotAttested,
-        Some(Capability::Secrets),
-    );
+    let denied = wire_error(crate::WireError::NotAttested, Some(Capability::Secrets));
     assert_eq!(denied.kind(), ErrorKind::Unsupported(Capability::Secrets));
     let unexpected = wire_error(
         crate::WireError::Transport("probe failed".into()),
@@ -237,5 +234,8 @@ fn only_an_explicit_confidential_admission_denial_is_optional_secrets() {
     );
     assert_eq!(unexpected.kind(), ErrorKind::Unavailable);
     let denial_on_an_unclassified_operation = wire_error(crate::WireError::NotAttested, None);
-    assert_eq!(denial_on_an_unclassified_operation.kind(), ErrorKind::Unavailable);
+    assert_eq!(
+        denial_on_an_unclassified_operation.kind(),
+        ErrorKind::Unavailable
+    );
 }

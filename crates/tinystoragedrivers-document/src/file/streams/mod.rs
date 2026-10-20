@@ -525,3 +525,7 @@ impl StreamStore for FileStreams {
             .await
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

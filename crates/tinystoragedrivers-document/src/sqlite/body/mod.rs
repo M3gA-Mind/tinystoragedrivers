@@ -32,13 +32,18 @@ pub(crate) fn encode(doc: &Value) -> Result<SqlValue> {
     }
     let frame = zstd::encode_all(text.as_bytes(), LEVEL)
         .map_err(|error| StorageError::backend("compress document body").with_source(error))?;
+    Ok(compact(text, &frame))
+}
+
+/// Keep the serialized body when compression does not make it smaller.
+fn compact(text: String, frame: &[u8]) -> SqlValue {
     if frame.len() >= text.len() {
-        return Ok(SqlValue::Text(text));
+        return SqlValue::Text(text);
     }
     let mut blob = Vec::with_capacity(frame.len() + 1);
     blob.push(MARKER);
-    blob.extend_from_slice(&frame);
-    Ok(SqlValue::Blob(blob))
+    blob.extend_from_slice(frame);
+    SqlValue::Blob(blob)
 }
 
 #[cfg(test)]
@@ -70,3 +75,7 @@ pub(crate) fn decode(stored: &SqlValue) -> Result<Value> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
