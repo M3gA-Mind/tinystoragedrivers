@@ -111,12 +111,19 @@ impl MongoDocuments {
         let spec = self.collection_spec(collection).await?;
         let table = self.collection(collection);
         let filter = doc! {"_id": self.scoped_id(id)};
+        let in_transaction = session.is_some();
         let old = match session.as_deref_mut() {
             Some(session) => table
                 .find_one(filter.clone())
                 .session(session)
                 .await
-                .map_err(mongo_error("read before writing a document"))?,
+                .map_err(|error| {
+                    if in_transaction {
+                        transaction_error("read before writing a document", error)
+                    } else {
+                        mongo_error("read before writing a document")(error)
+                    }
+                })?,
             None => table
                 .find_one(filter.clone())
                 .await
@@ -155,6 +162,11 @@ impl MongoDocuments {
         let mut cas = filter;
         if let Some(expected) = expected {
             cas.insert(VERSION, expected);
+        } else {
+            // Keep the absence check in the atomic write filter. Checking only
+            // before the replace lets a concurrent write be overwritten
+            // without advancing its version.
+            cas.insert(VERSION, doc! {"$exists": false});
         }
         let upsert = old.is_none();
         let result = match session {
@@ -186,12 +198,19 @@ impl MongoDocuments {
         let spec = self.collection_spec(collection).await?;
         let table = self.collection(collection);
         let filter = doc! {"_id": self.scoped_id(id)};
+        let in_transaction = session.is_some();
         let old = match session.as_deref_mut() {
             Some(session) => table
                 .find_one(filter.clone())
                 .session(session)
                 .await
-                .map_err(mongo_error("read before deleting a document"))?,
+                .map_err(|error| {
+                    if in_transaction {
+                        transaction_error("read before deleting a document", error)
+                    } else {
+                        mongo_error("read before deleting a document")(error)
+                    }
+                })?,
             None => table
                 .find_one(filter.clone())
                 .await
@@ -227,7 +246,7 @@ impl MongoDocuments {
                     .await
             }
         }
-        .map_err(mongo_error("delete a document"))?;
+        .map_err(map_document_write_error)?;
         if result.matched_count == 0 {
             return Err(StorageError::conflict("document changed during delete"));
         }
@@ -410,8 +429,21 @@ impl DocumentStore for MongoDocuments {
         precondition: Precondition,
         options: WriteOptions,
     ) -> Result<Version> {
-        self.put_with_session(collection, id, value, precondition, options, None)
-            .await
+        for attempt in 0..64 {
+            match self
+                .put_with_session(collection, id, value.clone(), precondition, options, None)
+                .await
+            {
+                Err(error)
+                    if precondition == Precondition::None
+                        && error.kind() == tinystoragedrivers_types::ErrorKind::Conflict
+                        && attempt < 63 => {}
+                result => return result,
+            }
+        }
+        Err(StorageError::unavailable(
+            "MongoDB unconditional write retry limit reached",
+        ))
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
@@ -604,7 +636,7 @@ impl DocumentStore for MongoDocuments {
                     .find_one(doc! {"_id": self.scoped_id(&dependency.id)})
                     .session(&mut session)
                     .await
-                    .map_err(mongo_error("validate a batch dependency"))?;
+                    .map_err(|error| transaction_error("validate a batch dependency", error))?;
                 let current = record
                     .as_ref()
                     .map(decode)
@@ -656,7 +688,7 @@ impl DocumentStore for MongoDocuments {
                 session
                     .commit_transaction()
                     .await
-                    .map_err(mongo_error("commit a document transaction"))?;
+                    .map_err(|error| transaction_error("commit a document transaction", error))?;
                 Ok(results)
             }
             Err(error) => {
@@ -940,7 +972,47 @@ fn map_document_write_error(error: mongodb::error::Error) -> StorageError {
             return StorageError::conflict("document changed during write").with_source(error);
         }
     }
+    if is_definite_transaction_conflict(
+        mongo_error_code(&error),
+        error.contains_label("TransientTransactionError"),
+        error.contains_label("UnknownTransactionCommitResult"),
+    ) {
+        return StorageError::conflict("document changed during write").with_source(error);
+    }
     mongo_error("write a document")(error)
+}
+
+fn transaction_error(operation: &'static str, error: mongodb::error::Error) -> StorageError {
+    if is_definite_transaction_conflict(
+        mongo_error_code(&error),
+        error.contains_label("TransientTransactionError"),
+        error.contains_label("UnknownTransactionCommitResult"),
+    ) {
+        StorageError::conflict("document transaction conflicted").with_source(error)
+    } else {
+        mongo_error(operation)(error)
+    }
+}
+
+fn is_definite_transaction_conflict(
+    code: Option<i32>,
+    transient_transaction: bool,
+    unknown_commit_result: bool,
+) -> bool {
+    !unknown_commit_result && (code == Some(112) || transient_transaction)
+}
+
+fn mongo_error_code(error: &mongodb::error::Error) -> Option<i32> {
+    use mongodb::error::{ErrorKind as MongoErrorKind, WriteFailure};
+
+    match error.kind.as_ref() {
+        MongoErrorKind::Command(command) => Some(command.code),
+        MongoErrorKind::Write(WriteFailure::WriteError(write)) => Some(write.code),
+        MongoErrorKind::InsertMany(many) => {
+            many.write_errors.as_ref()?.first().map(|write| write.code)
+        }
+        _ => None,
+    }
 }
 
 fn map_index_build_error(error: mongodb::error::Error) -> StorageError {

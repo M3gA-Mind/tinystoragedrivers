@@ -17,6 +17,15 @@ fn mongo_error_adapter_keeps_operation_context_and_hides_driver_details() {
     assert!(std::error::Error::source(&error).is_some());
 }
 
+#[test]
+fn definite_write_conflicts_are_retryable_but_ambiguous_commits_are_not() {
+    assert!(is_definite_transaction_conflict(Some(112), false, false));
+    assert!(is_definite_transaction_conflict(None, true, false));
+    assert!(!is_definite_transaction_conflict(Some(112), true, true));
+    assert!(!is_definite_transaction_conflict(None, false, true));
+    assert!(!is_definite_transaction_conflict(Some(91), false, false));
+}
+
 #[tokio::test]
 async fn document_debug_reports_binding_without_logging_client_credentials() {
     let client = Client::with_uri_str(
