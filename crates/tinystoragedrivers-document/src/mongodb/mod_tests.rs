@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tinystoragedrivers_api::BlobStore;
@@ -25,6 +25,7 @@ pub(crate) struct TestBlobs {
     put_order: Option<Arc<AtomicUsize>>,
     first_put_started: Option<Arc<tokio::sync::Notify>>,
     allow_first_put: Option<Arc<tokio::sync::Notify>>,
+    fail_next_put: Option<Arc<AtomicBool>>,
     delete_started: Option<Arc<tokio::sync::Notify>>,
     allow_delete: Option<Arc<tokio::sync::Notify>>,
     delete_order: Option<Arc<AtomicUsize>>,
@@ -60,6 +61,15 @@ impl BlobStore for TestBlobs {
             if let Some(allow) = &self.allow_put {
                 allow.notified().await;
             }
+        }
+        if self
+            .fail_next_put
+            .as_ref()
+            .is_some_and(|fail| fail.swap(false, Ordering::SeqCst))
+        {
+            return Err(tinystoragedrivers_types::StorageError::backend(
+                "injected blob upload failure",
+            ));
         }
         self.values
             .lock()
@@ -366,6 +376,41 @@ async fn mongo_seal_recovers_from_marker_and_preserves_blob_backed_offsets() {
             .unwrap()
     );
     assert_eq!(streams.len("events").await.unwrap(), 0);
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_blob_upload_leaves_stream_unsealed_and_retryable() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd26_seal_upload_failure").await;
+    let blobs = Arc::new(TestBlobs {
+        fail_next_put: Some(Arc::new(AtomicBool::new(true))),
+        ..Default::default()
+    });
+    let streams = MongoStreams::new(connection.clone(), Scope::new("scope-a").unwrap())
+        .with_blob_store(blobs);
+    streams
+        .append("events", serde_json::json!("still readable"))
+        .await
+        .unwrap();
+
+    let failure = streams.seal("events").await.unwrap_err();
+    assert!(failure.to_string().contains("injected blob upload failure"));
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        vec![tinystoragedrivers_types::StreamEntry {
+            offset: 0,
+            value: serde_json::json!("still readable"),
+        }]
+    );
+    assert_eq!(
+        streams.info("events").await.unwrap().unwrap().sealed_ms,
+        None
+    );
+
+    assert_eq!(streams.seal("events").await.unwrap().len, 1);
     connection.database().drop().await.unwrap();
 }
 
