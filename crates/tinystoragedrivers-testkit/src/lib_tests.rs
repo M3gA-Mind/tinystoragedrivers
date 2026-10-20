@@ -30,7 +30,7 @@ fn fault_plan_can_target_an_operation_and_reset() {
 
 #[test]
 fn failing_shares_its_plan_across_clones() {
-    let wrapper = Failing::new("store");
+    let wrapper = Failing::new(std::sync::Arc::new("store"));
     let clone = wrapper.clone();
     wrapper
         .faults
@@ -39,6 +39,20 @@ fn failing_shares_its_plan_across_clones() {
         clone.faults.check("read").expect_err("shared plan").kind(),
         tinystoragedrivers_types::ErrorKind::Backend
     );
+}
+
+#[tokio::test]
+async fn failing_call_injects_before_delegating_and_then_passes_through() {
+    let wrapper = Failing::new(std::sync::Arc::new(()));
+    wrapper
+        .faults
+        .fail_operation_nth("write", 1, tinystoragedrivers_types::ErrorKind::Unavailable);
+    let injected = wrapper.call("write", async { Ok(7) }).await.unwrap_err();
+    assert_eq!(
+        injected.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert_eq!(wrapper.call("write", async { Ok(8) }).await.unwrap(), 8);
 }
 
 #[test]

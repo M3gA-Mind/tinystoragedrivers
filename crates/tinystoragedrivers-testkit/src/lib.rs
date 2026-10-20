@@ -5,11 +5,15 @@
 
 pub mod conformance;
 mod fault;
-pub use conformance::{documents, queue, semantics, streams, validated, watch};
+pub use conformance::{blobs, documents, kv, queue, secrets, semantics, streams, validated, watch};
+mod memory;
+pub use memory::{MemoryBackend, memory_backend, memory_storage};
 mod clock;
+mod decorators;
 mod no_native_ttl;
 
 pub use clock::TestClock;
+pub use decorators::{ConflictOnce, Slow};
 pub use fault::{Failing, FaultPlan};
 pub use no_native_ttl::NoNativeTtl;
 
@@ -20,3 +24,7 @@ mod tests;
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "decorators_tests.rs"]
+mod decorator_tests;
