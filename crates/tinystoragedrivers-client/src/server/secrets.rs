@@ -56,3 +56,7 @@ fn native_secret<T>(
         },
     })
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;

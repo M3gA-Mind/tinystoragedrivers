@@ -95,3 +95,7 @@ fn secret_error(error: &tinystoragedrivers_core::StorageError) -> StorageError {
         _ => StorageError::new(ErrorKind::Backend, message),
     }
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;
