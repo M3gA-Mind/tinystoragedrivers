@@ -41,6 +41,29 @@ fn sqlite_reads_v1_blob_rows_without_age_metadata() {
 }
 
 #[test]
+fn sqlite_sealed_blobs_share_the_scope_but_stay_hidden_from_user_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = SqliteConnection::open(directory.path()).unwrap();
+    let store = SqliteBlobStore::new(connection, Scope::new("local").unwrap());
+    let key = "_tsd/sealed/events/g0";
+    run(store.put_sealed(key, b"log".to_vec(), Some("application/zstd"))).unwrap();
+    assert_eq!(run(store.get_sealed(key)).unwrap().unwrap().bytes, b"log");
+    assert_eq!(run(store.head_sealed(key)).unwrap().unwrap().len, 3);
+    assert_eq!(
+        run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
+        1
+    );
+    assert!(run(store.list("")).unwrap().is_empty());
+    assert!(run(store.list_page("", None, 10)).unwrap().items.is_empty());
+    assert_eq!(
+        run(store.get(key)).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(run(store.delete_sealed(key)).unwrap());
+    assert_eq!(run(store.head_sealed(key)).unwrap(), None);
+}
+
+#[test]
 fn sqlite_reads_blob_from_historical_v1_database_fixture() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("storage.db");

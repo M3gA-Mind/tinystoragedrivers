@@ -141,3 +141,7 @@ pub(super) fn delete_blob(root: &Path, scope: &Scope, stream: &str) -> Result<()
     remove_optional(&data)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "seal_tests.rs"]
+mod tests;

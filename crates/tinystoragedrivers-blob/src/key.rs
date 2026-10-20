@@ -5,10 +5,27 @@ use tinystoragedrivers_types::{Result, StorageError, is_reserved_blob_key};
 pub(crate) const MAX_KEY_LEN: usize = 1024;
 
 pub(crate) fn validate_key(key: &str) -> Result<()> {
+    validate_key_shape(key)?;
+    if is_reserved_blob_key(key) {
+        return Err(StorageError::invalid_input("invalid blob key"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_sealed_key(key: &str) -> Result<()> {
+    validate_key_shape(key)?;
+    if !is_reserved_blob_key(key) {
+        return Err(StorageError::invalid_input(
+            "driver-owned blob key is outside the sealed-stream namespace",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_key_shape(key: &str) -> Result<()> {
     if key.is_empty()
         || key.len() > MAX_KEY_LEN
         || key.bytes().any(|b| b == 0 || b.is_ascii_control())
-        || is_reserved_blob_key(key)
     {
         return Err(StorageError::invalid_input("invalid blob key"));
     }

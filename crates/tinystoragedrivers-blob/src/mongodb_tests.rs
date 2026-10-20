@@ -60,6 +60,8 @@ async fn mongodb_blob_streams_scoped_ttl_and_paged_listing() {
     let other_scope = MongoBlobStore::new(connection.clone(), Scope::new("other").unwrap());
     assert_eq!(other_scope.list("").await.unwrap(), Vec::<BlobMeta>::new());
 
+    assert_mongo_sealed_blob_visibility(&store, &other_scope).await;
+
     assert_failed_mongo_uploads_keep_previous_blob(&connection, &store).await;
 
     store
@@ -83,6 +85,55 @@ async fn mongodb_blob_streams_scoped_ttl_and_paged_listing() {
     assert!(!store.delete("prefix/b").await.unwrap());
 
     connection.database().drop().await.unwrap();
+}
+
+async fn assert_mongo_sealed_blob_visibility(store: &MongoBlobStore, other_scope: &MongoBlobStore) {
+    let sealed_key = "_tsd/sealed/events/g0";
+    assert!(store.supports_sealed_blobs());
+    store
+        .put_sealed(sealed_key, b"sealed log".to_vec(), Some("application/zstd"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_sealed(sealed_key).await.unwrap().unwrap().bytes,
+        b"sealed log"
+    );
+    assert_eq!(
+        store.head_sealed(sealed_key).await.unwrap().unwrap().len,
+        10
+    );
+    assert_eq!(
+        store
+            .list_sealed("_tsd/sealed/events/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(other_scope.get_sealed(sealed_key).await.unwrap(), None);
+    assert_eq!(
+        store.get(sealed_key).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(
+        store
+            .list("")
+            .await
+            .unwrap()
+            .iter()
+            .all(|meta| meta.key != sealed_key)
+    );
+    assert!(
+        store
+            .list_page("", None, 100)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .all(|item| item.meta.key != sealed_key)
+    );
+    assert!(store.delete_sealed(sealed_key).await.unwrap());
+    assert_eq!(store.head_sealed(sealed_key).await.unwrap(), None);
 }
 
 async fn assert_mongo_reads_ranges_and_pages(store: &MongoBlobStore) {

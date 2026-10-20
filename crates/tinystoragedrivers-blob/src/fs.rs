@@ -19,10 +19,10 @@ use tinystoragedrivers_api::BlobStore;
 use tinystoragedrivers_connect::FileConnection;
 use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability,
-    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError, is_reserved_blob_key,
 };
 
-use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix};
+use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix, validate_sealed_key};
 
 const META_SUFFIX: &str = ".meta.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -36,6 +36,12 @@ struct Sidecar {
     expires_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     written_at_ms: Option<u64>,
+}
+
+struct StoreOptions {
+    content_type: Option<String>,
+    ttl: Option<Duration>,
+    allow_sealed: bool,
 }
 
 /// A scope-bound file blob engine using raw bytes and JSON sidecars.
@@ -134,9 +140,12 @@ impl BlobStore for FileBlobStore {
     fn max_key_len(&self) -> usize {
         MAX_KEY_LEN
     }
+    fn supports_sealed_blobs(&self) -> bool {
+        true
+    }
 
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
-        self.store(key, bytes, content_type, None).await
+        self.store(key, bytes, content_type, None, false).await
     }
     async fn put_expiring(
         &self,
@@ -145,24 +154,10 @@ impl BlobStore for FileBlobStore {
         content_type: Option<&str>,
         ttl: Duration,
     ) -> Result<BlobMeta> {
-        self.store(key, bytes, content_type, Some(ttl)).await
+        self.store(key, bytes, content_type, Some(ttl), false).await
     }
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
-        validate_key(key)?;
-        let key = key.to_owned();
-        let scope = self.scope.clone();
-        let clock = self.connection.clock();
-        self.connection
-            .run(move |root| {
-                let (data, metadata) = Self::paths(root, &scope, &key);
-                let Some((meta, _)) = Self::read_meta(&data, &metadata, &key, clock(), false)?
-                else {
-                    return Ok(None);
-                };
-                let bytes = read_regular(&data)?;
-                Ok(Some(Blob { meta, bytes }))
-            })
-            .await
+        self.read_key(key, false).await
     }
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
@@ -175,31 +170,10 @@ impl BlobStore for FileBlobStore {
         ))
     }
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
-        validate_key(key)?;
-        let key = key.to_owned();
-        let scope = self.scope.clone();
-        let clock = self.connection.clock();
-        self.connection
-            .run(move |root| {
-                let (data, metadata) = Self::paths(root, &scope, &key);
-                Ok(Self::read_meta(&data, &metadata, &key, clock(), false)?.map(|(meta, _)| meta))
-            })
-            .await
+        self.head_key(key, false).await
     }
     async fn delete(&self, key: &str) -> Result<bool> {
-        validate_key(key)?;
-        let key = key.to_owned();
-        let scope = self.scope.clone();
-        let clock = self.connection.clock();
-        self.connection
-            .run(move |root| {
-                let (data, metadata) = Self::paths(root, &scope, &key);
-                let existed = Self::read_meta(&data, &metadata, &key, clock(), false)?.is_some();
-                remove_if_exists(&metadata)?;
-                remove_if_exists(&data)?;
-                Ok(existed)
-            })
-            .await
+        self.delete_key(key, false).await
     }
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         validate_prefix(prefix, None)?;
@@ -211,6 +185,7 @@ impl BlobStore for FileBlobStore {
                 let mut items = Vec::new();
                 for (key, data, metadata) in Self::scan(root, &scope)? {
                     if key.starts_with(&prefix)
+                        && !is_reserved_blob_key(&key)
                         && let Some((meta, _)) =
                             Self::read_meta(&data, &metadata, &key, clock(), false)?
                     {
@@ -243,6 +218,7 @@ impl BlobStore for FileBlobStore {
                     .into_iter()
                     .filter(|(key, _, _)| {
                         key.starts_with(&prefix)
+                            && !is_reserved_blob_key(key)
                             && after
                                 .as_deref()
                                 .is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
@@ -269,6 +245,47 @@ impl BlobStore for FileBlobStore {
             })
             .await
     }
+
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.store(key, bytes, content_type, None, true).await
+    }
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        self.read_key(key, true).await
+    }
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        self.head_key(key, true).await
+    }
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        self.delete_key(key, true).await
+    }
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        validate_sealed_key(prefix)?;
+        let prefix = prefix.to_owned();
+        let scope = self.scope.clone();
+        let clock = self.connection.clock();
+        self.connection
+            .run(move |root| {
+                let mut items = Vec::new();
+                for (key, data, metadata) in Self::scan(root, &scope)? {
+                    if is_reserved_blob_key(&key)
+                        && key.starts_with(&prefix)
+                        && let Some((meta, _)) =
+                            Self::read_meta(&data, &metadata, &key, clock(), false)?
+                    {
+                        items.push(meta);
+                    }
+                }
+                items.sort_by(|a, b| a.key.as_bytes().cmp(b.key.as_bytes()));
+                Ok(items)
+            })
+            .await
+    }
+
     async fn sweep_expired(&self) -> Result<u64> {
         let scope = self.scope.clone();
         let clock = self.connection.clock();
@@ -293,20 +310,99 @@ impl BlobStore for FileBlobStore {
 }
 
 impl FileBlobStore {
+    async fn read_key(&self, key: &str, allow_sealed: bool) -> Result<Option<Blob>> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let key = key.to_owned();
+        let scope = self.scope.clone();
+        let clock = self.connection.clock();
+        self.connection
+            .run(move |root| {
+                let (data, metadata) = Self::paths(root, &scope, &key);
+                let Some((meta, _)) = Self::read_meta(&data, &metadata, &key, clock(), false)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(Blob {
+                    meta,
+                    bytes: read_regular(&data)?,
+                }))
+            })
+            .await
+    }
+
+    async fn head_key(&self, key: &str, allow_sealed: bool) -> Result<Option<BlobMeta>> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let key = key.to_owned();
+        let scope = self.scope.clone();
+        let clock = self.connection.clock();
+        self.connection
+            .run(move |root| {
+                let (data, metadata) = Self::paths(root, &scope, &key);
+                Ok(Self::read_meta(&data, &metadata, &key, clock(), false)?.map(|(meta, _)| meta))
+            })
+            .await
+    }
+
+    async fn delete_key(&self, key: &str, allow_sealed: bool) -> Result<bool> {
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
+        let key = key.to_owned();
+        let scope = self.scope.clone();
+        let clock = self.connection.clock();
+        self.connection
+            .run(move |root| {
+                let (data, metadata) = Self::paths(root, &scope, &key);
+                let existed = Self::read_meta(&data, &metadata, &key, clock(), false)?.is_some();
+                remove_if_exists(&metadata)?;
+                remove_if_exists(&data)?;
+                Ok(existed)
+            })
+            .await
+    }
+
     async fn store(
         &self,
         key: &str,
         bytes: Vec<u8>,
         content_type: Option<&str>,
         ttl: Option<Duration>,
+        allow_sealed: bool,
     ) -> Result<BlobMeta> {
-        validate_key(key)?;
+        if allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
         let key = key.to_owned();
         let content_type = content_type.map(str::to_owned);
         let scope = self.scope.clone();
         let clock = self.connection.clock();
         self.connection
-            .run(move |root| Self::store_at(root, &scope, clock(), &key, &bytes, content_type, ttl))
+            .run(move |root| {
+                Self::store_at(
+                    root,
+                    &scope,
+                    clock(),
+                    &key,
+                    &bytes,
+                    StoreOptions {
+                        content_type,
+                        ttl,
+                        allow_sealed,
+                    },
+                )
+            })
             .await
     }
 
@@ -316,10 +412,13 @@ impl FileBlobStore {
         now: u64,
         key: &str,
         bytes: &[u8],
-        content_type: Option<String>,
-        ttl: Option<Duration>,
+        options: StoreOptions,
     ) -> Result<BlobMeta> {
-        validate_key(key)?;
+        if options.allow_sealed {
+            validate_sealed_key(key)?;
+        } else {
+            validate_key(key)?;
+        }
         let base = Self::base(root, scope);
         let (data, metadata) = Self::paths(root, scope, key);
         fs::create_dir_all(&base).map_err(io_error)?;
@@ -329,8 +428,9 @@ impl FileBlobStore {
         write_atomic(&data, bytes)?;
         let sidecar = Sidecar {
             key: key.to_owned(),
-            content_type,
-            expires_at_ms: ttl
+            content_type: options.content_type,
+            expires_at_ms: options
+                .ttl
                 .map(|ttl| now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX))),
             written_at_ms: Some(now),
         };
