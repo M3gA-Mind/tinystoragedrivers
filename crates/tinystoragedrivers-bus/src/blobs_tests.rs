@@ -27,6 +27,16 @@ fn blob_messages_roundtrip() {
         serde_json::from_value::<PutBlobStreamRequest>(wire).unwrap(),
         put
     );
+    let page = ListBlobsPageRequest {
+        prefix: "p".into(),
+        after: Some("p1".into()),
+        limit: 32,
+    };
+    assert_eq!(
+        serde_json::from_value::<ListBlobsPageRequest>(serde_json::to_value(&page).unwrap())
+            .unwrap(),
+        page
+    );
     let range = GetRangeRequest {
         key: "k".into(),
         start: 1,
@@ -65,7 +75,7 @@ fn blob_requests_reject_authority_selectors_and_hide_urls() {
 #[test]
 fn blob_selectors_are_fixed() {
     assert_eq!(BLOBS_OBJECT, "Blobs");
-    assert_eq!(BLOBS_SELECTORS.len(), 11);
+    assert_eq!(BLOBS_SELECTORS.len(), 12);
     assert!(is_blobs_selector("GetRange"));
     assert!(!is_blobs_selector("Arbitrary"));
 }

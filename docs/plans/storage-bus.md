@@ -1,8 +1,8 @@
-# Storage bus implementation
+# Storage bus implementation record
 
-Contract: [Storage bus](../specs/storage-bus.md). This plan is ordered; each
-step can land as a separate upstream PR. No step claims a port complete until
-its client, host adapter and shared conformance pass.
+Contract: [Storage bus](../specs/storage-bus.md). This document records the
+staged implementation; the transport consolidation and six-port adapters are
+implemented in `tinystoragedrivers-busproxy`.
 
 ## Ordered work
 
@@ -16,7 +16,7 @@ its client, host adapter and shared conformance pass.
    new wire module depends only on serde/serde_json; the crate currently retains
    its legacy TinyBus proxy dependency.
 2. **Documents client and server.** Extend
-   `crates/tinystoragedrivers-tinybus/src/` with a complete typed module client
+   `crates/tinystoragedrivers-busproxy/src/` with a complete typed module client
    and host adapter over an already captured native handle. Add a memory-driver
    end-to-end test for every operation, conflicts, paging, capability errors,
    grant denial, fencing and absent-vs-failed outcomes. Run common Documents
@@ -45,16 +45,16 @@ its client, host adapter and shared conformance pass.
 
 Step 1 (Documents) and the Streams, Blobs and Secrets wire contracts plus
 size limits and `CONTRACT_VERSION` are in `tinystoragedrivers-bus`. The bus
-client (`BusStorage` and the port handles), the reference `StorageServer` and
-the in-process `Loopback` are in `tinystoragedrivers-client`, and
+client (`BusStorage` and the port handles), reference `StorageServer`, TinyBus
+transport, confined callback adapter and in-process `Loopback` are consolidated
+in `tinystoragedrivers-busproxy`, and
 `conformance::run_ports` passes through them (including a blob above the frame
 cap over streams, and watch signals). Port gaps landed: keyset cursors
 (already in the drivers), FTS ranking and reindex semantics, TTL visibility,
 claim/CAS run-ledger patterns (all pinned by conformance), the blob tree view,
 and the Vector decision (stays in TinyMemory). The S3 driver and its CI lane
-already exist. Still to come under tinyhumansai/openhuman#7635: a `TinyBus`
-proxy transport and the module-side server registration, native blob expiry,
-and the release.
+already exist. This implementation record predates the transport work; the
+remaining repository roadmap is tracked by its current issues.
 
 ## Current step
 

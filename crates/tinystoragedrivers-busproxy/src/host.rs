@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::transport::{Admission, Object};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tinybus::{
@@ -16,7 +17,6 @@ use tinybus::{
 use tinystoragedrivers_bus::{
     BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
 };
-use tinystoragedrivers_client::{Admission, Object};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -25,7 +25,7 @@ use crate::names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, interface, member, object_path,
     watch_path, wire_value,
 };
-use tinystoragedrivers_core::BlobReader;
+use tinystoragedrivers_api::BlobReader;
 
 /// How a call failed, before it becomes a bus error.
 #[derive(Debug, PartialEq, Eq)]
@@ -200,6 +200,7 @@ fn selectors(object: Object) -> &'static [&'static str] {
         Object::Blobs => &wire::BLOBS_SELECTORS,
         Object::Secrets => &wire::SECRETS_SELECTORS,
         Object::Queues => &wire::QUEUES_SELECTORS,
+        Object::Kv => &wire::KV_SELECTORS,
     }
 }
 
@@ -405,12 +406,13 @@ impl ServedStorage {
     }
 }
 
-const ALL: [Object; 5] = [
+const ALL: [Object; 6] = [
     Object::Documents,
     Object::Streams,
     Object::Blobs,
     Object::Secrets,
     Object::Queues,
+    Object::Kv,
 ];
 
 /// Serve the `Storage` objects on `connection` and claim [`HOST_NAME`].

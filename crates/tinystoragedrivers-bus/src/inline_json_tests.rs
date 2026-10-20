@@ -1,6 +1,6 @@
 //! Inline JSON preserves business data without treating it as stream references.
 use super::*;
-use crate::{Precondition, PutRequest, Version, Versioned};
+use crate::{Meta, Precondition, PutRequest, Version, Versioned};
 use serde_json::json;
 
 #[test]
@@ -22,11 +22,13 @@ fn nested_stream_shaped_business_data_roundtrips_as_inline_text() {
         id: "index".into(),
         version: Version(1),
         doc: document.clone(),
-        meta: None,
+        meta: Meta::unknown(),
     };
     let wire = serde_json::to_value(result).unwrap();
     assert_eq!(
-        serde_json::from_value::<Versioned>(wire).unwrap().doc,
+        serde_json::from_value::<Versioned<Value>>(wire)
+            .unwrap()
+            .doc,
         document
     );
 }
