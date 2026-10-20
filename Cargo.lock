@@ -3873,6 +3873,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-queue"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "data-encoding",
+ "lapin",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-types",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
 name = "tinystoragedrivers-rabbitmq"
 version = "1.0.0"
 dependencies = [
