@@ -145,6 +145,7 @@ async fn live_native_kv_contract() {
     let scope_name = format!("kv-test-{}-{suffix}", std::process::id());
     let scope = Scope::new(&scope_name).unwrap();
     let factory = MongoKvFactory::new(connection.clone()).await.unwrap();
+    assert!(format!("{factory:?}").contains("MongoKvFactory"));
     let store = factory.for_scope(&scope);
     let reopened_scope = factory.for_scope(&scope);
     let other_scope = Scope::new(&format!("{scope_name}-other")).unwrap();
@@ -180,6 +181,21 @@ async fn live_native_kv_contract() {
         json!([1, null])
     );
     assert!(other_store.get("p/b").await.unwrap().is_none());
+    let compatibility = MongoKv::new(
+        connection.clone(),
+        Scope::new(&format!("{scope_name}-compat")).unwrap(),
+    )
+    .await
+    .unwrap();
+    compatibility
+        .put("p/b", json!("compatibility constructor"))
+        .await
+        .unwrap();
+    assert_eq!(
+        compatibility.get("p/b").await.unwrap().unwrap().doc,
+        json!("compatibility constructor")
+    );
+    assert!(store.get("p/b").await.unwrap().is_some());
     other_store.put("p/b", json!("other scope")).await.unwrap();
     assert_eq!(
         other_store.get("p/b").await.unwrap().unwrap().doc,
@@ -274,5 +290,37 @@ async fn live_native_kv_contract() {
     );
     assert_eq!(store.put("p/expiring", json!(4)).await.unwrap(), Version(2));
 
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mongo_factory_reports_duplicate_scope_key_index_failure() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let database_name = format!("tsd_epic8131_kv_bad_index_{}_{suffix}", std::process::id());
+    let connection = MongoConnection::connect(&uri, &database_name)
+        .await
+        .unwrap();
+    let collection = connection.database().collection::<Document>(COLLECTION);
+    collection
+        .insert_many([
+            doc! {"_id": "first", "scope": "same", "key": "duplicate"},
+            doc! {"_id": "second", "scope": "same", "key": "duplicate"},
+        ])
+        .await
+        .unwrap();
+
+    let error = MongoKvFactory::new(connection.clone()).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(
+        error
+            .message()
+            .contains("MongoDB could not create the KV index")
+    );
     connection.database().drop().await.unwrap();
 }
