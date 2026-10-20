@@ -3821,6 +3821,7 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
  "zstd",

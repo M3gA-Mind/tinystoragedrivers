@@ -267,6 +267,55 @@ fn default_blob_optional_methods_and_tree_helpers_preserve_contract() {
     assert_tree_rejects_invalid_paths(&store);
 }
 
+#[test]
+fn sealed_blob_hooks_require_reserved_keys_and_explicit_engine_support() {
+    let store = MemoryBlobs::default();
+    assert!(!store.supports_sealed_blobs());
+    assert_eq!(
+        run_ready(store.put_sealed("ordinary/key", vec![1], None))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        run_ready(store.put_sealed("_tsd/sealed/stream", vec![1], None))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert_eq!(
+        run_ready(store.get_sealed("_tsd/sealed/stream"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert_eq!(
+        run_ready(store.head_sealed("_tsd/sealed/stream"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert_eq!(
+        run_ready(store.delete_sealed("_tsd/sealed/stream"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert_eq!(
+        run_ready(store.list_sealed("ordinary/"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        run_ready(store.list_sealed("_tsd/sealed/"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported(Capability::StreamSeal)
+    );
+    assert!(store.values.lock().unwrap().is_empty());
+}
+
 fn assert_tree_operations_preserve_existing_blobs(store: &MemoryBlobs) {
     run_ready(store.put("root/old.txt", b"old".to_vec(), None)).unwrap();
     let written = run_ready(store.put_tree(
