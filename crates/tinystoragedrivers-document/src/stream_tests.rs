@@ -7,8 +7,8 @@ fn sealed_log_round_trip_and_window_clamp_to_retained_base() {
     assert_eq!(log.base(), 4);
     assert_eq!(log.len(), 6);
     assert_eq!(log.window(0, 8)[0].offset, 4);
-    assert!(log.window(6, 8).is_empty());
-    assert!(log.window(4, 0).is_empty());
+    assert_eq!(log.window(6, 8), Vec::new());
+    assert_eq!(log.window(4, 0), Vec::new());
 
     let decoded = SealedLog::decode(&log.encode().unwrap()).unwrap();
     assert_eq!(decoded.window(5, 1)[0].value, json!("b"));

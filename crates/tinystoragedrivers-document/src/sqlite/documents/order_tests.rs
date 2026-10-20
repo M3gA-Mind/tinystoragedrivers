@@ -51,7 +51,7 @@ fn id_and_metadata_order_without_projected_joins() {
     let order = ordered(&[Sort::desc("_updated_ms"), Sort::asc("_id")]).unwrap();
     assert_eq!(order.joins, "");
     assert_eq!(order.terms, "updated_ms DESC, id ASC, id ASC");
-    assert!(order.structural_ranks().is_empty());
+    assert_eq!(order.structural_ranks(), Vec::<&str>::new());
     assert!(
         ordered(&[Sort::asc("_expires_ms")])
             .unwrap()
