@@ -3806,6 +3806,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-document"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "data-encoding",
+ "libc",
+ "mongodb",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-types",
+ "tokio",
+ "zstd",
+]
+
+[[package]]
 name = "tinystoragedrivers-file"
 version = "1.0.0"
 dependencies = [

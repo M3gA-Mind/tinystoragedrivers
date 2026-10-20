@@ -25,6 +25,8 @@ tinystoragedrivers-types = { version = "1.0.0", path = "crates/tinystoragedriver
 tinystoragedrivers-api = { version = "1.0.0", path = "crates/tinystoragedrivers-api" }
 # Shared storage engine connections; primitive crates use feature-specific handles.
 tinystoragedrivers-connect = { path = "crates/tinystoragedrivers-connect" }
+# Standalone document and stream engine implementations.
+tinystoragedrivers-document = { path = "crates/tinystoragedrivers-document" }
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.

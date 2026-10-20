@@ -1,0 +1,161 @@
+use super::*;
+use tempfile::tempdir;
+use tinystoragedrivers_api::{DocumentStore, StreamStore};
+use tinystoragedrivers_types::{
+    Capability, CollectionSpec, ExpectedDocument, Precondition, ReadCheck, Scope, WriteOp,
+};
+
+#[tokio::test]
+async fn document_and_stream_engines_share_the_connection_and_scope() {
+    let directory = tempdir().unwrap();
+    let connection =
+        tinystoragedrivers_connect::sqlite::SqliteConnection::open(directory.path()).unwrap();
+    let scope = Scope::new("alice").unwrap();
+    let documents = SqliteDocuments::new(connection.clone(), scope.clone());
+    let streams = SqliteStreams::new(connection.clone(), scope.clone());
+    assert!(documents.capabilities().contains(Capability::Documents));
+    assert!(streams.capabilities().contains(Capability::Streams));
+
+    documents
+        .ensure_collection(&CollectionSpec::new("notes"))
+        .await
+        .unwrap();
+    documents
+        .put(
+            "notes",
+            "one",
+            serde_json::json!({"text":"shared"}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    streams
+        .append_batch("events", vec![serde_json::json!({"kind":"shared"})])
+        .await
+        .unwrap();
+    let seal = streams.seal("events").await.unwrap();
+    assert_eq!(seal.len, 1);
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap()[0].value,
+        serde_json::json!({"kind":"shared"})
+    );
+    assert!(
+        streams
+            .append("events", serde_json::json!({}))
+            .await
+            .is_err()
+    );
+
+    let failed = documents
+        .atomic_batch_checked(
+            vec![ReadCheck {
+                collection: "notes".into(),
+                id: "missing".into(),
+                expected: ExpectedDocument::Version(tinystoragedrivers_types::Version(1)),
+            }],
+            vec![WriteOp::Put {
+                collection: "notes".into(),
+                id: "must-not-write".into(),
+                doc: serde_json::json!({}),
+                precondition: Precondition::None,
+            }],
+        )
+        .await;
+    assert!(failed.is_err());
+    assert!(
+        documents
+            .get("notes", "must-not-write")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let reopened =
+        tinystoragedrivers_connect::sqlite::SqliteConnection::open(directory.path()).unwrap();
+    let other = Scope::new("bob").unwrap();
+    assert!(
+        SqliteDocuments::new(reopened.clone(), other.clone())
+            .get("notes", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        SqliteStreams::new(reopened, other)
+            .len("events")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(streams.len("events").await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn reads_the_be94_legacy_fixture_without_changing_primitive_rows() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("storage.db");
+    std::fs::write(
+        &path,
+        include_bytes!("../../../tinystoragedrivers-sqlite/tests/fixtures/storage-be94f75.db"),
+    )
+    .unwrap();
+
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open(&path).unwrap();
+    let scope = Scope::new("local").unwrap();
+    let documents = SqliteDocuments::new(connection.clone(), scope.clone());
+    let streams = SqliteStreams::new(connection.clone(), scope);
+    assert_eq!(
+        documents
+            .get("fixture", "document")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"source":"be94f75","value":42})
+    );
+    let events = streams.read_window("fixture.events", 0, 10).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].value,
+        serde_json::json!({"source":"be94f75","sequence":1})
+    );
+    let (columns, preserved) = connection
+        .run_now(|conn| {
+            let mut statement = conn.prepare("PRAGMA table_info(blobs)").map_err(
+                tinystoragedrivers_connect::sqlite::error::during("inspect fixture blob schema"),
+            )?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                    "inspect fixture blob schema",
+                ))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                    "inspect fixture blob schema",
+                ))?;
+            let preserved = conn
+                .query_row(
+                    "SELECT bytes FROM blobs WHERE scope='local' AND key='fixture/blob'",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                    "read fixture blob",
+                ))?;
+            Ok((columns, preserved))
+        })
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "scope",
+            "key",
+            "content_type",
+            "size",
+            "sha256",
+            "expires_ms",
+            "bytes"
+        ]
+    );
+    assert_eq!(preserved, b"be94f75-preserved-blob");
+}
