@@ -3737,6 +3737,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-blob"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "mongodb",
+ "object_store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-core",
+ "tinystoragedrivers-file",
+ "tinystoragedrivers-mongodb",
+ "tinystoragedrivers-types",
+ "tokio",
+]
+
+[[package]]
 name = "tinystoragedrivers-bus"
 version = "1.0.0"
 dependencies = [
@@ -3837,6 +3861,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tinystoragedrivers-core",
+ "tokio",
+]
+
+[[package]]
+name = "tinystoragedrivers-kv"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "libc",
+ "mongodb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
