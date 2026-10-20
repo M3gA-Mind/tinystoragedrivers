@@ -361,6 +361,9 @@ impl<T: BlobStore + ?Sized> BlobStore for Failing<T> {
     fn max_key_len(&self) -> usize {
         self.inner.max_key_len()
     }
+    fn supports_sealed_blobs(&self) -> bool {
+        self.inner.supports_sealed_blobs()
+    }
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         self.call("blobs.put", self.inner.put(key, bytes, content_type))
             .await
@@ -425,6 +428,34 @@ impl<T: BlobStore + ?Sized> BlobStore for Failing<T> {
     }
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         self.call("blobs.list", self.inner.list(prefix)).await
+    }
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.call(
+            "blobs.put_sealed",
+            self.inner.put_sealed(key, bytes, content_type),
+        )
+        .await
+    }
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        self.call("blobs.get_sealed", self.inner.get_sealed(key))
+            .await
+    }
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        self.call("blobs.head_sealed", self.inner.head_sealed(key))
+            .await
+    }
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        self.call("blobs.delete_sealed", self.inner.delete_sealed(key))
+            .await
+    }
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        self.call("blobs.list_sealed", self.inner.list_sealed(prefix))
+            .await
     }
     async fn list_page(
         &self,
@@ -923,6 +954,9 @@ impl<T: BlobStore + ?Sized> BlobStore for Slow<std::sync::Arc<T>> {
     fn max_key_len(&self) -> usize {
         self.inner.max_key_len()
     }
+    fn supports_sealed_blobs(&self) -> bool {
+        self.inner.supports_sealed_blobs()
+    }
     async fn put(&self, k: &str, b: Vec<u8>, t: Option<&str>) -> Result<BlobMeta> {
         self.run(self.inner.put(k, b, t)).await
     }
@@ -976,6 +1010,27 @@ impl<T: BlobStore + ?Sized> BlobStore for Slow<std::sync::Arc<T>> {
     async fn list(&self, p: &str) -> Result<Vec<BlobMeta>> {
         self.run(self.inner.list(p)).await
     }
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.run(self.inner.put_sealed(key, bytes, content_type))
+            .await
+    }
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        self.run(self.inner.get_sealed(key)).await
+    }
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        self.run(self.inner.head_sealed(key)).await
+    }
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        self.run(self.inner.delete_sealed(key)).await
+    }
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        self.run(self.inner.list_sealed(prefix)).await
+    }
     async fn list_page(&self, p: &str, a: Option<&str>, l: usize) -> Result<BlobListPage> {
         self.run(self.inner.list_page(p, a, l)).await
     }
@@ -1006,6 +1061,9 @@ impl<T: BlobStore + ?Sized> BlobStore for ConflictOnce<std::sync::Arc<T>> {
     }
     fn max_key_len(&self) -> usize {
         self.inner.max_key_len()
+    }
+    fn supports_sealed_blobs(&self) -> bool {
+        self.inner.supports_sealed_blobs()
     }
     async fn put(&self, k: &str, b: Vec<u8>, t: Option<&str>) -> Result<BlobMeta> {
         self.check()?;
@@ -1062,6 +1120,28 @@ impl<T: BlobStore + ?Sized> BlobStore for ConflictOnce<std::sync::Arc<T>> {
     }
     async fn list(&self, p: &str) -> Result<Vec<BlobMeta>> {
         self.inner.list(p).await
+    }
+    async fn put_sealed(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.check()?;
+        self.inner.put_sealed(key, bytes, content_type).await
+    }
+    async fn get_sealed(&self, key: &str) -> Result<Option<Blob>> {
+        self.inner.get_sealed(key).await
+    }
+    async fn head_sealed(&self, key: &str) -> Result<Option<BlobMeta>> {
+        self.inner.head_sealed(key).await
+    }
+    async fn delete_sealed(&self, key: &str) -> Result<bool> {
+        self.check()?;
+        self.inner.delete_sealed(key).await
+    }
+    async fn list_sealed(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
+        self.inner.list_sealed(prefix).await
     }
     async fn list_page(&self, p: &str, a: Option<&str>, l: usize) -> Result<BlobListPage> {
         self.inner.list_page(p, a, l).await

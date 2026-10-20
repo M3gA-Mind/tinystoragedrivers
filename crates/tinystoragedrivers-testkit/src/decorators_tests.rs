@@ -272,6 +272,87 @@ async fn slow_and_conflict_once_forward_blob_port() {
     let _ = conflict.sweep_expired().await;
 }
 
+#[tokio::test]
+async fn blob_decorators_forward_sealed_hooks_and_injected_failures() {
+    let scope = Scope::new("decorated_sealed_blobs").unwrap();
+    let storage = memory_storage(&scope);
+    let key = "_tsd/sealed/events/g0";
+
+    let failing = Failing::new(Arc::clone(storage.blobs()));
+    assert!(failing.supports_sealed_blobs());
+    failing
+        .faults
+        .fail_operation_nth("blobs.put_sealed", 1, ErrorKind::Unavailable);
+    assert_eq!(
+        failing
+            .put_sealed(key, b"sealed".to_vec(), Some("application/zstd"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unavailable
+    );
+    failing
+        .put_sealed(key, b"sealed".to_vec(), Some("application/zstd"))
+        .await
+        .unwrap();
+    assert_eq!(
+        failing.get_sealed(key).await.unwrap().unwrap().bytes,
+        b"sealed"
+    );
+    assert_eq!(failing.head_sealed(key).await.unwrap().unwrap().len, 6);
+    assert_eq!(
+        failing
+            .list_sealed("_tsd/sealed/events/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(failing.delete_sealed(key).await.unwrap());
+
+    let slow = Slow::new(Arc::clone(storage.blobs()), Duration::ZERO);
+    slow.put_sealed(key, b"slow".to_vec(), None).await.unwrap();
+    assert_eq!(slow.get_sealed(key).await.unwrap().unwrap().bytes, b"slow");
+    assert_eq!(slow.head_sealed(key).await.unwrap().unwrap().len, 4);
+    assert_eq!(
+        slow.list_sealed("_tsd/sealed/events/").await.unwrap().len(),
+        1
+    );
+    assert!(slow.delete_sealed(key).await.unwrap());
+
+    let conflict = ConflictOnce::new(Arc::clone(storage.blobs()));
+    assert_eq!(
+        conflict
+            .put_sealed(key, b"retry".to_vec(), None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    conflict
+        .put_sealed(key, b"retry".to_vec(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        conflict.get_sealed(key).await.unwrap().unwrap().bytes,
+        b"retry"
+    );
+    assert_eq!(conflict.head_sealed(key).await.unwrap().unwrap().len, 5);
+    assert_eq!(
+        conflict
+            .list_sealed("_tsd/sealed/events/")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(conflict.delete_sealed(key).await.unwrap());
+    assert_eq!(
+        storage.blobs().list("").await.unwrap(),
+        Vec::<tinystoragedrivers_types::BlobMeta>::new()
+    );
+}
+
 #[test]
 fn decorator_port_metadata_matches_the_wrapped_engines() {
     let scope = Scope::new("decorated_port_metadata").unwrap();
