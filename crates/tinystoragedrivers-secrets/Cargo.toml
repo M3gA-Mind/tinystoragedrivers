@@ -63,8 +63,8 @@ atomicwrites = { version = "0.4", optional = true }
 tempfile = { workspace = true }
 tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "1.0.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync", "net", "io-util"] }
-tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite"] }
-tinystoragedrivers-connect = { workspace = true, features = ["sqlite"] }
+tinystoragedrivers-document = { workspace = true, features = ["memory", "sqlite", "file", "mongodb"] }
+tinystoragedrivers-connect = { workspace = true, features = ["sqlite", "file", "mongodb"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The birth-mode regression changes umask only inside its disposable child.

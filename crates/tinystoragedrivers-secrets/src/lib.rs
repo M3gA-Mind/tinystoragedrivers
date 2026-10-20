@@ -56,12 +56,7 @@ mod kms;
 #[cfg(feature = "memory")]
 mod memory;
 mod store;
-#[cfg(any(
-    feature = "file",
-    feature = "keyring",
-    feature = "kms-aws",
-    feature = "kms-gcp"
-))]
+#[cfg(any(feature = "file", feature = "keyring"))]
 mod task;
 #[cfg(any(feature = "file", feature = "document"))]
 mod version;

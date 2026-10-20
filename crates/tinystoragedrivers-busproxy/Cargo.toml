@@ -14,12 +14,12 @@ serde.workspace = true
 serde_json.workspace = true
 tinybus.workspace = true
 tinystoragedrivers-bus.workspace = true
+tinystoragedrivers-api.workspace = true
 tinystoragedrivers-client.workspace = true
 tinystoragedrivers-core.workspace = true
 tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]
-tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 

@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use serde_json::json;
 use tinybus::{BusName, Connection, broker::Broker, transport::memory::MemoryBus};
+use tinystoragedrivers_api::SecretStore;
 use tinystoragedrivers_client::{BusStorage, StorageServer};
 use tinystoragedrivers_core::{
     CollectionSpec, ErrorKind, Filter, MemoryStorage, Precondition, Scope, ScopedStorage,
     StorageBackend, WatchNotice, WatchOptions, WriteOptions,
 };
-use tinystoragedrivers_secrets::SecretStore;
 
 use super::*;
 use crate::watching_fake::{Docs, Source};
@@ -300,7 +300,10 @@ async fn secrets_need_a_host_the_broker_has_attested() {
     // The in-process host is not an attested artifact, so the confidential
     // route is refused by the broker rather than delivering a secret to it.
     let error = bus.secrets().get("anything").await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert_eq!(
+        error.kind(),
+        tinystoragedrivers_api::types::ErrorKind::Unavailable
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

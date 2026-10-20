@@ -680,6 +680,49 @@ fn native_key_publication_faults_preserve_an_uncertain_winner() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn native_generic_publication_faults_preserve_or_report_the_published_bytes() {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = TempDir::new("native-generic-publication-fault");
+    let path = dir.0.join(SECRETS_FILE_NAME);
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap()
+        .write_all(b"previous ciphertext")
+        .unwrap();
+
+    let result = write_atomic(&path, b"replacement ciphertext");
+    let Some(fault) = std::env::var("TSD_EXPECT_NATIVE_IO_FAULT").ok() else {
+        result.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement ciphertext");
+        return;
+    };
+
+    let error = result.unwrap_err();
+    let native = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .unwrap();
+    assert_eq!(native.raw_os_error(), Some(5));
+    println!("OBSERVED_NATIVE_IO_ERROR=5");
+
+    match fault.as_str() {
+        "stage-flush" | "rename" => {
+            assert_eq!(fs::read(&path).unwrap(), b"previous ciphertext");
+            assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        }
+        "publication-barrier" | "published-file-flush" => {
+            assert_eq!(fs::read(&path).unwrap(), b"replacement ciphertext");
+            assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+        }
+        other => panic!("unknown native fault fixture: {other}"),
+    }
+}
+
 #[test]
 fn an_absent_secret_file_name_is_rejected_before_any_filesystem_access() {
     assert!(write_atomic(Path::new(""), b"disposable fixture").is_err());
