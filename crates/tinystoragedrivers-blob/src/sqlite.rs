@@ -77,11 +77,12 @@ impl BlobStore for SqliteBlobStore {
         }).await
     }
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
+        clamp_range(0, range.start, range.end)?;
         let Some(blob) = self.get(key).await? else {
             return Ok(None);
         };
         Ok(Some(
-            blob.bytes[clamp_range(blob.bytes.len(), range.start, range.end)].to_vec(),
+            blob.bytes[clamp_range(blob.bytes.len(), range.start, range.end)?].to_vec(),
         ))
     }
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {
@@ -130,6 +131,7 @@ impl BlobStore for SqliteBlobStore {
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {
         validate_prefix(prefix, None)?;
         let scope = self.scope.as_str().to_owned();
+        let prefix = prefix.to_owned();
         let table = self.connection.tables().blobs().to_owned();
         let now = Self::now(&self.connection.clock());
         self.connection.run(move |connection| {
@@ -152,6 +154,7 @@ impl BlobStore for SqliteBlobStore {
         }
         validate_prefix(prefix, after)?;
         let scope = self.scope.as_str().to_owned();
+        let prefix = prefix.to_owned();
         let blobs = self.connection.tables().blobs().to_owned();
         let written = self.connection.tables().blob_written().to_owned();
         let after = after.map(str::to_owned);

@@ -178,6 +178,12 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test standalone blob memory, filesystem, and SQLite features
+        run: |
+          cargo test --locked -p tinystoragedrivers-blob
+          cargo test --locked -p tinystoragedrivers-blob --no-default-features --features fs
+          cargo test --locked -p tinystoragedrivers-blob --no-default-features --features sqlite
+          cargo check --locked -p tinystoragedrivers-blob --no-default-features --features s3
 
       - name: Build
         run: cargo build --all-targets --all-features
@@ -272,6 +278,11 @@ jobs:
 
       - name: Test the facade's mongodb feature
         run: cargo test -p tinystoragedrivers --features mongodb
+
+      - name: Test standalone blob engines against MongoDB
+        run: cargo test --locked -p tinystoragedrivers-blob --all-features
+      - name: Check the standalone blob MongoDB feature
+        run: cargo check --locked -p tinystoragedrivers-blob --no-default-features --features mongodb
 
   rabbitmq:
     name: RabbitMQ queue backend

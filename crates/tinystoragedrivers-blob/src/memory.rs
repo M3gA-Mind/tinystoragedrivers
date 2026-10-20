@@ -32,12 +32,6 @@ pub struct MemoryBlobStore {
     clock: fn() -> u64,
 }
 
-impl Default for MemoryBlobStore {
-    fn default() -> Self {
-        Self::new(Scope::local())
-    }
-}
-
 impl MemoryBlobStore {
     /// Creates an empty blob engine bound to `scope`.
     #[must_use]
@@ -117,17 +111,21 @@ impl BlobStore for MemoryBlobStore {
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_key(key)?;
+        clamp_range(0, range.start, range.end)?;
         let now = (self.clock)();
         let records = self
             .records
             .lock()
             .map_err(|_| StorageError::unavailable("blob map lock poisoned"))?;
-        Ok(records
+        let Some(record) = records
             .get(&(self.scope.as_str().to_owned(), key.to_owned()))
             .filter(|record| Self::live(record, now))
-            .map(|record| {
-                record.bytes[clamp_range(record.bytes.len(), range.start, range.end)].to_vec()
-            }))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            record.bytes[clamp_range(record.bytes.len(), range.start, range.end)?].to_vec(),
+        ))
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {

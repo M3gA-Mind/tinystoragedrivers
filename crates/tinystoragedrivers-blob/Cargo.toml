@@ -11,9 +11,9 @@ publish = false
 [features]
 default = ["memory"]
 memory = []
-fs = ["dep:tokio"]
+fs = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:sha2"]
-mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
+mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:mongodb", "dep:futures-util"]
 s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "dep:object_store", "dep:futures-util", "dep:http"]
 
 [dependencies]
@@ -24,16 +24,19 @@ bytes = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"], optional = true }
-tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", optional = true }
+tinystoragedrivers-connect = { workspace = true, optional = true }
 sha2 = { version = "0.10", optional = true }
 object_store = { version = "0.14.2", default-features = false, features = ["aws"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
 http = { version = "1", optional = true }
+mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tempfile = { workspace = true }
+tinystoragedrivers-core = { workspace = true }
+tinystoragedrivers-file = { workspace = true }
+tinystoragedrivers-mongodb = { workspace = true }
 
 [lints]
 workspace = true

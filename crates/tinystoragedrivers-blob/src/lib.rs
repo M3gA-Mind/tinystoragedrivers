@@ -4,11 +4,15 @@
 //! URL resolution, composite routing, orphan cleanup policy, or stream seals.
 
 mod key;
+#[cfg(feature = "memory")]
 mod memory;
 
+#[cfg(feature = "memory")]
 pub use memory::MemoryBlobStore;
 pub use tinystoragedrivers_api::{BlobReader, BlobStore, BlobStream};
-pub use tinystoragedrivers_types::{Blob, BlobListEntry, BlobListPage, BlobMeta, Scope, TreeEntry, TreeFile};
+pub use tinystoragedrivers_types::{
+    Blob, BlobListEntry, BlobListPage, BlobMeta, Scope, TreeEntry, TreeFile,
+};
 
 #[cfg(feature = "fs")]
 mod fs;

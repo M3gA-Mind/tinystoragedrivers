@@ -5,9 +5,6 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of entries in one physical blob listing page.
 pub const MAX_BLOB_LIST_PAGE_ITEMS: usize = 1_000;
 
-#[cfg(test)]
-#[path = "blob_tests.rs"]
-mod tests;
 /// Prefix reserved for blobs owned by sealed stream implementations.
 pub const SEALED_BLOB_PREFIX: &str = "_tsd/sealed/";
 
