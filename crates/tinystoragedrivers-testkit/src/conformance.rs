@@ -15,6 +15,7 @@ pub mod documents;
 pub mod queue;
 pub mod streams;
 pub mod validated;
+pub mod watch;
 
 fn unique(label: &str) -> String {
     format!("{label}_{}", ulid::Ulid::new().to_string().to_lowercase())
