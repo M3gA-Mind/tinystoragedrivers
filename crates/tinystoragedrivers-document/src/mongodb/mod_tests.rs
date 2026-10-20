@@ -1111,6 +1111,171 @@ async fn validated_batches_commit_together_and_roll_back_on_conflict() {
 }
 
 #[tokio::test]
+async fn concurrent_insert_absent_does_not_replace_the_winning_document() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd8131_absent_cas").await;
+    let docs = MongoDocuments::new(connection.clone(), Scope::new("scope-a").unwrap());
+    docs.ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+
+    for attempt in 0..16 {
+        let key = format!("raced-{attempt}");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = docs.clone();
+        let first_barrier = barrier.clone();
+        let first_key = key.clone();
+        let first_write = async move {
+            first_barrier.wait().await;
+            first
+                .put(
+                    "records",
+                    &first_key,
+                    serde_json::json!({"winner": "first"}),
+                    Precondition::Absent,
+                )
+                .await
+        };
+        let second = docs.clone();
+        let second_key = key.clone();
+        let second_write = async move {
+            barrier.wait().await;
+            second
+                .put(
+                    "records",
+                    &second_key,
+                    serde_json::json!({"winner": "second"}),
+                    Precondition::Absent,
+                )
+                .await
+        };
+        let (first, second) = tokio::join!(first_write, second_write);
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        for error in [first.err(), second.err()].into_iter().flatten() {
+            assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+        }
+        let row = docs.get("records", &key).await.unwrap().unwrap();
+        assert!(matches!(
+            row.doc["winner"].as_str(),
+            Some("first" | "second")
+        ));
+    }
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_unconditional_initial_writes_advance_the_document_version() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd8131_unconditional_cas").await;
+    let docs = MongoDocuments::new(connection.clone(), Scope::new("scope-a").unwrap());
+    docs.ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    for attempt in 0..16 {
+        let key = format!("raced-{attempt}");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first = docs.clone();
+        let first_barrier = barrier.clone();
+        let first_key = key.clone();
+        let first_write = async move {
+            first_barrier.wait().await;
+            first
+                .put(
+                    "records",
+                    &first_key,
+                    serde_json::json!({"writer": "first"}),
+                    Precondition::None,
+                )
+                .await
+        };
+        let second = docs.clone();
+        let second_key = key.clone();
+        let second_write = async move {
+            barrier.wait().await;
+            second
+                .put(
+                    "records",
+                    &second_key,
+                    serde_json::json!({"writer": "second"}),
+                    Precondition::None,
+                )
+                .await
+        };
+        let (first, second) = tokio::join!(first_write, second_write);
+        let mut versions = [first.unwrap(), second.unwrap()];
+        versions.sort_unstable();
+        assert_eq!(
+            versions,
+            [
+                tinystoragedrivers_types::Version::FIRST,
+                tinystoragedrivers_types::Version::FIRST.next().unwrap(),
+            ]
+        );
+        let row = docs.get("records", &key).await.unwrap().unwrap();
+        assert_eq!(row.version, tinystoragedrivers_types::Version(2));
+    }
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_validated_batches_report_a_conflict_without_losing_the_winner() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd8131_batch_conflict").await;
+    assert!(connection.transactions_available());
+    let docs = MongoDocuments::new(connection.clone(), Scope::new("scope-a").unwrap());
+    docs.ensure_collection(&CollectionSpec::new("records"))
+        .await
+        .unwrap();
+    let version = docs
+        .put(
+            "records",
+            "shared",
+            serde_json::json!({"winner": "before"}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let run = |docs: MongoDocuments, barrier: Arc<tokio::sync::Barrier>, value: &'static str| async move {
+        barrier.wait().await;
+        docs.atomic_batch_checked(
+            vec![ReadCheck {
+                collection: "records".to_owned(),
+                id: "shared".to_owned(),
+                expected: ExpectedDocument::Version(version),
+            }],
+            vec![WriteOp::Put {
+                collection: "records".to_owned(),
+                id: "shared".to_owned(),
+                doc: serde_json::json!({"winner": value}),
+                precondition: Precondition::Version(version),
+            }],
+        )
+        .await
+    };
+    let first = run(docs.clone(), barrier.clone(), "first");
+    let second = run(docs.clone(), barrier, "second");
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    for error in [first.err(), second.err()].into_iter().flatten() {
+        assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    }
+    let row = docs.get("records", "shared").await.unwrap().unwrap();
+    assert!(matches!(
+        row.doc["winner"].as_str(),
+        Some("first" | "second")
+    ));
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     reason = "the watch regression pins scope filtering, resume binding, and reconnect behavior together"
