@@ -1,4 +1,4 @@
-//! Queue engines implementing [`QueueStore`](tinystoragedrivers_api::QueueStore).
+//! Queue engines implementing [`tinystoragedrivers_api::QueueStore`].
 //!
 //! The default `memory` feature provides a native in-memory queue. The
 //! `document` feature provides a queue over any document port, and `rabbitmq`

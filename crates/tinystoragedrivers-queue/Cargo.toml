@@ -21,7 +21,7 @@ sha2 = { workspace = true }
 data-encoding = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 lapin = { workspace = true, optional = true }
-tinystoragedrivers-connect = { workspace = true, optional = true, features = ["amqp"] }
+tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "1.0.0", optional = true, features = ["amqp"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
