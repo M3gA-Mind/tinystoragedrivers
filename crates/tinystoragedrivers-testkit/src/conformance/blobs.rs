@@ -12,6 +12,7 @@ use tinystoragedrivers_types::{Capability, ErrorKind, TreeFile};
 ///
 /// # Panics
 /// Panics when the blob driver violates a required behavior.
+#[allow(clippy::too_many_lines)]
 pub async fn run(blobs: &dyn BlobStore) {
     let prefix = unique("blob");
     let key = format!("{prefix}/item");
@@ -51,7 +52,7 @@ pub async fn run(blobs: &dyn BlobStore) {
     );
     assert_eq!(
         ok(blobs.get(&streamed).await, "get streamed blob")
-            .unwrap()
+            .expect("successfully written streamed blob exists")
             .bytes,
         b"abcd"
     );
@@ -69,7 +70,7 @@ pub async fn run(blobs: &dyn BlobStore) {
     );
     assert_eq!(
         ok(blobs.get(&empty_streamed).await, "get empty streamed blob")
-            .unwrap()
+            .expect("successfully written empty blob exists")
             .bytes,
         b""
     );
@@ -121,7 +122,7 @@ pub async fn run(blobs: &dyn BlobStore) {
             blobs.list_page(&prefix, Some(&cursor), 10).await,
             "second list page",
         );
-        assert!(!second_page.items.is_empty());
+        assert_ne!(second_page.items, Vec::new(), "continuation page has items");
         assert!(
             !second_page
                 .items

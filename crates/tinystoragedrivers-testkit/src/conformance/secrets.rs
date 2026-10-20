@@ -15,19 +15,21 @@ pub async fn run(secrets: &dyn SecretStore) {
     let b = format!("{prefix}_b");
     ok(secrets.set(&a, b"first").await, "set");
     assert_eq!(
-        ok(secrets.get(&a).await, "get").unwrap().as_slice(),
+        ok(secrets.get(&a).await, "get")
+            .expect("set secret is present")
+            .as_slice(),
         b"first"
     );
     if secrets.enumerable() {
         let listed = ok(secrets.list(&prefix).await, "list");
-        assert_eq!(listed, [a.clone()]);
+        assert_eq!(listed.as_slice(), std::slice::from_ref(&a));
     }
     match secrets.get_versioned(&a).await {
         Ok(Some((value, version))) => {
             assert_eq!(value.as_slice(), b"first");
             let next = ok(
                 secrets
-                    .set_if(&a, b"second", SecretPrecondition::Version(version.clone()))
+                    .set_if(&a, b"second", SecretPrecondition::Version(version))
                     .await,
                 "conditional set",
             );
@@ -41,7 +43,7 @@ pub async fn run(secrets: &dyn SecretStore) {
             );
             assert_eq!(
                 ok(secrets.get(&a).await, "read conditional value")
-                    .unwrap()
+                    .expect("conditionally updated secret is present")
                     .as_slice(),
                 b"second"
             );
@@ -70,3 +72,7 @@ pub async fn run(secrets: &dyn SecretStore) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "secrets_tests.rs"]
+mod tests;

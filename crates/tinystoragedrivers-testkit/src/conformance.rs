@@ -49,3 +49,7 @@ fn has(capabilities: tinystoragedrivers_types::Capabilities, capability: Capabil
 }
 
 pub mod seal;
+
+#[cfg(test)]
+#[path = "conformance_tests.rs"]
+mod tests;

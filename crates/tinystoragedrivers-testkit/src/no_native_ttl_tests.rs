@@ -42,3 +42,12 @@ async fn decorator_hides_ttl_capability_and_rejects_ttl_writes() {
     );
     assert!(store.get("k").await.expect("read delegates").is_none());
 }
+
+#[tokio::test]
+async fn no_native_ttl_forwards_the_other_kv_operations() -> tinystoragedrivers_types::Result<()> {
+    let scope = tinystoragedrivers_types::Scope::new("no_native_ttl_suite")?;
+    let storage = crate::memory_storage(&scope);
+    let store = NoNativeTtl::new(Arc::clone(storage.kv()));
+    crate::conformance::kv::run(&store).await;
+    Ok(())
+}

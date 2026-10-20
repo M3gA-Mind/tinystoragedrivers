@@ -4022,6 +4022,7 @@ dependencies = [
  "tinystoragedrivers-types",
  "tokio",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]

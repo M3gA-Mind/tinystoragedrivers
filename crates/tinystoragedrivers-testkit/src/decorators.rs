@@ -21,18 +21,46 @@ pub struct Slow<T> {
     /// Wrapped adapter state.
     pub inner: T,
     delay: Duration,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl<T> Slow<T> {
     /// Wraps `inner` and delays each operation that calls [`Self::before`].
     #[must_use]
     pub fn new(inner: T, delay: Duration) -> Self {
-        Self { inner, delay }
+        Self {
+            inner,
+            delay,
+            gate: None,
+        }
+    }
+
+    /// Wraps `inner` with an operation gate controlled by [`Self::release_one`].
+    #[must_use]
+    pub fn gated(inner: T) -> Self {
+        Self {
+            inner,
+            delay: Duration::ZERO,
+            gate: Some(Arc::new(tokio::sync::Semaphore::new(0))),
+        }
+    }
+
+    /// Releases one waiting operation on a gated adapter.
+    pub fn release_one(&self) {
+        if let Some(gate) = &self.gate {
+            gate.add_permits(1);
+        }
     }
 
     /// Waits for the configured delay before an adapter operation.
     pub async fn before(&self) {
-        tokio::time::sleep(self.delay).await;
+        if let Some(gate) = &self.gate {
+            if let Ok(permit) = gate.acquire().await {
+                permit.forget();
+            }
+        } else {
+            tokio::time::sleep(self.delay).await;
+        }
     }
 
     /// Runs a future after the configured delay.
