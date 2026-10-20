@@ -1989,7 +1989,7 @@ dependencies = [
 [[package]]
 name = "tinybus"
 version = "0.1.6"
-source = "git+https://github.com/senamakel/tinybus?rev=c7560289fd6f58b57622234f6d72ff9545cb38c9#c7560289fd6f58b57622234f6d72ff9545cb38c9"
+source = "git+https://github.com/senamakel/tinybus?rev=1d0aa34104c84f6817f398b0abe164df6c5e7b82#1d0aa34104c84f6817f398b0abe164df6c5e7b82"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2010,7 +2010,7 @@ dependencies = [
 [[package]]
 name = "tinybus-module"
 version = "0.1.6"
-source = "git+https://github.com/senamakel/tinybus?rev=c7560289fd6f58b57622234f6d72ff9545cb38c9#c7560289fd6f58b57622234f6d72ff9545cb38c9"
+source = "git+https://github.com/senamakel/tinybus?rev=1d0aa34104c84f6817f398b0abe164df6c5e7b82#1d0aa34104c84f6817f398b0abe164df6c5e7b82"
 dependencies = [
  "async-trait",
  "serde",
