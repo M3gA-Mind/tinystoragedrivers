@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn mongo_error_adapter_keeps_operation_context_and_hides_driver_details() {
+    let error =
+        mongo_error("read a document")(mongodb::error::Error::custom("private connection detail"));
+    assert_eq!(
+        error.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("MongoDB failed to read a document")
+    );
+    assert!(!error.to_string().contains("private connection detail"));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[tokio::test]
+async fn document_debug_reports_binding_without_logging_client_credentials() {
+    let client = Client::with_uri_str(
+        "mongodb://test-user:test-secret@127.0.0.1:27017/debug?directConnection=true",
+    )
+    .await
+    .unwrap();
+    let documents = MongoDocuments {
+        database: client.database("debug"),
+        client,
+        scope: Scope::new("scope-a").unwrap(),
+        clock: std::sync::Arc::new(|| 0),
+        transactions: true,
+        origin: mongodb::bson::oid::ObjectId::new(),
+    };
+    let output = format!("{documents:?}");
+    assert!(output.contains("debug"));
+    assert!(output.contains("scope-a"));
+    assert!(output.contains("transactions: true"));
+    assert!(!output.contains("test-secret"));
+}
+
+#[test]
 fn query_cursor_binding_includes_sort_order() {
     let scope = Scope::new("scope-a").unwrap();
     let ascending = Query::all().sort(Sort::asc("name"));
@@ -43,6 +82,13 @@ fn mongo_decode_rejects_malformed_records_and_treats_tombstones_as_absent() {
     assert_eq!(row.meta.created_ms, 0);
     assert_eq!(row.meta.updated_ms, 0);
     assert_eq!(row.meta.expires_ms, None);
+}
+
+#[test]
+fn mongo_collection_declaration_decode_rejects_missing_fields_and_invalid_json() {
+    assert!(decode_spec(&doc! {"rev": 1_i64}).is_err());
+    assert!(decode_spec(&doc! {"spec": "{", "rev": 1_i64}).is_err());
+    assert!(decode_spec(&doc! {"spec": "{}", "rev": "one"}).is_err());
 }
 
 #[test]

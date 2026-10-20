@@ -36,7 +36,3 @@ fn sealed_log_round_trip_and_window_clamp_to_retained_base() {
 fn sealed_log_rejects_offsets_that_overflow() {
     assert!(SealedLog::new(u64::MAX, vec![json!(1)]).is_err());
 }
-
-#[cfg(test)]
-#[path = "stream_tests.rs"]
-mod tests;

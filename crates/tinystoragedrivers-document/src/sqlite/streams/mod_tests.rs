@@ -1,7 +1,7 @@
 use super::*;
 use tinystoragedrivers_api::StreamStore;
 
-async fn open() -> (tempfile::TempDir, SqliteConnection, Scope, SqliteStreams) {
+fn open() -> (tempfile::TempDir, SqliteConnection, Scope, SqliteStreams) {
     let dir = tempfile::tempdir().unwrap();
     let connection = SqliteConnection::open(dir.path()).unwrap();
     let scope = Scope::new("stream-unit").unwrap();
@@ -11,7 +11,7 @@ async fn open() -> (tempfile::TempDir, SqliteConnection, Scope, SqliteStreams) {
 
 #[tokio::test]
 async fn stream_info_prefix_listing_truncation_and_delete_preserve_offsets() {
-    let (_dir, _connection, _scope, streams) = open().await;
+    let (_dir, _connection, _scope, streams) = open();
     streams
         .append_batch("events/a", vec![serde_json::json!(1), serde_json::json!(2)])
         .await
@@ -53,7 +53,7 @@ async fn stream_info_prefix_listing_truncation_and_delete_preserve_offsets() {
 
 #[tokio::test]
 async fn sealed_stream_delete_requires_the_inspected_timestamp() {
-    let (_dir, _connection, _scope, streams) = open().await;
+    let (_dir, _connection, _scope, streams) = open();
     streams
         .append("sealed", serde_json::json!("value"))
         .await
@@ -71,11 +71,10 @@ async fn sealed_stream_delete_requires_the_inspected_timestamp() {
     let info = streams.info("sealed").await.unwrap().unwrap();
     let sealed_ms = info.sealed_ms.expect("sealed stream records its seal time");
     assert!(
-        streams
+        !streams
             .delete_sealed_stream("sealed", sealed_ms + 1)
             .await
             .unwrap()
-            == false
     );
     assert!(
         streams
@@ -102,7 +101,7 @@ async fn sealed_stream_delete_requires_the_inspected_timestamp() {
 
 #[tokio::test]
 async fn validates_names_and_surfaces_corrupt_rows() {
-    let (_dir, connection, _scope, streams) = open().await;
+    let (_dir, connection, _scope, streams) = open();
     assert_eq!(
         streams
             .append("", serde_json::json!(1))

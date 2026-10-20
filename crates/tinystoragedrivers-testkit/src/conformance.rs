@@ -12,7 +12,8 @@ use std::fmt::Debug;
 use tinystoragedrivers_types::{Capability, ErrorKind, Result};
 
 pub mod documents;
-pub mod queue;
+pub mod seal;
+pub mod semantics;
 pub mod streams;
 pub mod validated;
 pub mod watch;
@@ -42,3 +43,7 @@ fn empty<T: Debug>(items: &[T], check: &str) {
 fn has(capabilities: tinystoragedrivers_types::Capabilities, capability: Capability) -> bool {
     capabilities.contains(capability)
 }
+
+#[cfg(test)]
+#[path = "conformance_tests.rs"]
+mod tests;

@@ -169,6 +169,13 @@ fn s3_open_rejects_invalid_urls_and_new_handles_empty_connection_prefix() {
         ErrorKind::InvalidInput
     );
 
+    let opened = S3BlobStore::open(
+        "s3://test-bucket/prefix?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A9000",
+        &Scope::new("local").unwrap(),
+    )
+    .unwrap();
+    assert!(opened.capabilities().contains(Capability::PresignedUrls));
+
     let connection = S3Connection::with_store(Arc::new(InMemory::new()), None, "test", "");
     let store = S3BlobStore::new(&connection, &Scope::new("local").unwrap()).unwrap();
     assert!(store.max_key_len() > 0);

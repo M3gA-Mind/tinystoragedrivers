@@ -3982,7 +3982,6 @@ dependencies = [
 name = "tinystoragedrivers-testkit"
 version = "1.0.0"
 dependencies = [
- "async-trait",
  "serde_json",
  "tempfile",
  "tinystoragedrivers-api",

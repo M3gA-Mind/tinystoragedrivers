@@ -102,10 +102,10 @@ impl MongoDocuments {
                 None,
                 Some(WatchNotice::ResetRequired {
                     reason: WatchReset::ResumeLost,
-                    source: Some(mongo_error("resume a document watch", error)),
+                    source: Some(mongo_error("resume a document watch")(error)),
                 }),
             ),
-            Err(error) => return Err(mongo_error("open a document watch", error)),
+            Err(error) => return Err(mongo_error("open a document watch")(error)),
         };
         let cursor = stream
             .as_ref()
@@ -168,9 +168,9 @@ impl DocumentWatch for MongoWatch {
             },
             Ok(Some(Err(error))) if resume_lost(&error) => WatchNotice::ResetRequired {
                 reason: WatchReset::ResumeLost,
-                source: Some(mongo_error("resume a document watch", error)),
+                source: Some(mongo_error("resume a document watch")(error)),
             },
-            Ok(Some(Err(error))) => return Err(mongo_error("read a document watch", error)),
+            Ok(Some(Err(error))) => return Err(mongo_error("read a document watch")(error)),
             Ok(Some(Ok(event))) => {
                 if matches!(
                     event.get_str("operationType"),

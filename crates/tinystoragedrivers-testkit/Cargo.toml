@@ -10,7 +10,6 @@ description = "In-memory storage and conformance tools for tinystoragedrivers co
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 tinystoragedrivers-api = { workspace = true }
-async-trait = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

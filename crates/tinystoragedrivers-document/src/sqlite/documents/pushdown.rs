@@ -309,3 +309,7 @@ pub(crate) fn clause(filter: &Filter, projection: &Projection) -> Option<Clause>
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "pushdown_tests.rs"]
+mod tests;
