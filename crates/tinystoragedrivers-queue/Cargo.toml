@@ -1,0 +1,36 @@
+[package]
+name = "tinystoragedrivers-queue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Queue primitive engines for tinystoragedrivers"
+readme = "README.md"
+keywords = ["queue", "storage", "rabbitmq"]
+categories = ["database"]
+
+[dependencies]
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
+sha2 = { workspace = true }
+data-encoding = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+lapin = { workspace = true, optional = true }
+tinystoragedrivers-connect = { workspace = true, optional = true, features = ["amqp"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[features]
+default = ["memory"]
+memory = []
+document = []
+rabbitmq = ["dep:lapin", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/amqp"]
+
+[lints]
+workspace = true
