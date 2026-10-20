@@ -1,5 +1,6 @@
 //! The module-side [`StorageTransport`] over a real `TinyBus` connection.
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,30 +226,18 @@ impl StorageTransport for BusTransport {
             "PutStream",
             json!([wire_value(&head), wire_value(&writer.stream_ref())]),
         );
-        // The call and the body are in flight together: the host reads the
-        // stream while it answers, so neither can wait for the other. The
-        // first failure wins and the other half is dropped.
-        let sending = async {
-            pump(writer, &mut body, len)
-                .await
-                .map_err(|error| match error {
-                    PumpError::Short => WireError::Storage(StorageFailure {
-                        kind: StorageKind::InvalidInput,
-                    }),
-                    PumpError::Source => WireError::Storage(StorageFailure {
-                        kind: StorageKind::Backend,
-                    }),
-                    PumpError::Bus(error) => transport_error(&error),
-                })
-        };
+        // The host reads the stream while this call is outstanding. Keep the
+        // pump error typed until both sides' completion ordering is resolved.
+        let sending = pump(writer, &mut body, len);
         let calling = async {
             self.connection
                 .call_raw(message, self.timeout)
                 .await
                 .map_err(wire_error)
         };
-        let (reply, ()) = tokio::try_join!(calling, sending)?;
-        Ok(reply)
+        // Prefer a locally known source failure when both halves are ready,
+        // but keep host rejections prompt when the source is still pending.
+        resolve_put_stream(calling, sending).await
     }
 
     async fn get_blob_stream(
@@ -272,6 +261,55 @@ impl StorageTransport for BusTransport {
 
     fn signals(&self) -> broadcast::Receiver<WatchChanged> {
         self.signals.subscribe()
+    }
+}
+
+async fn resolve_put_stream<C, S>(calling: C, sending: S) -> Result<Value, WireError>
+where
+    C: Future<Output = Result<Value, WireError>>,
+    S: Future<Output = Result<(), PumpError>>,
+{
+    tokio::pin!(calling);
+    tokio::pin!(sending);
+    tokio::select! {
+        biased;
+        sent = &mut sending => match sent {
+            Err(PumpError::Bus(error)) => match poll_once(calling.as_mut()).await {
+                Some(Err(host_error)) => Err(host_error),
+                Some(Ok(_)) | None => Err(transport_error(&error)),
+            },
+            Err(error) => Err(pump_error(error)),
+            Ok(()) => calling.await,
+        },
+        reply = &mut calling => match reply {
+            Err(error) => Err(error),
+            Ok(reply) => match sending.await {
+                Ok(()) => Ok(reply),
+                Err(error) => Err(pump_error(error)),
+            },
+        },
+    }
+}
+
+async fn poll_once<F: Future>(mut future: std::pin::Pin<&mut F>) -> Option<F::Output> {
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match future.as_mut().poll(cx) {
+            std::task::Poll::Ready(output) => Some(output),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
+}
+
+fn pump_error(error: PumpError) -> WireError {
+    match error {
+        PumpError::Short => WireError::Storage(StorageFailure {
+            kind: StorageKind::InvalidInput,
+        }),
+        PumpError::Source => WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend,
+        }),
+        PumpError::Bus(error) => transport_error(&error),
     }
 }
 
