@@ -1,0 +1,21 @@
+[package]
+name = "storage-callback-proof"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+serde_json.workspace = true
+tempfile = "3"
+tinybus.workspace = true
+tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
+tinystoragedrivers-api.workspace = true
+tinystoragedrivers-busproxy = { path = "../../../crates/tinystoragedrivers-busproxy" }
+tinystoragedrivers-testkit = { path = "../../../crates/tinystoragedrivers-testkit" }
+tinystoragedrivers-connect = { path = "../../../crates/tinystoragedrivers-connect", features = ["mongodb"] }
+tinystoragedrivers-document = { path = "../../../crates/tinystoragedrivers-document", default-features = false, features = ["mongodb"] }
+tinystoragedrivers-types.workspace = true
+bytes = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }

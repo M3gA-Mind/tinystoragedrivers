@@ -304,3 +304,196 @@ async fn a_transport_without_a_host_cannot_be_built_and_debug_hides_the_wire() {
     let error = BusTransport::connect(lonely).await.unwrap_err();
     assert!(matches!(error, tinybus::Error::NameHasNoOwner(_)));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_connection_requires_a_unique_destination_and_never_looks_up_host_name() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+
+    let malformed = BusTransport::connect_at(client.clone(), host_name()).await;
+    assert!(
+        malformed.is_err(),
+        "well-known names are not callback destinations"
+    );
+
+    let callback = BusTransport::connect_at(client, host.unique_name().unwrap())
+        .await
+        .unwrap();
+    assert!(callback.callback);
+    assert_eq!(callback.host, host.unique_name().unwrap());
+    assert_ne!(callback.host, host_name());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_connection_surfaces_a_closed_signal_subscription() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let destination = host.unique_name().unwrap();
+    client.close().await.unwrap();
+
+    assert!(BusTransport::connect_at(client, destination).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_and_callback_connectors_keep_their_distinct_routes() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let served = crate::serve(&host, Arc::new(crate::PerCallerEndpoint::new(|_| None)))
+        .await
+        .unwrap();
+    let ordinary_client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let ordinary = BusTransport::connect(ordinary_client).await.unwrap();
+    assert!(!ordinary.callback);
+    assert_eq!(ordinary.host, host_name());
+    drop(ordinary);
+
+    served.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_storage_connectors_sanitize_missing_and_invalid_destinations() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+
+    let missing = crate::connect_storage(client.clone()).await.unwrap_err();
+    assert_eq!(
+        missing.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    let invalid = crate::connect_storage_at(client, host_name())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        invalid.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_storage_connector_does_not_admit_an_ordinary_bus_peer() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let host = tinybus::module::ModuleHost::new(broker);
+    let binding = crate::prepare_storage_host_callbacks(&host).await.unwrap();
+    let served = crate::serve_with_host_callbacks(
+        Arc::clone(&binding),
+        Arc::new(crate::PerCallerEndpoint::new(|_| None)),
+    )
+    .await
+    .unwrap();
+    let outsider = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+
+    let result = crate::connect_storage_at(outsider, binding.unique_name().clone()).await;
+
+    assert!(
+        result.is_err(),
+        "only the admitted module may use callbacks"
+    );
+    served.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_transport_relays_watch_signals_from_its_bound_endpoint() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let (source, source_rx) = tokio::sync::broadcast::channel(8);
+    let served = crate::serve(&host, Arc::new(SignalEndpoint { source_rx }))
+        .await
+        .unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let transport = BusTransport::connect(client).await.unwrap();
+    let mut signals = transport.signals();
+    transport
+        .call(Object::Documents, "WatchOpen", serde_json::json!({}))
+        .await
+        .unwrap();
+    source
+        .send(WatchChanged {
+            watch_id: "w1".into(),
+            notice: tinystoragedrivers_bus::WatchNotice::Invalidated { cursor: None },
+        })
+        .unwrap();
+
+    let notice = tokio::time::timeout(std::time::Duration::from_secs(2), signals.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        notice,
+        WatchChanged {
+            watch_id,
+            notice: tinystoragedrivers_bus::WatchNotice::Invalidated { .. }
+        } if watch_id == "w1"
+    ));
+    drop(transport);
+    served.shutdown().await.unwrap();
+}
+
+struct SignalEndpoint {
+    source_rx: tokio::sync::broadcast::Receiver<WatchChanged>,
+}
+
+#[async_trait::async_trait]
+impl crate::StorageEndpoint for SignalEndpoint {
+    async fn call(&self, call: crate::StorageCall<'_>) -> Result<Value, crate::HostFailure> {
+        if call.object == Object::Documents && call.selector == "WatchOpen" {
+            Ok(serde_json::json!({"watch_id":"w1"}))
+        } else {
+            Err(crate::HostFailure::Denied("unexpected-test-call"))
+        }
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: tinystoragedrivers_api::BlobReader,
+    ) -> Result<Value, crate::HostFailure> {
+        Err(crate::HostFailure::Denied("unexpected-test-stream"))
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_api::BlobReader)>, crate::HostFailure>
+    {
+        Err(crate::HostFailure::Denied("unexpected-test-stream"))
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        Some(self.source_rx.resubscribe())
+    }
+}

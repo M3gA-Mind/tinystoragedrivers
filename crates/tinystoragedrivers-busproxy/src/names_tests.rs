@@ -12,6 +12,21 @@ fn the_fixed_names_parse() {
 }
 
 #[test]
+fn callback_watch_uses_a_fixed_path_and_watch_subscribers_must_be_unique() {
+    assert_eq!(
+        callback_watch_path().as_str(),
+        "/ai/tinyhumans/tinystorage/Documents"
+    );
+    assert!(watch_path(&host_name()).is_err());
+    assert_eq!(
+        watch_path(&BusName::new(":1.42").unwrap())
+            .unwrap()
+            .as_str(),
+        "/ai/tinyhumans/tinystorage/Watch/_1_42"
+    );
+}
+
+#[test]
 #[should_panic(expected = "a name this crate fixes is valid")]
 fn a_name_that_is_not_fixed_is_a_bug_not_an_error() {
     let _ = member("not a member");

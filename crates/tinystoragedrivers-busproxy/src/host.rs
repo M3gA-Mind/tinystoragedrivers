@@ -1,18 +1,23 @@
-//! The host side: register the five `Storage` objects on a `TinyBus`
+//! The host side: register the six `Storage` objects on a `TinyBus`
 //! connection and hand every call to a [`StorageEndpoint`].
 //!
 //! The host decides everything. The endpoint is given the broker-authenticated
 //! sender and must derive the caller's scope, grant and audit from it; nothing
 //! in a request can name a scope (the wire types reject unknown fields).
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use crate::transport::{Admission, Object};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tinybus::module::{
+    HostCallbackBinding, HostCallbackEndpoint, HostCallbackSignal, HostStreamCallbackEndpoint,
+    ModuleHost,
+};
 use tinybus::{
     BusName, CallContext, Connection, Interface, InterfaceName, MemberName, StreamDescriptor,
-    StreamRef, WeakConnection,
+    StreamReader, StreamRef, StreamWriter, WeakConnection,
 };
 use tinystoragedrivers_bus::{
     BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
@@ -22,8 +27,8 @@ use tokio::task::JoinHandle;
 
 use crate::chunks::{blob_reader, pump};
 use crate::names::{
-    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, interface, member, object_path,
-    watch_path, wire_value,
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, callback_watch_path, interface, member,
+    object_path, watch_path, wire_value,
 };
 use tinystoragedrivers_api::BlobReader;
 
@@ -123,8 +128,19 @@ pub trait StorageEndpoint: Send + Sync + 'static {
     }
 }
 
+#[derive(Clone)]
+enum HostTransport {
+    Connection(WeakConnection),
+    Callback(Weak<HostCallbackBinding>),
+}
+
+enum ServedMode {
+    Connection(Connection),
+    Callback(Arc<HostCallbackBinding>),
+}
+
 struct Shared {
-    connection: WeakConnection,
+    transport: HostTransport,
     endpoint: Arc<dyn StorageEndpoint>,
     forwarders: Mutex<HashMap<BusName, (u64, JoinHandle<()>)>>,
 }
@@ -143,36 +159,54 @@ impl Shared {
         {
             return;
         }
-        let (Some(mut signals), Ok(path)) =
-            (self.endpoint.watch_signals(sender), watch_path(sender))
-        else {
+        let Some(mut signals) = self.endpoint.watch_signals(sender) else {
             return;
+        };
+        let (path, transport) = match &self.transport {
+            HostTransport::Connection(_) => {
+                let Ok(path) = watch_path(sender) else {
+                    return;
+                };
+                (path, self.transport.clone())
+            }
+            HostTransport::Callback(_) => (callback_watch_path(), self.transport.clone()),
         };
         // A forwarder for a binding that was released is replaced, not kept.
         if let Some((_, stale)) = forwarders.remove(sender) {
             stale.abort();
         }
         let (interface, member) = (interface(), member(WATCH_MEMBER));
-        let connection = self.connection.clone();
         let recipient = sender.clone();
         let task = tokio::spawn(async move {
             loop {
                 match signals.recv().await {
                     Ok(signal) => {
-                        let Some(connection) = connection.upgrade() else {
-                            return;
+                        let emitted = match &transport {
+                            HostTransport::Connection(connection) => {
+                                let Some(connection) = connection.upgrade() else {
+                                    return;
+                                };
+                                // Unicast: a peer that subscribed to this path (or the
+                                // whole interface) never sees another caller's signal.
+                                connection
+                                    .emit_to(
+                                        recipient.clone(),
+                                        path.clone(),
+                                        interface.clone(),
+                                        member.clone(),
+                                        (signal,),
+                                    )
+                                    .await
+                            }
+                            HostTransport::Callback(binding) => {
+                                let Some(binding) = binding.upgrade() else {
+                                    return;
+                                };
+                                binding
+                                    .emit_signal(&path, &interface, &member, (signal,))
+                                    .await
+                            }
                         };
-                        // Unicast: a peer that subscribed to this path (or the
-                        // whole interface) never sees another caller's signal.
-                        let emitted = connection
-                            .emit_to(
-                                recipient.clone(),
-                                path.clone(),
-                                interface.clone(),
-                                member.clone(),
-                                (signal,),
-                            )
-                            .await;
                         if emitted.is_err() {
                             return;
                         }
@@ -230,20 +264,72 @@ fn request_of(args: Value) -> Result<Value, HostFailure> {
 
 impl ObjectService {
     fn connection(&self) -> Result<Connection, HostFailure> {
-        self.shared
-            .connection
-            .upgrade()
-            .ok_or(HostFailure::Storage(StorageFailure {
+        match &self.shared.transport {
+            HostTransport::Connection(connection) => {
+                connection
+                    .upgrade()
+                    .ok_or(HostFailure::Storage(StorageFailure {
+                        kind: StorageKind::Unavailable,
+                    }))
+            }
+            HostTransport::Callback(_) => Err(HostFailure::Storage(StorageFailure {
                 kind: StorageKind::Unavailable,
-            }))
+            })),
+        }
+    }
+
+    fn accept_stream(
+        &self,
+        context: &CallContext,
+        stream: &StreamRef,
+    ) -> Result<StreamReader, HostFailure> {
+        match &self.shared.transport {
+            HostTransport::Connection(_) => {
+                let caller = context
+                    .authenticated_sender()
+                    .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
+                self.connection()?
+                    .accept_stream_from(stream, caller)
+                    .map_err(|_| invalid())
+            }
+            HostTransport::Callback(binding) => binding
+                .upgrade()
+                .ok_or(HostFailure::Storage(StorageFailure {
+                    kind: StorageKind::Unavailable,
+                }))?
+                .accept_stream_from_module(context, stream)
+                .map_err(|_| invalid()),
+        }
+    }
+
+    async fn open_stream(
+        &self,
+        context: &CallContext,
+        descriptor: StreamDescriptor,
+    ) -> Result<StreamWriter, HostFailure> {
+        match &self.shared.transport {
+            HostTransport::Connection(_) => {
+                let caller = context
+                    .authenticated_sender()
+                    .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
+                self.connection()?
+                    .open_stream(caller, descriptor)
+                    .await
+                    .map_err(|_| invalid())
+            }
+            HostTransport::Callback(binding) => binding
+                .upgrade()
+                .ok_or(HostFailure::Storage(StorageFailure {
+                    kind: StorageKind::Unavailable,
+                }))?
+                .open_stream_to_module(context, descriptor, Duration::from_secs(30))
+                .await
+                .map_err(|_| invalid()),
+        }
     }
 
     /// `PutStream`: `[PutBlobStreamRequest, StreamRef]`.
-    async fn put_stream(
-        &self,
-        args: Value,
-        sender: Option<&BusName>,
-    ) -> Result<Value, HostFailure> {
+    async fn put_stream(&self, args: Value, context: &CallContext) -> Result<Value, HostFailure> {
         let mut items = arguments(args)?;
         let (Some(stream), Some(head), None) = (items.pop(), items.pop(), items.pop()) else {
             return Err(invalid());
@@ -255,45 +341,37 @@ impl ObjectService {
         }
         // The body is read only from a stream the authenticated caller opened,
         // so a guessed stream id of another peer is refused.
-        let Some(caller) = sender else {
+        let Some(sender) = context.authenticated_sender() else {
             return Err(HostFailure::Denied("unauthenticated-caller"));
         };
-        let reader = self
-            .connection()?
-            .accept_stream_from(&stream, caller)
-            .map_err(|_| invalid())?;
+        let reader = self.accept_stream(context, &stream)?;
         self.shared
             .endpoint
-            .put_blob_stream(sender, head, blob_reader(reader))
+            .put_blob_stream(Some(sender), head, blob_reader(reader))
             .await
     }
 
     /// `GetStream`: `[BlobKeyRequest]`, replying `null` or `[head, StreamRef]`
     /// with the body streamed to the caller.
-    async fn get_stream(
-        &self,
-        args: Value,
-        sender: Option<&BusName>,
-    ) -> Result<Value, HostFailure> {
+    async fn get_stream(&self, args: Value, context: &CallContext) -> Result<Value, HostFailure> {
         let request: BlobKeyRequest =
             serde_json::from_value(request_of(args)?).map_err(|_| invalid())?;
         // The body is sent to the broker-authenticated caller, so without one
         // there is nowhere safe to send it.
-        let Some(caller) = sender else {
+        let Some(sender) = context.authenticated_sender() else {
             return Err(HostFailure::Denied("unauthenticated-caller"));
         };
         let found = self
             .shared
             .endpoint
-            .get_blob_stream(sender, request)
+            .get_blob_stream(Some(sender), request)
             .await?;
         let Some((head, mut body)) = found else {
             return Ok(Value::Null);
         };
         let len = head.meta.len;
         let writer = self
-            .connection()?
-            .open_stream(caller, StreamDescriptor::with_len(len))
+            .open_stream(context, StreamDescriptor::with_len(len))
             .await
             .map_err(|_| {
                 HostFailure::Storage(StorageFailure {
@@ -341,8 +419,8 @@ impl Interface for ObjectService {
         let sender = context.authenticated_sender();
         let selector = member.as_str();
         let outcome = match (self.object, selector) {
-            (Object::Blobs, "PutStream") => self.put_stream(args, sender).await,
-            (Object::Blobs, "GetStream") => self.get_stream(args, sender).await,
+            (Object::Blobs, "PutStream") => self.put_stream(args, context).await,
+            (Object::Blobs, "GetStream") => self.get_stream(args, context).await,
             _ => {
                 if let (Object::Documents, "WatchOpen", Some(sender)) =
                     (self.object, selector, sender)
@@ -375,11 +453,22 @@ impl Interface for ObjectService {
     }
 }
 
-/// The registered `Storage` objects. Dropping it leaves them registered; call
-/// [`ServedStorage::shutdown`] to withdraw them.
+/// The registered `Storage` objects. Call [`ServedStorage::shutdown`] to
+/// withdraw them. Ordinary serving leaves registrations on the caller-owned
+/// connection when this handle is dropped; callback serving owns a private
+/// binding whose final drop revokes its registrations.
 pub struct ServedStorage {
-    connection: Connection,
+    mode: ServedMode,
     shared: Arc<Shared>,
+}
+
+impl ServedMode {
+    fn transport(&self) -> HostTransport {
+        match self {
+            Self::Connection(connection) => HostTransport::Connection(connection.downgrade()),
+            Self::Callback(binding) => HostTransport::Callback(Arc::downgrade(binding)),
+        }
+    }
 }
 
 impl std::fmt::Debug for ServedStorage {
@@ -394,15 +483,20 @@ impl ServedStorage {
     /// # Errors
     /// The bus refuses to release the name.
     pub async fn shutdown(self) -> tinybus::Result<()> {
-        for object in ALL {
-            self.connection.unserve(&object_path(object)).await;
-        }
         if let Ok(mut forwarders) = self.shared.forwarders.lock() {
             for (_, (_, task)) in forwarders.drain() {
                 task.abort();
             }
         }
-        self.connection.release_name(HOST_NAME).await
+        match self.mode {
+            ServedMode::Connection(connection) => {
+                for object in ALL {
+                    connection.unserve(&object_path(object)).await;
+                }
+                connection.release_name(HOST_NAME).await
+            }
+            ServedMode::Callback(binding) => binding.close().await,
+        }
     }
 }
 
@@ -424,7 +518,7 @@ pub async fn serve(
     endpoint: Arc<dyn StorageEndpoint>,
 ) -> tinybus::Result<ServedStorage> {
     let shared = Arc::new(Shared {
-        connection: connection.downgrade(),
+        transport: HostTransport::Connection(connection.downgrade()),
         endpoint,
         forwarders: Mutex::new(HashMap::new()),
     });
@@ -447,9 +541,95 @@ pub async fn serve(
         return Err(error);
     }
     Ok(ServedStorage {
-        connection: connection.clone(),
+        mode: ServedMode::Connection(connection.clone()),
         shared,
     })
+}
+
+/// Prepare the exact confidential RPC, ordinary blob-stream, and watch-signal
+/// declarations used by a host-callback storage server.
+///
+/// Pass the returned binding to [`serve_with_host_callbacks`], then provide
+/// its unique name to the loaded module and connect it with
+/// [`crate::connect_storage_at`]. Port RPC bodies, including Secrets, use the
+/// confidential callback route. Blob stream payloads use the separately
+/// declared ordinary stream endpoint.
+///
+/// # Errors
+/// Returns the SDK error if the host refuses to reserve the callback
+/// interface or its endpoint declarations conflict.
+pub async fn prepare_storage_host_callbacks(
+    host: &ModuleHost,
+) -> tinybus::Result<Arc<HostCallbackBinding>> {
+    let endpoints = ALL
+        .into_iter()
+        .map(|object| HostCallbackEndpoint {
+            path: object_path(object),
+            interface: interface(),
+            members: selectors(object)
+                .iter()
+                .copied()
+                .filter(|selector| {
+                    object != Object::Blobs || !matches!(*selector, "PutStream" | "GetStream")
+                })
+                .map(member)
+                .collect(),
+        })
+        .collect();
+    let signals = vec![HostCallbackSignal {
+        path: callback_watch_path(),
+        interface: interface(),
+        members: vec![member(WATCH_MEMBER)],
+    }];
+    let stream_endpoints = vec![HostStreamCallbackEndpoint {
+        path: object_path(Object::Blobs),
+        interface: interface(),
+        members: vec![member("PutStream"), member("GetStream")],
+    }];
+    host.prepare_host_callbacks_with_signals_and_stream_endpoints(
+        endpoints,
+        signals,
+        stream_endpoints,
+    )
+    .await
+    .map(Arc::new)
+}
+
+/// Serve the six storage objects on an exact module-bound callback binding.
+///
+/// The binding must come from [`prepare_storage_host_callbacks`]. Ordinary
+/// [`serve`] remains available for the well-known host service. Callback mode
+/// has no name-based fallback and closes the private callback connection on
+/// shutdown.
+///
+/// # Errors
+/// Returns the SDK error if any of the six storage objects cannot be served.
+pub async fn serve_with_host_callbacks(
+    binding: Arc<HostCallbackBinding>,
+    endpoint: Arc<dyn StorageEndpoint>,
+) -> tinybus::Result<ServedStorage> {
+    let mode = ServedMode::Callback(binding.clone());
+    let shared = Arc::new(Shared {
+        transport: mode.transport(),
+        endpoint,
+        forwarders: Mutex::new(HashMap::new()),
+    });
+    for object in ALL {
+        if let Err(error) = binding
+            .serve_at(
+                object_path(object),
+                ObjectService {
+                    object,
+                    shared: Arc::clone(&shared),
+                },
+            )
+            .await
+        {
+            binding.revoke();
+            return Err(error);
+        }
+    }
+    Ok(ServedStorage { mode, shared })
 }
 
 #[cfg(test)]

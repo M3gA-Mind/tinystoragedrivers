@@ -17,8 +17,8 @@ use tokio::task::JoinHandle;
 
 use crate::chunks::{PumpError, blob_reader, pump};
 use crate::names::{
-    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, host_name, interface, member,
-    object_path, watch_path, wire_value,
+    ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, callback_watch_path, host_name,
+    interface, member, object_path, watch_path, wire_value,
 };
 
 /// Signals buffered for a slow watcher before the oldest are dropped.
@@ -44,6 +44,7 @@ pub struct BusTransport {
     /// The unique name of the peer that owns [`HOST_NAME`]; streams are
     /// accepted only from it.
     owner: BusName,
+    callback: bool,
     timeout: Duration,
     signals: broadcast::Sender<WatchChanged>,
     forwarder: JoinHandle<()>,
@@ -74,6 +75,34 @@ impl BusTransport {
             .name_owner(HOST_NAME)
             .await?
             .ok_or_else(|| tinybus::Error::NameHasNoOwner(host_name()))?;
+        Self::connect_to(connection, host_name(), owner, false).await
+    }
+
+    /// Attach to the exact unique host-callback destination supplied by the
+    /// loader. There is no well-known-name fallback in this mode.
+    ///
+    /// Port RPCs use the confidential callback route; blob stream payloads
+    /// remain ordinary `TinyBus` streams. Watch signals use a fixed path because
+    /// the unicast destination is already this exact callback-bound module.
+    ///
+    /// # Errors
+    /// `destination` is not a unique name, the connection has no unique name,
+    /// or the broker refuses the signal subscription.
+    pub async fn connect_at(connection: Connection, destination: BusName) -> tinybus::Result<Self> {
+        if !destination.is_unique() {
+            return Err(tinybus::Error::failed(
+                "storage callback destination must be a unique bus name",
+            ));
+        }
+        Self::connect_to(connection, destination.clone(), destination, true).await
+    }
+
+    async fn connect_to(
+        connection: Connection,
+        host: BusName,
+        owner: BusName,
+        callback: bool,
+    ) -> tinybus::Result<Self> {
         let me = connection
             .unique_name()
             .ok_or_else(|| tinybus::Error::failed("the connection has no unique name"))?;
@@ -82,7 +111,11 @@ impl BusTransport {
             .sender(owner.clone())
             .interface(interface())
             .member(member(WATCH_MEMBER));
-        rule.path = Some(watch_path(&me)?);
+        rule.path = Some(if callback {
+            callback_watch_path()
+        } else {
+            watch_path(&me)?
+        });
         // Subscribe before returning so no watch signal can be missed.
         let mut received = connection.add_match(rule).await?;
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
@@ -103,8 +136,9 @@ impl BusTransport {
         });
         Ok(Self {
             connection,
-            host: host_name(),
+            host,
             owner,
+            callback,
             timeout: CALL_TIMEOUT,
             signals,
             forwarder,
@@ -121,7 +155,7 @@ impl BusTransport {
     fn proxy(&self, object: Object) -> Result<tinybus::Proxy, WireError> {
         tinybus::Proxy::new(
             self.connection.clone(),
-            host_name(),
+            self.host.clone(),
             object_path(object),
             interface(),
         )
@@ -129,9 +163,9 @@ impl BusTransport {
         .map_err(|error| transport_error(&error))
     }
 
-    fn streamed_call(selector: &str, body: Value) -> Message {
+    fn streamed_call(&self, selector: &str, body: Value) -> Message {
         Message::method_call(
-            host_name(),
+            self.host.clone(),
             object_path(Object::Blobs),
             interface(),
             member(selector),
@@ -199,7 +233,7 @@ impl StorageTransport for BusTransport {
         request: Value,
     ) -> Result<Value, WireError> {
         let proxy = self.proxy(object)?;
-        let reply = if object == Object::Secrets {
+        let reply = if self.callback || object == Object::Secrets {
             proxy.call_confidential::<Value>(selector, (request,)).await
         } else {
             proxy.call::<Value>(selector, (request,)).await
@@ -219,10 +253,10 @@ impl StorageTransport for BusTransport {
         }
         let writer = self
             .connection
-            .open_stream_with_timeout(&host_name(), descriptor, self.timeout)
+            .open_stream_with_timeout(&self.host, descriptor, self.timeout)
             .await
             .map_err(|error| transport_error(&error))?;
-        let message = Self::streamed_call(
+        let message = self.streamed_call(
             "PutStream",
             json!([wire_value(&head), wire_value(&writer.stream_ref())]),
         );
@@ -244,6 +278,8 @@ impl StorageTransport for BusTransport {
         &self,
         request: BlobKeyRequest,
     ) -> Result<Option<(BlobStreamHead, BlobReader)>, WireError> {
+        // Stream endpoints are explicitly ordinary even when the RPC methods
+        // on this callback binding use confidential delivery.
         let reply = self
             .proxy(Object::Blobs)?
             .call::<Value>("GetStream", (wire_value(&request),))
@@ -325,6 +361,24 @@ pub async fn connect_storage(
     connection: Connection,
 ) -> tinystoragedrivers_types::Result<tinystoragedrivers_api::Storage> {
     let transport = BusTransport::connect(connection)
+        .await
+        .map_err(|error| tinystoragedrivers_types::StorageError::unavailable(error.to_string()))?;
+    crate::client::BusStorage::connect(Arc::new(transport)).await
+}
+
+/// Build the six client ports addressed to a unique host-callback destination.
+///
+/// Unlike [`connect_storage`], this never looks up the global well-known host
+/// name or falls back to it. A module should pass the unique name supplied by
+/// its loader for the matching `HostCallbackBinding`.
+///
+/// # Errors
+/// The destination is not unique or `TinyBus` refuses the watch subscription.
+pub async fn connect_storage_at(
+    connection: Connection,
+    destination: BusName,
+) -> tinystoragedrivers_types::Result<tinystoragedrivers_api::Storage> {
+    let transport = BusTransport::connect_at(connection, destination)
         .await
         .map_err(|error| tinystoragedrivers_types::StorageError::unavailable(error.to_string()))?;
     crate::client::BusStorage::connect(Arc::new(transport)).await
