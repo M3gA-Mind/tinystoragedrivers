@@ -1,7 +1,7 @@
 //! URL parsing, redaction and driver selection.
 
 use super::*;
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::ErrorKind;
 
 #[test]
 fn parses_every_form() {
@@ -103,8 +103,8 @@ fn names_its_driver_and_renders() {
 
 #[tokio::test]
 async fn opens_memory_and_names_missing_features() {
-    let backend = open(&StorageConfig::Memory).await.unwrap();
-    assert_eq!(backend.driver(), "memory");
+    assert!(open(&StorageConfig::Memory).await.is_ok());
+    assert_eq!(StorageConfig::Memory.driver(), "memory");
     let mut missing = Vec::new();
     if cfg!(not(feature = "sqlite")) {
         missing.push("sqlite:/tmp/x");
@@ -133,8 +133,8 @@ async fn opens_memory_and_names_missing_features() {
 async fn opens_a_file_url_with_the_file_feature() {
     let dir = tempfile::tempdir().unwrap();
     let config = StorageConfig::parse(&format!("file:{}", dir.path().display())).unwrap();
-    let backend = open(&config).await.unwrap();
-    assert_eq!(backend.driver(), "file");
+    open(&config).await.unwrap();
+    assert_eq!(config.driver(), "file");
 
     let file = dir.path().join("not-a-dir");
     std::fs::write(&file, b"x").unwrap();
@@ -217,15 +217,87 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
 async fn opens_sqlite_directories_and_files() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}", dir.path().display());
-    let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
-    assert_eq!(backend.driver(), "sqlite");
+    open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
+    assert_eq!(StorageConfig::parse(&url).unwrap().driver(), "sqlite");
     assert!(dir.path().join("storage.db").exists());
     let file = dir.path().join("single.db");
-    let backend = open(&StorageConfig::Sqlite { path: file.clone() })
+    open(&StorageConfig::Sqlite { path: file.clone() })
         .await
         .unwrap();
-    assert_eq!(backend.driver(), "sqlite");
+    assert_eq!(
+        StorageConfig::Sqlite { path: file.clone() }.driver(),
+        "sqlite"
+    );
     assert!(file.exists());
+}
+
+#[tokio::test]
+async fn memory_reopening_a_scope_preserves_values_without_cross_scope_reads() {
+    use serde_json::json;
+    use tinystoragedrivers_types::{Precondition, Scope};
+
+    let backend = open(&StorageConfig::Memory).await.unwrap();
+    let local = Scope::new("local").unwrap();
+    let other = Scope::new("other").unwrap();
+    let first = backend.for_scope(&local).unwrap();
+    first.kv().put("answer", json!(42)).await.unwrap();
+    first
+        .documents()
+        .put(
+            "notes",
+            "one",
+            json!({"body": "private"}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    first
+        .blobs()
+        .put("image", b"local".to_vec(), None)
+        .await
+        .unwrap();
+    first.secrets().set("token", b"private").await.unwrap();
+
+    let reopened = backend.for_scope(&local).unwrap();
+    assert_eq!(
+        reopened.kv().get("answer").await.unwrap().unwrap().doc,
+        json!(42)
+    );
+    assert!(
+        reopened
+            .documents()
+            .get("notes", "one")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        reopened.blobs().get("image").await.unwrap().unwrap().bytes,
+        b"local"
+    );
+    assert_eq!(
+        reopened
+            .secrets()
+            .get("token")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"private"
+    );
+
+    let isolated = backend.for_scope(&other).unwrap();
+    assert!(isolated.kv().get("answer").await.unwrap().is_none());
+    assert!(
+        isolated
+            .documents()
+            .get("notes", "one")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(isolated.blobs().get("image").await.unwrap().is_none());
+    assert!(isolated.secrets().get("token").await.unwrap().is_none());
 }
 
 #[test]

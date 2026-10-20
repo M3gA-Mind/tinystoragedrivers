@@ -1,7 +1,5 @@
 use super::*;
 
-use tinystoragedrivers_core::{Scope as LegacyScope, StorageBackend};
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CLOCK: AtomicU64 = AtomicU64::new(500);
@@ -111,30 +109,6 @@ fn file_blob_reads_v1_sidecar_without_age_and_pages_expired_records() {
             .any(|meta| meta.key == "p/expired")
     );
     assert_eq!(run(store.sweep_expired()).unwrap(), 1);
-}
-
-#[tokio::test]
-async fn file_blob_reads_bytes_written_by_the_v1_driver() {
-    let dir = tempfile::tempdir().unwrap();
-    let legacy = tinystoragedrivers_file::FileStorage::open(dir.path()).unwrap();
-    let legacy_scope = LegacyScope::new("local").unwrap();
-    legacy
-        .for_scope(&legacy_scope)
-        .unwrap()
-        .blobs()
-        .put("legacy/file", b"v1 file bytes".to_vec(), Some("text/plain"))
-        .await
-        .unwrap();
-
-    let store = FileBlobStore::open(dir.path(), Scope::new("local").unwrap()).unwrap();
-    let blob = store.get("legacy/file").await.unwrap().unwrap();
-    assert_eq!(blob.bytes, b"v1 file bytes");
-    assert_eq!(blob.meta.len, 13);
-    assert_eq!(blob.meta.content_type.as_deref(), Some("text/plain"));
-    assert_eq!(
-        store.list_page("legacy/", None, 10).await.unwrap().items[0].written_at_ms,
-        None
-    );
 }
 
 #[test]

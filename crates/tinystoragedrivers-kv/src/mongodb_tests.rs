@@ -83,11 +83,16 @@ fn persisted_record_validation_and_mongo_error_mapping_are_typed() {
 
 #[tokio::test]
 async fn unreachable_mongodb_errors_are_returned_from_each_public_operation() {
-    let client = mongodb::Client::with_uri_str(
-        "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=25&connectTimeoutMS=25",
-    )
-    .await
-    .unwrap();
+    let uri = "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=25&connectTimeoutMS=25";
+    assert_eq!(
+        MongoConnection::connect(uri, "tsd_kv_unreachable_test")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unavailable
+    );
+
+    let client = mongodb::Client::with_uri_str(uri).await.unwrap();
     let store = MongoKv {
         collection: client
             .database("tsd_kv_unreachable_test")
@@ -139,9 +144,11 @@ async fn live_native_kv_contract() {
         .unwrap();
     let scope_name = format!("kv-test-{}-{suffix}", std::process::id());
     let scope = Scope::new(&scope_name).unwrap();
-    let store = MongoKv::new(connection.clone(), scope.clone())
-        .await
-        .unwrap();
+    let factory = MongoKvFactory::new(connection.clone()).await.unwrap();
+    let store = factory.for_scope(&scope);
+    let reopened_scope = factory.for_scope(&scope);
+    let other_scope = Scope::new(&format!("{scope_name}-other")).unwrap();
+    let other_store = factory.for_scope(&other_scope);
     assert!(store.capabilities().contains(Capability::Kv));
     assert!(store.capabilities().contains(Capability::Ttl));
     assert!(
@@ -164,6 +171,20 @@ async fn live_native_kv_contract() {
 
     let version = store.put("p/b", json!([1, null])).await.unwrap();
     assert_eq!(version, Version::FIRST);
+    assert_eq!(
+        store.get("p/b").await.unwrap().unwrap().doc,
+        json!([1, null])
+    );
+    assert_eq!(
+        reopened_scope.get("p/b").await.unwrap().unwrap().doc,
+        json!([1, null])
+    );
+    assert!(other_store.get("p/b").await.unwrap().is_none());
+    other_store.put("p/b", json!("other scope")).await.unwrap();
+    assert_eq!(
+        other_store.get("p/b").await.unwrap().unwrap().doc,
+        json!("other scope")
+    );
     assert_eq!(
         store.get("p/b").await.unwrap().unwrap().doc,
         json!([1, null])

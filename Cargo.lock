@@ -3713,14 +3713,15 @@ version = "1.0.0"
 dependencies = [
  "serde_json",
  "tempfile",
- "tinystoragedrivers-core",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
+ "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
- "tinystoragedrivers-file",
- "tinystoragedrivers-mongodb",
- "tinystoragedrivers-rabbitmq",
- "tinystoragedrivers-s3",
+ "tinystoragedrivers-kv",
+ "tinystoragedrivers-queue",
  "tinystoragedrivers-secrets",
- "tinystoragedrivers-sqlite",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
@@ -3754,9 +3755,6 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
- "tinystoragedrivers-core",
- "tinystoragedrivers-file",
- "tinystoragedrivers-mongodb",
  "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
@@ -3806,23 +3804,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinystoragedrivers-core"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "data-encoding",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tinystoragedrivers-api",
- "tinystoragedrivers-schema",
- "tinystoragedrivers-types",
- "tokio",
- "ulid",
- "zstd",
-]
-
-[[package]]
 name = "tinystoragedrivers-document"
 version = "1.0.0"
 dependencies = [
@@ -3846,19 +3827,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinystoragedrivers-file"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tinystoragedrivers-core",
- "tokio",
-]
-
-[[package]]
 name = "tinystoragedrivers-kv"
 version = "1.0.0"
 dependencies = [
@@ -3873,20 +3841,6 @@ dependencies = [
  "tinystoragedrivers-connect",
  "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
- "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-mongodb"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "mongodb",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tinystoragedrivers-core",
  "tokio",
 ]
 
@@ -3908,42 +3862,6 @@ dependencies = [
  "tinystoragedrivers-types",
  "tokio",
  "ulid",
-]
-
-[[package]]
-name = "tinystoragedrivers-rabbitmq"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "lapin",
- "serde",
- "serde_json",
- "tinystoragedrivers-core",
- "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-s3"
-version = "1.0.0"
-dependencies = [
- "bytes",
- "futures-util",
- "http",
- "object_store",
- "reqwest 0.12.28",
- "tinystoragedrivers-core",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "tinystoragedrivers-schema"
-version = "1.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -3977,20 +3895,6 @@ dependencies = [
  "windows-permissions",
  "winsafe",
  "zeroize",
-]
-
-[[package]]
-name = "tinystoragedrivers-sqlite"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "rusqlite",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tinystoragedrivers-core",
- "tokio",
- "zstd",
 ]
 
 [[package]]

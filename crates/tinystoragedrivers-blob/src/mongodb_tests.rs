@@ -7,7 +7,6 @@ use std::sync::{
 
 use futures_util::stream;
 use mongodb::bson::oid::ObjectId;
-use tinystoragedrivers_core::{Scope as LegacyScope, StorageBackend};
 use tinystoragedrivers_types::ErrorKind;
 
 #[tokio::test]
@@ -251,35 +250,4 @@ async fn assert_failed_mongo_uploads_keep_previous_blob(
         chunks.count_documents(doc! {}).await.unwrap(),
         chunks_before
     );
-}
-
-#[tokio::test]
-async fn mongodb_reads_blob_written_by_the_v1_driver() {
-    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
-        eprintln!(
-            "mongodb_reads_blob_written_by_the_v1_driver: TSD_MONGO_URL is not set; skipping"
-        );
-        return;
-    };
-    let database = format!("tsd_blob_v1_{}_{}", std::process::id(), ObjectId::new());
-    let legacy = tinystoragedrivers_mongodb::MongoStorage::connect(&url, &database)
-        .await
-        .unwrap();
-    let legacy_scope = legacy.for_scope(&LegacyScope::local()).unwrap();
-    legacy_scope
-        .blobs()
-        .put("legacy/key", b"written-by-v1".to_vec(), Some("text/plain"))
-        .await
-        .unwrap();
-
-    let connection = MongoConnection::connect(&url, &database).await.unwrap();
-    let store = MongoBlobStore::new(connection.clone(), Scope::new("local").unwrap());
-    let blob = store.get("legacy/key").await.unwrap().unwrap();
-    assert_eq!(blob.bytes, b"written-by-v1");
-    assert_eq!(blob.meta.content_type.as_deref(), Some("text/plain"));
-    assert_eq!(blob.meta.len, 13);
-    let page = store.list_page("legacy/", None, 10).await.unwrap();
-    assert_eq!(page.items[0].meta.key, "legacy/key");
-    assert!(page.items[0].written_at_ms.is_some());
-    connection.database().drop().await.unwrap();
 }

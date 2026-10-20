@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   # The facade crate consumers depend on. Every member inherits the same
@@ -28,8 +28,10 @@ env:
 jobs:
   prepare:
     name: Prepare release
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       # The MongoDB driver's `live_*` tests run against this server, and the
       # coverage gate counts them, exactly as in CI.
@@ -42,6 +44,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,6 +64,14 @@ jobs:
 
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
+
+      - name: Check memory-only and each facade feature
+        run: scripts/test-features.sh
+
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check all
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -166,9 +177,11 @@ jobs:
       - name: Commit version bump and tag
         if: ${{ inputs.bump != 'current' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
+          gh auth setup-git --hostname github.com
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Release ${RELEASE_TAG}"
@@ -179,7 +192,10 @@ jobs:
   github-release:
     name: Create GitHub release
     needs: prepare
+    if: ${{ (github.repository == 'tinyhumansai/tinystoragedrivers' && github.ref == 'refs/heads/main') || (github.repository == 'senamakel/tinystoragedrivers' && github.ref == 'refs/heads/epic/8131-storage-primitives') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       # A library release is the tag: consumers pin the git revision (directly
       # or through a submodule gitlink), so there are no binary assets.

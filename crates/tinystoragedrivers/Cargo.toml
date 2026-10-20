@@ -12,67 +12,32 @@ categories = ["database"]
 publish = false
 
 [dependencies]
-# Optional object-store client; absent from desktop builds by default.
-tinystoragedrivers-s3 = { workspace = true, optional = true }
-# The ports, the memory driver and the shared types. Re-exported wholesale so a
-# consumer takes one dependency.
-tinystoragedrivers-core = { workspace = true }
-# The plain-file driver, compiled in only with the `file` feature.
-tinystoragedrivers-file = { workspace = true, optional = true }
-tinystoragedrivers-sqlite = { workspace = true, optional = true }
-# The `SecretStore` port and its drivers, re-exported as `secrets`.
-tinystoragedrivers-secrets = { workspace = true, optional = true }
-# The MongoDB driver, compiled in only with the `mongodb` feature so a desktop
-# build never links a MongoDB client.
-tinystoragedrivers-mongodb = { workspace = true, optional = true }
-# The RabbitMQ queue backend, compiled in only with the `rabbitmq` feature.
-tinystoragedrivers-rabbitmq = { workspace = true, optional = true }
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
+tinystoragedrivers-connect = { workspace = true, optional = true }
+tinystoragedrivers-document = { workspace = true, default-features = false, features = ["memory"] }
+tinystoragedrivers-kv = { workspace = true, default-features = false, features = ["memory"] }
+tinystoragedrivers-blob = { workspace = true, default-features = false, features = ["memory"] }
+tinystoragedrivers-queue = { workspace = true, default-features = false, features = ["memory", "document"] }
+tinystoragedrivers-secrets = { workspace = true, default-features = false, features = ["memory"] }
 
 [dev-dependencies]
-# The integration test runs the conformance suite through the facade.
-tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
-# A throwaway directory for the `file:` URL test.
 tempfile = { workspace = true }
-# Real v2 memory document and stream handles for the public secrets facade test.
+tinystoragedrivers-testkit = { workspace = true }
 tinystoragedrivers-document = { workspace = true, features = ["memory"] }
 
 [features]
-# Cloud envelope-encryption key providers; remain optional.
-kms-aws = ["secrets", "tinystoragedrivers-secrets/kms-aws"]
-kms-gcp = ["secrets", "tinystoragedrivers-secrets/kms-gcp"]
-# Independent s3:// blob URLs and composite storage.
-s3 = ["dep:tinystoragedrivers-s3"]
 default = []
-# Re-export the optional confidential migration delivery runtime.
-migration-delivery = ["tinystoragedrivers-core/migration-delivery"]
-# Explicit core polling adapter; independent of native Watch support.
-polling-watch = ["tinystoragedrivers-core/polling-watch"]
-# `sqlite:` URLs and bare paths: the SQLite driver.
-sqlite = ["dep:tinystoragedrivers-sqlite"]
-# Re-export the core's synchronous bridge.
-blocking = ["tinystoragedrivers-core/blocking"]
-# Re-export the core's conformance suite for downstream repository tests.
-testkit = ["tinystoragedrivers-core/testkit", "tinystoragedrivers-secrets?/testkit"]
-# `file:<dir>`: JSON documents, JSONL streams and raw blobs under a directory.
-file = ["dep:tinystoragedrivers-file", "secrets", "tinystoragedrivers-secrets/file"]
-# Re-export `tinystoragedrivers-secrets` as `tinystoragedrivers::secrets`:
-# encrypted secrets in memory, a `secrets.enc` file, or any `DocumentStore`.
-secrets = ["dep:tinystoragedrivers-secrets"]
-# Secret engine selection is independent of which storage URL backend is configured.
-memory = ["secrets", "tinystoragedrivers-secrets/memory"]
-document = ["secrets", "tinystoragedrivers-secrets/document"]
-# `secrets::KeyringSecrets`, over the native OS credential stores.
-keyring = ["secrets", "tinystoragedrivers-secrets/keyring"]
-# Opt-in explicit Linux Secret Service provider.
-keyring-secret-service = ["keyring", "tinystoragedrivers-secrets/keyring-secret-service"]
-# `mongodb://…/<db>` and `mongodb+srv://…/<db>` URLs: the multi-tenant MongoDB
-# driver.
-mongodb = ["dep:tinystoragedrivers-mongodb"]
-# `amqp://` and `amqps://` queue URLs (`QueueConfig`, `open_queues`): the
-# RabbitMQ queue backend, separate from the storage URL.
-rabbitmq = ["dep:tinystoragedrivers-rabbitmq"]
+file = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file", "tinystoragedrivers-document/file", "tinystoragedrivers-kv/file", "tinystoragedrivers-blob/fs"]
+sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "tinystoragedrivers-document/sqlite", "tinystoragedrivers-kv/sqlite", "tinystoragedrivers-blob/sqlite"]
+mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "tinystoragedrivers-document/mongodb", "tinystoragedrivers-kv/mongodb", "tinystoragedrivers-blob/mongodb"]
+s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "tinystoragedrivers-blob/s3"]
+rabbitmq = ["tinystoragedrivers-queue/rabbitmq"]
+keyring = ["tinystoragedrivers-secrets/keyring"]
+kms-aws = ["tinystoragedrivers-secrets/kms-aws"]
+kms-gcp = ["tinystoragedrivers-secrets/kms-gcp"]
 
 [lints]
 workspace = true

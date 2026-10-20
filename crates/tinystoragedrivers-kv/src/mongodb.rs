@@ -1,6 +1,6 @@
 //! MongoDB KV adapter using one native collection and single-document CAS.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
@@ -60,20 +60,28 @@ pub struct MongoKv {
     clock: tinystoragedrivers_connect::Clock,
 }
 
-impl std::fmt::Debug for MongoKv {
+/// Factory for creating MongoDB KV handles bound to individual scopes.
+///
+/// The KV collection has a database-wide unique index on `(scope, key)`, so
+/// the index is prepared once before scoped handles are created.
+#[derive(Clone)]
+pub struct MongoKvFactory {
+    collection: Collection<Record>,
+    clock: tinystoragedrivers_connect::Clock,
+}
+
+impl std::fmt::Debug for MongoKvFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MongoKv")
-            .field("scope", &self.scope)
-            .finish_non_exhaustive()
+        f.debug_struct("MongoKvFactory").finish_non_exhaustive()
     }
 }
 
-impl MongoKv {
-    /// Create and index the native KV collection on the shared database.
+impl MongoKvFactory {
+    /// Prepare the native KV collection and its cross-scope unique index.
     ///
     /// # Errors
     /// Returns an error if MongoDB cannot create the KV index.
-    pub async fn new(connection: MongoConnection, scope: Scope) -> Result<Self> {
+    pub async fn new(connection: MongoConnection) -> Result<Self> {
         let collection = connection.database().collection::<Record>(COLLECTION);
         collection
             .create_index(
@@ -91,9 +99,36 @@ impl MongoKv {
             .map_err(|error| mongo_error("create the KV index", error))?;
         Ok(Self {
             collection,
-            scope: scope.as_str().to_owned(),
             clock: connection.clock(),
         })
+    }
+
+    /// Bind the prepared collection to a scope without further I/O.
+    #[must_use]
+    pub fn for_scope(&self, scope: &Scope) -> MongoKv {
+        MongoKv {
+            collection: self.collection.clone(),
+            scope: scope.as_str().to_owned(),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+}
+
+impl std::fmt::Debug for MongoKv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MongoKv")
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MongoKv {
+    /// Create and index the native KV collection on the shared database.
+    ///
+    /// # Errors
+    /// Returns an error if MongoDB cannot create the KV index.
+    pub async fn new(connection: MongoConnection, scope: Scope) -> Result<Self> {
+        Ok(MongoKvFactory::new(connection).await?.for_scope(&scope))
     }
 
     fn now_ms(&self) -> i64 {
