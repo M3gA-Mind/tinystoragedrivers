@@ -130,6 +130,32 @@ fn s3_page_validates_bounds_and_presigning_requires_a_signer() {
             .kind(),
         ErrorKind::Unsupported(Capability::PresignedUrls)
     );
+    assert_eq!(
+        run(store.presign_put("item", Duration::from_secs(7 * 24 * 60 * 60 + 1)))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput,
+        "presigned lifetimes above seven days are rejected"
+    );
+}
+
+#[test]
+fn s3_open_rejects_invalid_urls_and_new_handles_empty_connection_prefix() {
+    assert_eq!(
+        S3BlobStore::open("https://bucket.invalid", &Scope::new("local").unwrap())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+
+    let connection = S3Connection::with_store(Arc::new(InMemory::new()), None, "test", "");
+    let store = S3BlobStore::new(&connection, &Scope::new("local").unwrap()).unwrap();
+    assert!(store.max_key_len() > 0);
+    run(store.put("empty-prefix", b"ok".to_vec(), None)).unwrap();
+    assert_eq!(
+        run(store.get("empty-prefix")).unwrap().unwrap().bytes,
+        b"ok"
+    );
 }
 
 #[test]
