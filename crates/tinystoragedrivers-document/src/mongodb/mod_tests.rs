@@ -286,19 +286,13 @@ async fn mongo_search_refuses_undeclared_fields_and_empty_queries_early() {
         .ensure_collection(&CollectionSpec::new("searchable").searchable(["text"]))
         .await
         .unwrap();
-    assert!(
-        documents
-            .search("searchable", "", 10)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        documents.search("searchable", "", 10).await.unwrap(),
+        Vec::new()
     );
-    assert!(
-        documents
-            .search("searchable", "term", 0)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        documents.search("searchable", "term", 0).await.unwrap(),
+        Vec::new()
     );
     connection.database().drop().await.unwrap();
 }
@@ -333,14 +327,10 @@ async fn mongo_stream_seal_uses_the_real_scope_bound_blob_engine() {
         blobs.get(&key).await.unwrap_err().kind(),
         tinystoragedrivers_types::ErrorKind::InvalidInput
     );
-    assert!(blobs.list("").await.unwrap().is_empty());
-    assert!(
-        blobs
-            .list_page("", None, 10)
-            .await
-            .unwrap()
-            .items
-            .is_empty()
+    assert_eq!(blobs.list("").await.unwrap(), Vec::new());
+    assert_eq!(
+        blobs.list_page("", None, 10).await.unwrap().items,
+        Vec::new()
     );
     let other_scope = tinystoragedrivers_blob::MongoBlobStore::new(
         connection.clone(),
@@ -394,12 +384,9 @@ async fn truncating_entire_mongo_stream_preserves_its_next_append_offset() {
 
     assert_eq!(streams.truncate_before("events", 20).await.unwrap(), 2);
     assert_eq!(streams.len("events").await.unwrap(), 2);
-    assert!(
-        streams
-            .read_window("events", 0, 10)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        Vec::new()
     );
     assert_eq!(
         streams

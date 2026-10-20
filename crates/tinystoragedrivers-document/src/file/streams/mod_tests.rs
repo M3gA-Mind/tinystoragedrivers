@@ -164,7 +164,7 @@ async fn stream_files_retain_length_after_full_truncation_and_reopen() {
     let (data, _) = files(&connection, &scope, "s");
     std::fs::remove_file(data).unwrap();
     assert_eq!(streams.len("s").await.unwrap(), 2);
-    assert!(streams.read_window("s", 0, 5).await.unwrap().is_empty());
+    assert_eq!(streams.read_window("s", 0, 5).await.unwrap(), Vec::new());
     assert_eq!(streams.append_batch("s", vec![]).await.unwrap(), 2);
 
     let reopened = FileStreams::new(connection, scope);
