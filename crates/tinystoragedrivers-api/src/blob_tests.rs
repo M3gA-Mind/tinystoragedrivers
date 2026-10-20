@@ -421,3 +421,23 @@ fn run_ready<F: Future>(future: F) -> F::Output {
         Poll::Pending => panic!("test future unexpectedly pended"),
     }
 }
+
+#[test]
+fn default_page_listing_validates_size_then_reports_precise_capability() {
+    let store = MemoryBlobs::default();
+    let error = run_ready(store.list_page("", None, 1)).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::BlobListing)
+    );
+    assert_eq!(
+        run_ready(store.list_page("", None, 0)).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        run_ready(store.list_page("", None, MAX_BLOB_LIST_PAGE_ITEMS + 1))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+}
