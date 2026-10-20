@@ -77,6 +77,7 @@ enum Access {
 
 impl SqliteDocuments {
     /// Bind a document adapter to a shared SQLite connection and opaque scope.
+    #[must_use]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Self {
         Self { connection, scope }
     }

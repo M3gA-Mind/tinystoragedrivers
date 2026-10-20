@@ -2,7 +2,8 @@ use super::*;
 use tempfile::tempdir;
 use tinystoragedrivers_api::{DocumentStore, StreamStore};
 use tinystoragedrivers_types::{
-    Capability, CollectionSpec, ExpectedDocument, Precondition, ReadCheck, Scope, WriteOp,
+    Capability, CollectionSpec, ExpectedDocument, IndexSpec, Precondition, Query, ReadCheck, Scope,
+    Sort, WriteOp,
 };
 
 #[tokio::test]
@@ -158,4 +159,65 @@ async fn reads_the_be94_legacy_fixture_without_changing_primitive_rows() {
         ]
     );
     assert_eq!(preserved, b"be94f75-preserved-blob");
+}
+
+#[tokio::test]
+async fn sqlite_ordered_queries_page_scalars_and_fall_back_for_structural_values() {
+    let directory = tempdir().unwrap();
+    let connection =
+        tinystoragedrivers_connect::sqlite::SqliteConnection::open(directory.path()).unwrap();
+    let documents = SqliteDocuments::new(connection, Scope::new("sorts").unwrap());
+    documents
+        .ensure_collection(&CollectionSpec::new("items").index(IndexSpec::new("by_rank", ["rank"])))
+        .await
+        .unwrap();
+    for (id, rank) in [("three", 3), ("one", 1), ("two", 2)] {
+        documents
+            .put(
+                "items",
+                id,
+                serde_json::json!({"rank": rank}),
+                Precondition::None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let first = documents
+        .query("items", &Query::all().sort(Sort::asc("rank")).limit(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    let cursor = first.next.expect("limited query returns a continuation");
+    let second = documents
+        .query(
+            "items",
+            &Query::all().sort(Sort::asc("rank")).limit(2).after(cursor),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].id, "three");
+    assert!(second.next.is_none());
+
+    documents
+        .put(
+            "items",
+            "array",
+            serde_json::json!({"rank":[0,1]}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let structural = documents
+        .query("items", &Query::all().sort(Sort::desc("rank")))
+        .await
+        .unwrap();
+    assert_eq!(structural.items[0].id, "array");
 }

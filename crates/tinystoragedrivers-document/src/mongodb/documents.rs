@@ -2,14 +2,15 @@ use std::cmp::Ordering;
 
 use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, Document, doc};
-use mongodb::options::ReplaceOptions;
-use mongodb::{Collection, Database};
+use mongodb::options::IndexOptions;
+use mongodb::{Client, ClientSession, Collection, Database, IndexModel};
 use serde_json::{Map, Number, Value};
-use tinystoragedrivers_api::{DocumentStore, async_trait};
+use tinystoragedrivers_api::{DocumentStore, DocumentWatch, async_trait};
 use tinystoragedrivers_types::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, Filter, Meta, Page,
-    Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
-    WriteOptions, sort_documents_with_meta, validate_collection, validate_doc, validate_id,
+    Precondition, Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
+    Versioned, WatchOptions, WriteOp, WriteOptions, WriteResult, sort_documents_with_meta,
+    validate_collection, validate_doc, validate_id,
 };
 
 use tinystoragedrivers_connect::MongoConnection;
@@ -23,21 +24,45 @@ const CREATED: &str = "_c";
 const UPDATED: &str = "_u";
 const EXPIRES: &str = "_x";
 const DELETED: &str = "_del";
+const META_COLLECTION: &str = "_tsd_meta";
+const TEXT_INDEX: &str = "_tsd_text";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+/// MongoDB document adapter bound to one shared connection and opaque scope.
 pub struct MongoDocuments {
-    database: Database,
-    scope: Scope,
-    clock: crate::Clock,
+    pub(super) client: Client,
+    pub(super) database: Database,
+    pub(super) scope: Scope,
+    pub(super) clock: crate::Clock,
+    pub(super) transactions: bool,
+    pub(super) origin: mongodb::bson::oid::ObjectId,
+}
+
+impl std::fmt::Debug for MongoDocuments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MongoDocuments")
+            .field("database", &self.database.name())
+            .field("scope", &self.scope)
+            .field("transactions", &self.transactions)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MongoDocuments {
     /// Bind the v2 document port to a shared Mongo connection and opaque scope.
+    #[must_use]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the constructor consumes a shared connection handle by contract"
+    )]
     pub fn new(connection: MongoConnection, scope: Scope) -> Self {
         Self {
+            client: connection.client(),
             database: connection.database(),
             scope,
             clock: connection.clock(),
+            transactions: connection.transactions_available(),
+            origin: connection.origin(),
         }
     }
 
@@ -49,120 +74,60 @@ impl MongoDocuments {
         doc! {"s": self.scope.as_str(), "k": id}
     }
 
-    async fn rows(&self, collection: &str) -> Result<Vec<Versioned<Value>>> {
-        let mut cursor = self
-            .collection(collection)
-            .find(doc! {SCOPE: self.scope.as_str()})
-            .await
-            .map_err(|error| mongo_error("read documents", error))?;
-        let mut rows = Vec::new();
-        while let Some(record) = cursor
-            .try_next()
-            .await
-            .map_err(|error| mongo_error("read documents", error))?
-        {
-            if let Some(row) = decode(&record)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
-    }
-}
-
-#[async_trait]
-impl DocumentStore for MongoDocuments {
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
-            .with(Capability::Documents)
-            .with(Capability::Ttl)
-            .with(Capability::RecordMetadata)
-            .with(Capability::CollectionEnumeration)
-            .with(Capability::CollectionValidation)
-    }
-
-    async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
-        spec.validate()?;
-        let value = serde_json::to_value(spec)
-            .map_err(|error| StorageError::serialization(error.to_string()))?;
-        let record = doc! {"_id": &spec.name, "spec": json_to_bson(&value)?};
-        self.database
-            .collection::<Document>("_tsd_meta")
-            .replace_one(doc! {"_id": &spec.name}, record)
-            .upsert(true)
-            .await
-            .map_err(|error| mongo_error("store a collection declaration", error))?;
-        Ok(())
-    }
-
-    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
-        required.validate()?;
-        let found = self
+    async fn collection_spec(&self, collection: &str) -> Result<CollectionSpec> {
+        let stored = self
             .database
-            .collection::<Document>("_tsd_meta")
-            .find_one(doc! {"_id": &required.name})
+            .collection::<Document>(META_COLLECTION)
+            .find_one(doc! {"_id": collection})
             .await
-            .map_err(|error| mongo_error("read a collection declaration", error))?
-            .ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
-        let value = found
-            .get("spec")
-            .ok_or_else(|| StorageError::serialization("malformed collection declaration"))?;
-        let stored: CollectionSpec = serde_json::from_value(bson_to_json(value)?)
-            .map_err(|error| StorageError::serialization(error.to_string()))?;
-        if stored.merge(required)? != stored {
-            return Err(StorageError::invalid_input(
-                "stored declaration lacks required features",
-            ));
+            .map_err(|error| mongo_error("read a collection declaration", error))?;
+        match stored {
+            Some(record) => {
+                let (spec, _) = decode_spec(&record)?;
+                if spec.name != collection {
+                    return Err(StorageError::serialization(
+                        "collection declaration names a different collection",
+                    ));
+                }
+                spec.validate()?;
+                Ok(spec)
+            }
+            None => Ok(CollectionSpec::new(collection)),
         }
-        Ok(())
     }
 
-    async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
-        validate_collection(collection)?;
-        validate_id(id)?;
-        let Some(record) = self
-            .collection(collection)
-            .find_one(doc! {"_id": self.scoped_id(id), DELETED: {"$ne": true}})
-            .await
-            .map_err(|error| mongo_error("read a document", error))?
-        else {
-            return Ok(None);
-        };
-        let row = decode(&record)?;
-        Ok(row.filter(|found| !expired(found, (self.clock)())))
-    }
-
-    async fn put(
-        &self,
-        collection: &str,
-        id: &str,
-        value: Value,
-        precondition: Precondition,
-    ) -> Result<Version> {
-        self.put_with(collection, id, value, precondition, WriteOptions::default())
-            .await
-    }
-
-    async fn put_with(
+    async fn put_with_session(
         &self,
         collection: &str,
         id: &str,
         value: Value,
         precondition: Precondition,
         options: WriteOptions,
+        mut session: Option<&mut ClientSession>,
     ) -> Result<Version> {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&value)?;
+        let spec = self.collection_spec(collection).await?;
         let table = self.collection(collection);
         let filter = doc! {"_id": self.scoped_id(id)};
-        let old = table
-            .find_one(filter.clone())
-            .await
-            .map_err(|error| mongo_error("read before writing a document", error))?;
+        let old = match session.as_deref_mut() {
+            Some(session) => table
+                .find_one(filter.clone())
+                .session(session)
+                .await
+                .map_err(|error| mongo_error("read before writing a document", error))?,
+            None => table
+                .find_one(filter.clone())
+                .await
+                .map_err(|error| mongo_error("read before writing a document", error))?,
+        };
         let current = old
             .as_ref()
-            .and_then(|record| decode(record).ok().flatten())
-            .filter(|row| !expired(row, (self.clock)()));
+            .map(decode)
+            .transpose()?
+            .flatten()
+            .filter(|row| !expired(&spec, row, (self.clock)()));
         check(precondition, current.as_ref().map(|row| row.version))?;
         let version = match old
             .as_ref()
@@ -191,54 +156,277 @@ impl DocumentStore for MongoDocuments {
         if let Some(expected) = expected {
             cas.insert(VERSION, expected);
         }
-        let result = table
-            .replace_one(cas, record)
-            .upsert(old.is_none())
-            .await
-            .map_err(|error| mongo_error("write a document", error))?;
+        let upsert = old.is_none();
+        let result = match session {
+            Some(session) => {
+                table
+                    .replace_one(cas, record)
+                    .upsert(upsert)
+                    .session(session)
+                    .await
+            }
+            None => table.replace_one(cas, record).upsert(upsert).await,
+        }
+        .map_err(|error| mongo_error("write a document", error))?;
         if result.matched_count == 0 && result.upserted_id.is_none() {
             return Err(StorageError::conflict("document changed during write"));
         }
         Ok(version)
     }
 
-    async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+    async fn delete_with_session(
+        &self,
+        collection: &str,
+        id: &str,
+        precondition: Precondition,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<bool> {
         validate_collection(collection)?;
         validate_id(id)?;
+        let spec = self.collection_spec(collection).await?;
         let table = self.collection(collection);
         let filter = doc! {"_id": self.scoped_id(id)};
-        let Some(old) = table
-            .find_one(filter.clone())
-            .await
-            .map_err(|error| mongo_error("read before deleting a document", error))?
-        else {
+        let old = match session.as_deref_mut() {
+            Some(session) => table
+                .find_one(filter.clone())
+                .session(session)
+                .await
+                .map_err(|error| mongo_error("read before deleting a document", error))?,
+            None => table
+                .find_one(filter.clone())
+                .await
+                .map_err(|error| mongo_error("read before deleting a document", error))?,
+        };
+        let Some(old) = old else {
             check(precondition, None)?;
             return Ok(false);
         };
-        let live = decode(&old)?.filter(|row| !expired(row, (self.clock)()));
+        let live = decode(&old)?.filter(|row| !expired(&spec, row, (self.clock)()));
         check(precondition, live.as_ref().map(|row| row.version))?;
         let Some(version) = old.get_i64(VERSION).ok() else {
             return Err(StorageError::serialization(
                 "stored document has no version",
             ));
         };
-        table
-            .update_one(
-                doc! {"_id": self.scoped_id(id), VERSION: version},
-                doc! {"$set": {BODY: {}, DELETED: true}},
-            )
-            .await
-            .map_err(|error| mongo_error("delete a document", error))?;
+        let result = match session {
+            Some(session) => {
+                table
+                    .update_one(
+                        doc! {"_id": self.scoped_id(id), VERSION: version},
+                        doc! {"$set": {BODY: {}, DELETED: true}},
+                    )
+                    .session(session)
+                    .await
+            }
+            None => {
+                table
+                    .update_one(
+                        doc! {"_id": self.scoped_id(id), VERSION: version},
+                        doc! {"$set": {BODY: {}, DELETED: true}},
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| mongo_error("delete a document", error))?;
+        if result.matched_count == 0 {
+            return Err(StorageError::conflict("document changed during delete"));
+        }
         Ok(live.is_some())
+    }
+
+    async fn rows(&self, collection: &str) -> Result<Vec<Versioned<Value>>> {
+        let mut cursor = self
+            .collection(collection)
+            .find(doc! {SCOPE: self.scope.as_str()})
+            .await
+            .map_err(|error| mongo_error("read documents", error))?;
+        let mut rows = Vec::new();
+        while let Some(record) = cursor
+            .try_next()
+            .await
+            .map_err(|error| mongo_error("read documents", error))?
+        {
+            if let Some(row) = decode(&record)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn build_indexes(
+        &self,
+        spec: &CollectionSpec,
+        previous: Option<&CollectionSpec>,
+    ) -> Result<()> {
+        let mut indexes = vec![scope_key_index()];
+        indexes.extend(spec_indexes(spec)?);
+        self.collection(&spec.name)
+            .create_indexes(indexes)
+            .await
+            .map_err(|error| mongo_error("build collection indexes", error))?;
+        let Some(text) = spec.search.as_ref().map(text_index).transpose()?.flatten() else {
+            return Ok(());
+        };
+        if previous.and_then(|old| old.search.as_ref()) != spec.search.as_ref() {
+            let _ = self.collection(&spec.name).drop_index(TEXT_INDEX).await;
+        }
+        self.collection(&spec.name)
+            .create_index(text)
+            .await
+            .map_err(|error| mongo_error("build the full-text index", error))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DocumentStore for MongoDocuments {
+    fn capabilities(&self) -> Capabilities {
+        let capabilities = Capabilities::none()
+            .with(Capability::Documents)
+            .with(Capability::Ttl)
+            .with(Capability::FullText)
+            .with(Capability::RecordMetadata)
+            .with(Capability::CollectionEnumeration)
+            .with(Capability::CollectionValidation);
+        if self.transactions {
+            capabilities
+                .with(Capability::Transactions)
+                .with(Capability::ValidatedBatch)
+                .with(Capability::Watch)
+        } else {
+            capabilities
+        }
+    }
+
+    async fn watch(
+        &self,
+        collection: &str,
+        filter: &Filter,
+        options: &WatchOptions,
+    ) -> Result<Box<dyn DocumentWatch>> {
+        self.open_watch(collection, filter, options).await
+    }
+
+    async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        spec.validate()?;
+        let metadata = self.database.collection::<Document>(META_COLLECTION);
+        for _ in 0..16 {
+            let stored = metadata
+                .find_one(doc! {"_id": &spec.name})
+                .await
+                .map_err(|error| mongo_error("read a collection declaration", error))?;
+            let existing = stored.as_ref().map(decode_spec).transpose()?;
+            let merged = match &existing {
+                Some((old, _)) => old.merge(spec)?,
+                None => spec.clone(),
+            };
+            self.build_indexes(&merged, existing.as_ref().map(|(old, _)| old))
+                .await?;
+            if existing.as_ref().is_some_and(|(old, _)| old == &merged) {
+                return Ok(());
+            }
+            let encoded = serde_json::to_string(&merged)
+                .map_err(|error| StorageError::serialization(error.to_string()))?;
+            match existing {
+                Some((_, revision)) => {
+                    let result = metadata
+                        .update_one(
+                            doc! {"_id": &spec.name, "rev": revision},
+                            doc! {"$set": {"spec": &encoded, "rev": revision + 1}},
+                        )
+                        .await
+                        .map_err(|error| mongo_error("update a collection declaration", error))?;
+                    if result.matched_count == 1 {
+                        return Ok(());
+                    }
+                }
+                None => match metadata
+                    .insert_one(doc! {"_id": &spec.name, "spec": &encoded, "rev": 1_i64})
+                    .await
+                {
+                    Ok(_) => return Ok(()),
+                    Err(error) if error.to_string().contains("E11000") => {}
+                    Err(error) => {
+                        return Err(mongo_error("store a collection declaration", error));
+                    }
+                },
+            }
+        }
+        Err(StorageError::unavailable(
+            "collection declaration kept changing concurrently",
+        ))
+    }
+
+    async fn validate_collection_spec(&self, required: &CollectionSpec) -> Result<()> {
+        required.validate()?;
+        let found = self
+            .database
+            .collection::<Document>(META_COLLECTION)
+            .find_one(doc! {"_id": &required.name})
+            .await
+            .map_err(|error| mongo_error("read a collection declaration", error))?
+            .ok_or_else(|| StorageError::not_found("collection has no persisted declaration"))?;
+        let (stored, _) = decode_spec(&found)?;
+        if stored.merge(required)? != stored {
+            return Err(StorageError::invalid_input(
+                "stored declaration lacks required features",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        validate_collection(collection)?;
+        validate_id(id)?;
+        let spec = self.collection_spec(collection).await?;
+        let Some(record) = self
+            .collection(collection)
+            .find_one(doc! {"_id": self.scoped_id(id), DELETED: {"$ne": true}})
+            .await
+            .map_err(|error| mongo_error("read a document", error))?
+        else {
+            return Ok(None);
+        };
+        let row = decode(&record)?;
+        Ok(row.filter(|found| !expired(&spec, found, (self.clock)())))
+    }
+
+    async fn put(
+        &self,
+        collection: &str,
+        id: &str,
+        value: Value,
+        precondition: Precondition,
+    ) -> Result<Version> {
+        self.put_with(collection, id, value, precondition, WriteOptions::default())
+            .await
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        value: Value,
+        precondition: Precondition,
+        options: WriteOptions,
+    ) -> Result<Version> {
+        self.put_with_session(collection, id, value, precondition, options, None)
+            .await
+    }
+
+    async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        self.delete_with_session(collection, id, precondition, None)
+            .await
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
         validate_collection(collection)?;
         query.validate()?;
+        let spec = self.collection_spec(collection).await?;
         let mut rows = self.rows(collection).await?;
         let now = (self.clock)();
         rows.retain(|row| {
-            !expired(row, now) && query.filter.matches_with(&row.id, &row.doc, &row.meta)
+            !expired(&spec, row, now) && query.filter.matches_with(&row.id, &row.doc, &row.meta)
         });
         sort_documents_with_meta(&mut rows, &query.sort, |row| (&row.id, &row.doc, &row.meta));
         let fingerprint = fingerprint(collection, &self.scope, query);
@@ -278,12 +466,14 @@ impl DocumentStore for MongoDocuments {
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
+        let spec = self.collection_spec(collection).await?;
         Ok(self
             .rows(collection)
             .await?
             .into_iter()
             .filter(|row| {
-                !expired(row, (self.clock)()) && filter.matches_with(&row.id, &row.doc, &row.meta)
+                !expired(&spec, row, (self.clock)())
+                    && filter.matches_with(&row.id, &row.doc, &row.meta)
             })
             .count() as u64)
     }
@@ -291,10 +481,12 @@ impl DocumentStore for MongoDocuments {
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
+        let spec = self.collection_spec(collection).await?;
         let rows = self.rows(collection).await?;
         let mut count = 0;
         for row in rows.into_iter().filter(|row| {
-            !expired(row, (self.clock)()) && filter.matches_with(&row.id, &row.doc, &row.meta)
+            !expired(&spec, row, (self.clock)())
+                && filter.matches_with(&row.id, &row.doc, &row.meta)
         }) {
             count += u64::from(
                 self.delete(collection, &row.id, Precondition::Version(row.version))
@@ -350,9 +542,7 @@ impl DocumentStore for MongoDocuments {
                     first.version = version;
                     return Ok(Some(first));
                 }
-                Err(error) if error.kind() == tinystoragedrivers_types::ErrorKind::Conflict => {
-                    continue;
-                }
+                Err(error) if error.kind() == tinystoragedrivers_types::ErrorKind::Conflict => {}
                 Err(error) => return Err(error),
             }
         }
@@ -361,11 +551,181 @@ impl DocumentStore for MongoDocuments {
         ))
     }
 
-    async fn search(&self, _: &str, _: &str, _: usize) -> Result<Vec<SearchHit>> {
-        Err(StorageError::unsupported(
-            Capability::FullText,
-            "MongoDB full-text search is unsupported by this adapter",
-        ))
+    async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        if !self.transactions {
+            return Err(StorageError::unsupported(
+                Capability::Transactions,
+                "MongoDB deployment does not support transactions",
+            ));
+        }
+        self.atomic_batch_checked(Vec::new(), ops).await
+    }
+
+    async fn atomic_batch_checked(
+        &self,
+        checks: Vec<ReadCheck>,
+        ops: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        if !self.transactions {
+            return Err(StorageError::unsupported(
+                Capability::ValidatedBatch,
+                "MongoDB deployment does not support validated batches",
+            ));
+        }
+        for check in &checks {
+            check.validate()?;
+            self.ensure_collection(&CollectionSpec::new(check.collection.as_str()))
+                .await?;
+        }
+        for op in &ops {
+            let collection = match op {
+                WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. } => collection,
+            };
+            validate_collection(collection)?;
+            self.ensure_collection(&CollectionSpec::new(collection.as_str()))
+                .await?;
+        }
+
+        let mut session = self
+            .client
+            .start_session()
+            .await
+            .map_err(|error| mongo_error("start a document transaction", error))?;
+        session
+            .start_transaction()
+            .await
+            .map_err(|error| mongo_error("start a document transaction", error))?;
+
+        let result = async {
+            for dependency in &checks {
+                let spec = self.collection_spec(&dependency.collection).await?;
+                let record = self
+                    .collection(&dependency.collection)
+                    .find_one(doc! {"_id": self.scoped_id(&dependency.id)})
+                    .session(&mut session)
+                    .await
+                    .map_err(|error| mongo_error("validate a batch dependency", error))?;
+                let current = record
+                    .as_ref()
+                    .map(decode)
+                    .transpose()?
+                    .flatten()
+                    .filter(|row| !expired(&spec, row, (self.clock)()))
+                    .map(|row| row.version);
+                dependency.verify(current)?;
+            }
+
+            let mut results = Vec::with_capacity(ops.len());
+            for op in ops {
+                let result = match op {
+                    WriteOp::Put {
+                        collection,
+                        id,
+                        doc,
+                        precondition,
+                    } => WriteResult::Put {
+                        version: self
+                            .put_with_session(
+                                &collection,
+                                &id,
+                                doc,
+                                precondition,
+                                WriteOptions::default(),
+                                Some(&mut session),
+                            )
+                            .await?,
+                    },
+                    WriteOp::Delete {
+                        collection,
+                        id,
+                        precondition,
+                    } => WriteResult::Delete {
+                        removed: self
+                            .delete_with_session(&collection, &id, precondition, Some(&mut session))
+                            .await?,
+                    },
+                };
+                results.push(result);
+            }
+            Ok::<_, StorageError>(results)
+        }
+        .await;
+
+        match result {
+            Ok(results) => {
+                session
+                    .commit_transaction()
+                    .await
+                    .map_err(|error| mongo_error("commit a document transaction", error))?;
+                Ok(results)
+            }
+            Err(error) => {
+                let _ = session.abort_transaction().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        validate_collection(collection)?;
+        let spec = self.collection_spec(collection).await?;
+        let search = spec.search.as_ref().ok_or_else(|| {
+            StorageError::invalid_input("this collection declares no search fields")
+        })?;
+        if search.fields.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let tokens = tinystoragedrivers_types::value::tokens(&Value::String(text.to_owned()));
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = doc! {
+            SCOPE: self.scope.as_str(),
+            DELETED: {"$ne": true},
+            "$text": {"$search": tokens.join(" ")},
+        };
+        let options = mongodb::options::FindOptions::builder()
+            .projection(doc! {
+                "score": {"$meta": "textScore"},
+                KEY: 1,
+                VERSION: 1,
+                BODY: 1,
+                SCHEMA: 1,
+                CREATED: 1,
+                UPDATED: 1,
+                EXPIRES: 1,
+                DELETED: 1,
+            })
+            .sort(doc! {"score": {"$meta": "textScore"}, KEY: 1})
+            .build();
+        let mut cursor = self
+            .collection(collection)
+            .find(filter)
+            .with_options(options)
+            .await
+            .map_err(|error| mongo_error("search documents", error))?;
+        let now = (self.clock)();
+        let mut hits = Vec::new();
+        while let Some(record) = cursor
+            .try_next()
+            .await
+            .map_err(|error| mongo_error("search documents", error))?
+        {
+            let Some(row) = decode(&record)? else {
+                continue;
+            };
+            if expired(&spec, &row, now) {
+                continue;
+            }
+            hits.push(SearchHit {
+                id: row.id,
+                score: record.get_f64("score").unwrap_or_default(),
+            });
+            if hits.len() == limit {
+                break;
+            }
+        }
+        Ok(hits)
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
@@ -383,16 +743,33 @@ impl DocumentStore for MongoDocuments {
             .list_collection_names()
             .await
             .map_err(|error| mongo_error("list collections", error))?;
-        names.retain(|name| name.starts_with(prefix) && !name.starts_with("_tsd_"));
+        let mut scoped = Vec::new();
+        for name in names
+            .drain(..)
+            .filter(|name| name.starts_with(prefix) && !name.starts_with("_tsd_"))
+        {
+            let has_rows = self
+                .collection(&name)
+                .find_one(doc! {SCOPE: self.scope.as_str()})
+                .await
+                .map_err(|error| mongo_error("enumerate scoped collections", error))?
+                .is_some();
+            if has_rows {
+                scoped.push(name);
+            }
+        }
+        names = scoped;
         names.sort();
         Ok(names)
     }
 }
 
-fn expired(row: &Versioned<Value>, now: u64) -> bool {
-    row.meta
-        .expires_ms
-        .is_some_and(|expires| expires <= i64::try_from(now).unwrap_or(i64::MAX))
+fn expired(spec: &CollectionSpec, row: &Versioned<Value>, now: u64) -> bool {
+    let now = Value::from(now);
+    Filter::lte("_expires_ms", now.clone()).matches_with(&row.id, &row.doc, &row.meta)
+        || spec.ttl_field.as_ref().is_some_and(|field| {
+            Filter::lte(field.clone(), now.clone()).matches_with(&row.id, &row.doc, &row.meta)
+        })
 }
 
 fn check(precondition: Precondition, found: Option<Version>) -> Result<()> {
@@ -515,16 +892,109 @@ pub(super) fn bson_to_json(value: &Bson) -> Result<Value> {
 }
 
 fn fingerprint(collection: &str, scope: &Scope, query: &Query) -> u64 {
-    collection
-        .as_bytes()
-        .iter()
-        .chain(scope.as_str().as_bytes())
-        .chain(serde_json::to_vec(&query.filter).unwrap_or_default().iter())
-        .fold(0xcbf29ce484222325, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        })
+    let binding = serde_json::to_vec(&(collection, scope.as_str(), &query.filter, &query.sort))
+        .unwrap_or_default();
+    binding.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
-fn mongo_error(operation: &'static str, error: mongodb::error::Error) -> StorageError {
+pub(super) fn mongo_error(operation: &'static str, error: mongodb::error::Error) -> StorageError {
     StorageError::unavailable(format!("MongoDB failed to {operation}")).with_source(error)
 }
+
+fn decode_spec(record: &Document) -> Result<(CollectionSpec, i64)> {
+    let malformed = || StorageError::serialization("malformed collection declaration");
+    let encoded = record.get_str("spec").map_err(|_| malformed())?;
+    let revision = record.get_i64("rev").map_err(|_| malformed())?;
+    let spec = serde_json::from_str(encoded)
+        .map_err(|error| StorageError::serialization(error.to_string()))?;
+    Ok((spec, revision))
+}
+
+fn scope_key_index() -> IndexModel {
+    IndexModel::builder()
+        .keys(doc! {SCOPE: 1, KEY: 1})
+        .options(
+            IndexOptions::builder()
+                .name("_tsd_scope_key".to_owned())
+                .build(),
+        )
+        .build()
+}
+
+fn spec_indexes(spec: &CollectionSpec) -> Result<Vec<IndexModel>> {
+    let mut indexes = Vec::new();
+    for index in &spec.indexes {
+        if !index
+            .fields
+            .iter()
+            .all(|field| !field.split('.').any(|part| part.starts_with('$')))
+        {
+            if index.unique {
+                return Err(StorageError::invalid_input(format!(
+                    "unique index `{}` names a field MongoDB cannot index",
+                    index.name
+                )));
+            }
+            continue;
+        }
+        let mut keys = doc! {SCOPE: 1};
+        let mut present = Document::new();
+        for field in &index.fields {
+            let path = format!("{BODY}.{field}");
+            keys.insert(&path, 1);
+            present.insert(path, doc! {"$exists": true});
+        }
+        let mut options = IndexOptions::builder()
+            .name(index_name(&index.name))
+            .build();
+        if index.unique {
+            options.unique = Some(true);
+            options.partial_filter_expression = Some(present);
+        }
+        indexes.push(IndexModel::builder().keys(keys).options(options).build());
+    }
+    Ok(indexes)
+}
+
+fn text_index(search: &tinystoragedrivers_types::SearchSpec) -> Result<Option<IndexModel>> {
+    if let Some(field) = search
+        .fields
+        .iter()
+        .find(|field| field.split('.').any(|part| part.starts_with('$')))
+    {
+        return Err(StorageError::invalid_input(format!(
+            "search field `{field}` names a path MongoDB cannot index"
+        )));
+    }
+    if search.fields.is_empty() {
+        return Ok(None);
+    }
+    let mut keys = doc! {SCOPE: 1};
+    for field in &search.fields {
+        keys.insert(format!("{BODY}.{field}"), "text");
+    }
+    let options = IndexOptions::builder()
+        .name(TEXT_INDEX.to_owned())
+        .default_language("none".to_owned())
+        .language_override("_tsd_language".to_owned())
+        .build();
+    Ok(Some(
+        IndexModel::builder().keys(keys).options(options).build(),
+    ))
+}
+
+fn index_name(name: &str) -> String {
+    let hash = name
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    format!("_tsd_ix_{hash:016x}")
+}
+
+#[cfg(test)]
+#[path = "documents_tests.rs"]
+mod tests;

@@ -114,6 +114,7 @@ fn to_stored(offset: u64) -> Result<i64> {
 
 impl SqliteStreams {
     /// Bind a stream adapter to a shared SQLite connection and opaque scope.
+    #[must_use]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Self {
         Self { connection, scope }
     }

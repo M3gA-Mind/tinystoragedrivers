@@ -36,7 +36,7 @@ impl MemoryDocuments {
         Self { db, scope, clock }
     }
 
-    fn check_schema(&self, collection: &str) -> Result<()> {
+    fn check_schema(collection: &str) -> Result<()> {
         validate_collection(collection)?;
         Ok(())
     }
@@ -138,7 +138,7 @@ impl DocumentStore for MemoryDocuments {
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
         validate_collection(collection)?;
         validate_id(id)?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         let state = self.db.lock()?;
         Ok(state.get(self.scope.as_str(), collection, id, self.now()))
     }
@@ -165,7 +165,7 @@ impl DocumentStore for MemoryDocuments {
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&doc)?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -181,7 +181,7 @@ impl DocumentStore for MemoryDocuments {
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
         validate_collection(collection)?;
         validate_id(id)?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -193,7 +193,7 @@ impl DocumentStore for MemoryDocuments {
         validate_collection(collection)?;
         query.validate()?;
         let position = parse_cursor(collection, &self.scope, query)?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         let state = self.db.lock()?;
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
         let start = position.as_ref().map_or(0, |cursor| {
@@ -225,7 +225,7 @@ impl DocumentStore for MemoryDocuments {
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         let state = self.db.lock()?;
         Ok(self.matching(&state, collection, filter, &[])?.len() as u64)
     }
@@ -233,7 +233,7 @@ impl DocumentStore for MemoryDocuments {
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -256,7 +256,7 @@ impl DocumentStore for MemoryDocuments {
             ..Query::default()
         }
         .validate()?;
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
         let mut state = self.db.lock()?;
@@ -323,11 +323,11 @@ impl DocumentStore for MemoryDocuments {
             }
         }
         for check in &checks {
-            self.check_schema(&check.collection)?;
+            Self::check_schema(&check.collection)?;
         }
         for op in &ops {
             let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
-            self.check_schema(collection)?;
+            Self::check_schema(collection)?;
         }
         // The clock is read under the lock, where the guard check and the
         // write are serialized.
@@ -382,7 +382,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         validate_collection(collection)?;
         let state = self.db.lock()?;
         let spec = state.spec(collection);
@@ -421,7 +421,7 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
-        self.check_schema(collection)?;
+        Self::check_schema(collection)?;
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
         let key = (self.scope.as_str().to_owned(), collection.to_owned());

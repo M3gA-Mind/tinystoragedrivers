@@ -12,7 +12,7 @@ publish = false
 default = ["memory"]
 memory = []
 sqlite = ["dep:rusqlite", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:tokio"]
-mongodb = ["dep:mongodb", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
+mongodb = ["dep:mongodb", "dep:futures-util", "dep:tokio", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb"]
 file = ["dep:tokio", "dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
 
 [dependencies]
@@ -29,6 +29,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 tokio = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

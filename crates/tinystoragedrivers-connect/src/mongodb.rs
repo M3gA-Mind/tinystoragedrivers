@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mongodb::bson::{Document, doc};
+use mongodb::bson::{Document, doc, oid::ObjectId};
 use mongodb::options::{ClientOptions, DatabaseOptions, ReadPreference, SelectionCriteria};
 use mongodb::{Client, Database};
 use tinystoragedrivers_types::{Result, StorageError};
@@ -25,6 +25,7 @@ pub struct MongoConnection {
     clock: Clock,
     transactions: bool,
     options: MongoConnectionOptions,
+    origin: ObjectId,
 }
 
 impl std::fmt::Debug for MongoConnection {
@@ -32,6 +33,7 @@ impl std::fmt::Debug for MongoConnection {
         f.debug_struct("MongoConnection")
             .field("database", &self.database.name())
             .field("transactions", &self.transactions)
+            .field("origin", &self.origin)
             .finish_non_exhaustive()
     }
 }
@@ -90,6 +92,7 @@ impl MongoConnection {
             clock: Arc::new(system_clock),
             transactions,
             options,
+            origin: ObjectId::new(),
         })
     }
 
@@ -109,6 +112,15 @@ impl MongoConnection {
     #[must_use]
     pub const fn transactions_available(&self) -> bool {
         self.transactions
+    }
+
+    /// Stable opaque identity shared by clones of this connection.
+    ///
+    /// Native cursors use it to reject resumption through a distinct
+    /// connection, even when that connection selects the same database name.
+    #[must_use]
+    pub fn origin(&self) -> ObjectId {
+        self.origin
     }
 
     /// Return the connection's shared clock.

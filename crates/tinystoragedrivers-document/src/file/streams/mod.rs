@@ -91,6 +91,7 @@ struct Paths {
 
 impl FileStreams {
     /// Bind a stream adapter to a shared filesystem root and opaque scope.
+    #[must_use]
     pub fn new(connection: FileConnection, scope: Scope) -> Self {
         Self { connection, scope }
     }

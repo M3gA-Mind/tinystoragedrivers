@@ -30,6 +30,7 @@ pub struct FileDocuments {
 
 impl FileDocuments {
     /// Bind a document adapter to the shared file root and opaque scope.
+    #[must_use]
     pub fn new(connection: FileConnection, scope: Scope) -> Self {
         Self { connection, scope }
     }

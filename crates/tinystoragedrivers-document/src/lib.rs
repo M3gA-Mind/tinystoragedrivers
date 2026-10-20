@@ -57,10 +57,10 @@ fn sealed_blob_key(stream: &str) -> tinystoragedrivers_types::Result<String> {
         }
     }
     if escaped == "." {
-        escaped = "%2E".to_owned();
+        "%2E".clone_into(&mut escaped);
     }
     if escaped == ".." {
-        escaped = "%2E.".to_owned();
+        "%2E.".clone_into(&mut escaped);
     }
     if escaped.len() > tinystoragedrivers_types::MAX_ID_LEN {
         let digest = Sha256::digest(escaped.as_bytes());
@@ -75,3 +75,7 @@ fn sealed_blob_key(stream: &str) -> tinystoragedrivers_types::Result<String> {
     Key::new(key.clone())?;
     Ok(key)
 }
+
+#[cfg(test)]
+#[path = "conformance_tests.rs"]
+mod conformance_tests;
