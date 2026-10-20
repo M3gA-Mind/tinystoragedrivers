@@ -3,7 +3,7 @@
 //! Use this crate only from development dependencies. It provides deterministic
 //! fault schedules and clocks, plus shared conformance checks for real engines.
 
-mod conformance;
+pub mod conformance;
 mod fault;
 pub use conformance::{documents, queue, semantics, streams, validated, watch};
 mod clock;
