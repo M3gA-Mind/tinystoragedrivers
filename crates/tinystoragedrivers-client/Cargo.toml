@@ -14,7 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 tinystoragedrivers-bus.workspace = true
 tinystoragedrivers-core.workspace = true
-tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
+tinystoragedrivers-api.workspace = true
+zeroize.workspace = true
 tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
 
 [dev-dependencies]

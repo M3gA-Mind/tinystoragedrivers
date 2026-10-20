@@ -26,7 +26,7 @@ pub use tinystoragedrivers_types as types;
 pub use watch::DocumentWatch;
 
 /// API contract version, independent of the `TinyBus` wire contract.
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// Whether a participant implements this exact API contract.
 #[must_use]

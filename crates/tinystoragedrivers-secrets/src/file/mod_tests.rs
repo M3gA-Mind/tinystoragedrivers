@@ -8,11 +8,11 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::sync::atomic::AtomicU64;
 
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::ErrorKind;
 
 use crate::crypto::hex_decode;
 use crate::crypto::tests::{OPENHUMAN_SECRETS_ENC_HEX, fixture_key};
-use crate::testkit::secrets_conformance;
+use crate::testkit::{secrets_conformance, versioned_secrets_conformance};
 
 /// A fresh directory under the target dir's temp area, removed on drop.
 pub(super) struct TempDir(pub(super) PathBuf);
@@ -92,6 +92,55 @@ async fn passes_the_secrets_conformance_suite() {
     secrets_conformance(&store).await;
     assert_eq!(store.backend_name(), "encrypted_file");
     assert_eq!(store.path(), dir.0.join("secrets.enc"));
+}
+
+#[tokio::test]
+async fn passes_versioned_secret_conformance() {
+    let dir = TempDir::new("versioned-conformance");
+    versioned_secrets_conformance(&EncryptedFileSecrets::new(&dir.0, fixture_key())).await;
+}
+
+#[tokio::test]
+async fn conditional_writes_arbitrate_independent_file_handles() {
+    let dir = TempDir::new("conditional-write");
+    let first = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    let second = EncryptedFileSecrets::new(&dir.0, fixture_key());
+    let initial = first
+        .set_if("credential", b"initial", SecretPrecondition::Absent)
+        .await
+        .unwrap();
+    let read = second.get_versioned("credential").await.unwrap().unwrap();
+    assert_eq!(read.0.as_slice(), b"initial");
+    assert_eq!(read.1, initial);
+    let updated = second
+        .set_if(
+            "credential",
+            b"updated",
+            SecretPrecondition::Version(initial),
+        )
+        .await
+        .unwrap();
+    assert_ne!(updated, initial);
+    assert_eq!(
+        first
+            .set_if("credential", b"stale", SecretPrecondition::Version(initial),)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    let current = first.get_versioned("credential").await.unwrap().unwrap();
+    assert_eq!(current.0.as_slice(), b"updated");
+    assert_eq!(current.1, updated);
+    let forged = SecretVersion::from_bytes([0; 32]);
+    assert_eq!(
+        first
+            .set_if("credential", b"forged", SecretPrecondition::Version(forged))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
 }
 
 #[tokio::test]
@@ -259,7 +308,7 @@ fn a_failed_rename_removes_the_staged_file() {
         .map(|entry| entry.unwrap().file_name())
         .filter(|name| name.to_string_lossy().ends_with(".tmp"))
         .collect();
-    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert_eq!(leftovers, Vec::<std::ffi::OsString>::new(), "{leftovers:?}");
 }
 
 #[test]
