@@ -371,3 +371,7 @@ impl StreamStore for SqliteStreams {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
