@@ -136,3 +136,7 @@ impl Db {
         f(&mut conn)
     }
 }
+
+#[cfg(test)]
+#[path = "connection_tests.rs"]
+mod tests;
