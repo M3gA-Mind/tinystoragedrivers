@@ -1,7 +1,8 @@
 //! `SecretStore` over the confidential `Secrets` object.
+use tinystoragedrivers_api::{SecretStore, async_trait};
 use tinystoragedrivers_bus as wire;
-use tinystoragedrivers_core::{Result, async_trait};
-use tinystoragedrivers_secrets::{SecretStore, Zeroizing};
+use tinystoragedrivers_types::Result;
+use zeroize::Zeroizing;
 
 use super::Wire;
 use crate::transport::Object;
@@ -65,5 +66,9 @@ impl SecretStore for BusSecrets {
 
     fn backend_name(&self) -> &'static str {
         "bus"
+    }
+
+    fn enumerable(&self) -> bool {
+        true
     }
 }

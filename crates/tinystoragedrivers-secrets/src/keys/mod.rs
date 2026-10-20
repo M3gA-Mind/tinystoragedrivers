@@ -10,7 +10,7 @@ use std::fmt;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
-use tinystoragedrivers_core::{Result, Scope, StorageError};
+use tinystoragedrivers_types::{Result, Scope, StorageError};
 use zeroize::Zeroizing;
 
 use crate::crypto::{KEY_LEN, key_from_hex};
@@ -22,9 +22,9 @@ pub trait KeyProvider: Send + Sync + fmt::Debug {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when
+    /// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) when
     /// no key can be produced, or whatever the provider's key source reports
-    /// (a KMS outage would be [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable)).
+    /// (a KMS outage would be [`ErrorKind::Unavailable`](tinystoragedrivers_types::ErrorKind::Unavailable)).
     fn data_key(&self, scope: &Scope) -> Result<Zeroizing<[u8; KEY_LEN]>>;
 
     /// Resolve a key without blocking the runtime. Local providers use the
@@ -54,7 +54,7 @@ impl StaticKey {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) for
+    /// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) for
     /// malformed hex or a wrong length.
     pub fn from_hex(hex: &str) -> Result<Self> {
         key_from_hex(hex).map(Self::new)
@@ -98,7 +98,7 @@ impl DerivedKeys {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) for
+    /// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) for
     /// malformed hex or a wrong length.
     pub fn from_hex(hex: &str) -> Result<Self> {
         key_from_hex(hex).map(Self::new)

@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
-pub(super) use super::unix::{Namespace, identity, is_unlinked};
+pub(super) use super::unix::{Namespace, identity};
 #[cfg(windows)]
 pub(super) use super::windows::{Namespace, identity};
 

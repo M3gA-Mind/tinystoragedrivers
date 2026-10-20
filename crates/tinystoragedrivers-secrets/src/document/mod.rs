@@ -17,15 +17,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tinystoragedrivers_core::{
-    DocumentStore, DocumentStoreExt, Precondition, Query, Result, Scope, ScopedStorage,
-    StorageError, validate_collection,
+use tinystoragedrivers_api::{DocumentStore, DocumentStoreExt, Storage};
+use tinystoragedrivers_types::{
+    Precondition, Query, Result, Scope, SecretPrecondition, SecretVersion, StorageError,
+    validate_collection, validate_secret_name as validate_name,
+    validate_secret_prefix as validate_prefix,
 };
 use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::keys::KeyProvider;
-use crate::store::{SecretStore, validate_name, validate_prefix};
+use crate::store::SecretStore;
 
 /// The collection secrets live in unless the host picks another.
 pub const DEFAULT_COLLECTION: &str = "secrets";
@@ -43,14 +45,10 @@ pub struct DocumentSecrets {
 }
 
 impl DocumentSecrets {
-    /// Secrets in `storage`'s documents, under the key `keys` gives its scope.
+    /// Secrets in `storage`'s documents, bound to `scope` and encrypted with `keys`.
     #[must_use]
-    pub fn new(storage: &ScopedStorage, keys: Arc<dyn KeyProvider>) -> Self {
-        Self::from_parts(
-            Arc::clone(storage.documents()),
-            storage.scope().clone(),
-            keys,
-        )
+    pub fn new(storage: &Storage, scope: Scope, keys: Arc<dyn KeyProvider>) -> Self {
+        Self::from_parts(Arc::clone(storage.documents()), scope, keys)
     }
 
     /// Secrets in `documents`, which must be bound to `scope`; the scope picks
@@ -73,7 +71,7 @@ impl DocumentSecrets {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
+    /// [`ErrorKind::InvalidInput`](tinystoragedrivers_types::ErrorKind::InvalidInput)
     /// for an invalid collection name.
     pub fn with_collection(mut self, collection: impl Into<String>) -> Result<Self> {
         let collection = collection.into();
@@ -122,6 +120,27 @@ impl SecretStore for DocumentSecrets {
         crypto::decrypt_enc2(&key, ciphertext).map(Some)
     }
 
+    async fn get_versioned(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        validate_name(name)?;
+        let Some(found) = self.documents.get(&self.collection, name).await? else {
+            return Ok(None);
+        };
+        let ciphertext = found
+            .doc
+            .get(CIPHERTEXT_FIELD)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StorageError::serialization("secret document has no string ciphertext field")
+            })?;
+        let key = self.keys.data_key_async(&self.scope).await?;
+        let value = crypto::decrypt_enc2(&key, ciphertext)?;
+        let version = self.version(name, found.version, ciphertext);
+        Ok(Some((value, version)))
+    }
+
     async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
         validate_name(name)?;
         let key = self.keys.data_key_async(&self.scope).await?;
@@ -130,11 +149,55 @@ impl SecretStore for DocumentSecrets {
             .put(
                 &self.collection,
                 name,
-                json!({ CIPHERTEXT_FIELD: ciphertext }),
+                json!({ CIPHERTEXT_FIELD: ciphertext.as_str() }),
                 Precondition::None,
             )
             .await?;
         Ok(())
+    }
+
+    async fn set_if(
+        &self,
+        name: &str,
+        value: &[u8],
+        condition: SecretPrecondition,
+    ) -> Result<SecretVersion> {
+        validate_name(name)?;
+        let precondition = match condition {
+            SecretPrecondition::Absent => Precondition::Absent,
+            SecretPrecondition::Version(expected) => {
+                let found = self.documents.get(&self.collection, name).await?;
+                let Some(found) = found else {
+                    return Err(StorageError::conflict("secret precondition did not match"));
+                };
+                let ciphertext = found
+                    .doc
+                    .get(CIPHERTEXT_FIELD)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        StorageError::serialization(
+                            "secret document has no string ciphertext field",
+                        )
+                    })?;
+                let version = self.version(name, found.version, ciphertext);
+                if version != expected {
+                    return Err(StorageError::conflict("secret precondition did not match"));
+                }
+                Precondition::Version(found.version)
+            }
+        };
+        let key = self.keys.data_key_async(&self.scope).await?;
+        let ciphertext = crypto::encrypt_enc2(&key, value)?;
+        let new_version = self
+            .documents
+            .put(
+                &self.collection,
+                name,
+                json!({ CIPHERTEXT_FIELD: ciphertext.as_str() }),
+                precondition,
+            )
+            .await?;
+        Ok(self.version(name, new_version, &ciphertext))
     }
 
     async fn delete(&self, name: &str) -> Result<bool> {
@@ -162,8 +225,29 @@ impl SecretStore for DocumentSecrets {
     fn backend_name(&self) -> &'static str {
         "document"
     }
+
+    fn enumerable(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+impl DocumentSecrets {
+    fn version(
+        &self,
+        name: &str,
+        revision: tinystoragedrivers_types::Version,
+        ciphertext: &str,
+    ) -> SecretVersion {
+        crate::version::version_from_parts(&[
+            self.scope.as_str().as_bytes(),
+            self.collection.as_bytes(),
+            name.as_bytes(),
+            &revision.0.to_be_bytes(),
+            ciphertext.as_bytes(),
+        ])
+    }
+}

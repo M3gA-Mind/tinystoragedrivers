@@ -342,6 +342,18 @@ fn unconfigured_bundle_handles_return_their_primitive_capability() {
         Capability::Secrets,
     );
     assert_unsupported(
+        run_ready(storage.secrets().get_versioned("secret")),
+        Capability::ConditionalSecretWrites,
+    );
+    assert_unsupported(
+        run_ready(
+            storage
+                .secrets()
+                .set_if("secret", b"secret", types::SecretPrecondition::Absent),
+        ),
+        Capability::ConditionalSecretWrites,
+    );
+    assert_unsupported(
         run_ready(storage.secrets().delete("secret")),
         Capability::Secrets,
     );
