@@ -1,6 +1,7 @@
 use super::*;
 use crate::PerCallerEndpoint;
 use crate::StorageServer;
+use tinybus::module::ModuleHost;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
 use tinystoragedrivers_api::StorageBackend;
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
@@ -77,7 +78,7 @@ async fn service(object: Object) -> (ObjectService, Connection) {
         ))
     });
     let shared = Arc::new(Shared {
-        connection: connection.downgrade(),
+        transport: HostTransport::Connection(connection.downgrade()),
         endpoint: Arc::new(endpoint),
         forwarders: Mutex::new(HashMap::new()),
     });
@@ -302,7 +303,7 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
         ))
     }));
     let shared = Shared {
-        connection: connection.downgrade(),
+        transport: HostTransport::Connection(connection.downgrade()),
         endpoint: Arc::clone(&endpoint) as Arc<dyn StorageEndpoint>,
         forwarders: Mutex::new(HashMap::new()),
     };
@@ -362,7 +363,7 @@ async fn watch_signals_are_forwarded_only_to_the_bound_caller() {
     let (endpoint, sender) = signal_endpoint(true);
     assert_eq!(endpoint.watch_epoch(&caller_name), 0);
     let shared = Shared {
-        connection: host.downgrade(),
+        transport: HostTransport::Connection(host.downgrade()),
         endpoint: Arc::new(endpoint),
         forwarders: Mutex::new(HashMap::new()),
     };
@@ -410,7 +411,7 @@ async fn a_missing_or_closed_watch_source_does_not_leave_a_live_forwarder() {
     let caller = BusName::new(":1.7").unwrap();
     let (missing, _) = signal_endpoint(false);
     let shared = Shared {
-        connection: connection.downgrade(),
+        transport: HostTransport::Connection(connection.downgrade()),
         endpoint: Arc::new(missing),
         forwarders: Mutex::new(HashMap::new()),
     };
@@ -420,7 +421,7 @@ async fn a_missing_or_closed_watch_source_does_not_leave_a_live_forwarder() {
     let (closed, sender) = signal_endpoint(true);
     let closed = Arc::new(closed);
     let shared = Shared {
-        connection: connection.downgrade(),
+        transport: HostTransport::Connection(connection.downgrade()),
         endpoint: Arc::clone(&closed) as Arc<dyn StorageEndpoint>,
         forwarders: Mutex::new(HashMap::new()),
     };
@@ -438,4 +439,166 @@ async fn a_missing_or_closed_watch_source_does_not_leave_a_live_forwarder() {
     })
     .await
     .expect("a closed watch source is removed from the forwarding table");
+}
+
+/// Executed by the full coverage gate after scripts/test-storage-callback.sh
+/// builds the real module artifact. Keeping it ignored means normal unit tests
+/// do not depend on an external compiled module or MongoDB service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "run by the native full-workspace coverage gate with the compiled callback module"]
+async fn admitted_module_exercises_callback_host_streams_and_secrets() {
+    let artifact = std::path::PathBuf::from(
+        std::env::var_os("TSD_STORAGE_CALLBACK_MODULE")
+            .expect("coverage gate must provide TSD_STORAGE_CALLBACK_MODULE"),
+    );
+    let hash = tinybus::module::sha256_file(&artifact).unwrap();
+    let artifact_dir = artifact.parent().unwrap().join(format!(
+        "storage-callback-native-coverage-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&artifact_dir).unwrap();
+    let staged = artifact_dir.join(artifact.file_name().unwrap());
+    std::fs::copy(&artifact, &staged).unwrap();
+    std::fs::write(
+        artifact_dir.join("modules.toml"),
+        format!(
+            "{:?} = {hash:?}\n",
+            staged.file_name().unwrap().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let binding = prepare_storage_host_callbacks(&host).await.unwrap();
+    let weak_binding = Arc::downgrade(&binding);
+    let backend = Arc::new(MemoryBackend::new());
+    let scope = Scope::new("callback-coverage").unwrap();
+    let storage = backend.for_scope(&scope).unwrap();
+    storage
+        .blobs()
+        .put("host-download", b"host callback body".to_vec(), None)
+        .await
+        .unwrap();
+    let endpoint_storage = storage.clone();
+    let endpoint = Arc::new(PerCallerEndpoint::new(move |_| {
+        Some(StorageServer::new(endpoint_storage.clone()))
+    }));
+    let served = serve_with_host_callbacks(Arc::clone(&binding), endpoint)
+        .await
+        .unwrap();
+    host.load_file_with_host_callbacks(staged, json!({"host": binding.unique_name()}), &binding)
+        .await
+        .unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attacker = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attacker_proxy = attacker
+        .proxy(
+            binding.unique_name().as_str(),
+            object_path(Object::Documents).as_str(),
+            STORAGE_INTERFACE,
+        )
+        .unwrap();
+    assert!(
+        attacker_proxy
+            .call::<Value>("Capabilities", ())
+            .await
+            .is_err()
+    );
+
+    let module = client
+        .proxy(
+            "org.example.StorageCallbackProof",
+            "/storage_proof",
+            "org.example.StorageCallbackProof",
+        )
+        .unwrap();
+    let result: Value = module.call("Exercise", ()).await.unwrap();
+    assert_eq!(result["secret_updated"], true);
+    assert_eq!(result["upload"], "ordinary module stream");
+    assert_eq!(result["download"], "host callback body");
+
+    served.shutdown().await.unwrap();
+    drop(binding);
+    assert!(weak_binding.upgrade().is_none());
+    drop(host);
+    drop(broker_task);
+    std::fs::remove_dir_all(artifact_dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_watch_forwarder_uses_the_bound_signal_route() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    let binding = prepare_storage_host_callbacks(&host).await.unwrap();
+    let weak_binding = Arc::downgrade(&binding);
+    let (endpoint, sender) = signal_endpoint(true);
+    let shared = Shared {
+        transport: HostTransport::Callback(Arc::downgrade(&binding)),
+        endpoint: Arc::new(endpoint),
+        forwarders: Mutex::new(HashMap::new()),
+    };
+    let recipient = binding.unique_name().clone();
+    shared.forward_watch_signals(&recipient);
+    sender
+        .send(WatchChanged {
+            watch_id: "callback-watch".into(),
+            notice: tinystoragedrivers_bus::WatchNotice::Invalidated { cursor: None },
+        })
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if shared
+                .forwarders
+                .lock()
+                .unwrap()
+                .get(&recipient)
+                .is_some_and(|(_, task)| task.is_finished())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("an inactive binding refuses the attempted callback signal");
+    drop(shared);
+    drop(binding);
+    assert!(weak_binding.upgrade().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_serve_failure_revokes_the_binding_and_shutdown_closes_it() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    let binding = prepare_storage_host_callbacks(&host).await.unwrap();
+    let weak_binding = Arc::downgrade(&binding);
+    let first = serve_with_host_callbacks(
+        Arc::clone(&binding),
+        Arc::new(PerCallerEndpoint::new(|_| None)),
+    )
+    .await
+    .unwrap();
+
+    let duplicate = serve_with_host_callbacks(
+        Arc::clone(&binding),
+        Arc::new(PerCallerEndpoint::new(|_| None)),
+    )
+    .await;
+    assert!(duplicate.is_err());
+    assert!(first.shutdown().await.is_ok());
+    drop(binding);
+    assert!(weak_binding.upgrade().is_none());
 }

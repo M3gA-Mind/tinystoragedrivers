@@ -58,14 +58,17 @@ mod tinybus_transport;
 mod transport;
 
 pub use client::{BusBlobs, BusDocuments, BusKv, BusQueues, BusSecrets, BusStorage, BusStreams};
-pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
+pub use host::{
+    HostFailure, ServedStorage, StorageCall, StorageEndpoint, prepare_storage_host_callbacks,
+    serve, serve_with_host_callbacks,
+};
 pub use loopback::Loopback;
 pub use names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, object_path, watch_path,
 };
 pub use per_caller::PerCallerEndpoint;
 pub use server::StorageServer;
-pub use tinybus_transport::{BusTransport, connect_storage};
+pub use tinybus_transport::{BusTransport, connect_storage, connect_storage_at};
 pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};
 
 #[cfg(test)]

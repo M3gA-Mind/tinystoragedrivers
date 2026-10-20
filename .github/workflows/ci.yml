@@ -195,6 +195,26 @@ jobs:
 
       - name: Verify confidential document callbacks through a real module
         run: bash scripts/test-document-callback.sh
+      - name: Verify all storage callbacks through a real module
+        run: bash scripts/test-storage-callback.sh
+      - name: Format and lint the excluded callback-proof workspace
+        run: |
+          cargo fmt --manifest-path proof-workspaces/storage-callback/Cargo.toml --all -- --check
+          cargo clippy --locked --manifest-path proof-workspaces/storage-callback/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+      - name: Keep the compiled storage module on ports, not engine implementations
+        run: |
+          tree="$(cargo tree --locked --manifest-path proof-workspaces/storage-callback/Cargo.toml -p storage-callback-module-proof --all-features --edges normal,build --prefix none)"
+          members="$(awk '{print $1}' <<<"$tree" | sort -u)"
+          if [[ -z "$members" ]] || ! grep -Fxq storage-callback-module-proof <<<"$members"; then
+            echo "module dependency tree is empty or omitted its root package" >&2
+            exit 1
+          fi
+          for engine in tinystoragedrivers-connect tinystoragedrivers-document tinystoragedrivers-kv tinystoragedrivers-blob tinystoragedrivers-queue tinystoragedrivers-secrets tinystoragedrivers-testkit; do
+            if grep -Fxq "$engine" <<<"$members"; then
+              echo "compiled storage module links engine implementation: ${engine}" >&2
+              exit 1
+            fi
+          done
 
       # These are the only production vocabularies every driver and consumer
       # needs. Exact forward dependency closures make any unreviewed transitive
