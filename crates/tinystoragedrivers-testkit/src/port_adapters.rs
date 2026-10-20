@@ -526,3 +526,566 @@ impl<T: KvStore + ?Sized> KvStore for ConflictOnce<std::sync::Arc<T>> {
         self.inner.put_with_ttl(key, value, ttl).await
     }
 }
+
+#[async_trait]
+impl<T: QueueStore + ?Sized> QueueStore for Slow<std::sync::Arc<T>> {
+    fn features(&self) -> QueueFeatures {
+        self.inner.features()
+    }
+    async fn ensure_queue(&self, q: &str, s: &QueueSpec) -> Result<()> {
+        self.run(self.inner.ensure_queue(q, s)).await
+    }
+    async fn enqueue(
+        &self,
+        q: &str,
+        m: &[tinystoragedrivers_types::NewMessage],
+    ) -> Result<Vec<Enqueued>> {
+        self.run(self.inner.enqueue(q, m)).await
+    }
+    async fn receive(&self, q: &str, n: u32, v: u64, c: &str) -> Result<Vec<Delivery>> {
+        self.run(self.inner.receive(q, n, v, c)).await
+    }
+    async fn ack(&self, q: &str, r: &Receipt) -> Result<bool> {
+        self.run(self.inner.ack(q, r)).await
+    }
+    async fn nack(&self, q: &str, r: &Receipt, retry: Retry) -> Result<bool> {
+        self.run(self.inner.nack(q, r, retry)).await
+    }
+    async fn extend(&self, q: &str, r: &Receipt, v: u64) -> Result<bool> {
+        self.run(self.inner.extend(q, r, v)).await
+    }
+    async fn stats(&self, q: &str) -> Result<QueueStats> {
+        self.run(self.inner.stats(q)).await
+    }
+    async fn dead_letters(&self, q: &str, n: usize) -> Result<Vec<DeadLetter>> {
+        self.run(self.inner.dead_letters(q, n)).await
+    }
+    async fn redrive(&self, q: &str, id: &str) -> Result<bool> {
+        self.run(self.inner.redrive(q, id)).await
+    }
+    async fn purge(&self, q: &str) -> Result<u64> {
+        self.run(self.inner.purge(q)).await
+    }
+}
+
+#[async_trait]
+impl<T: QueueStore + ?Sized> QueueStore for ConflictOnce<std::sync::Arc<T>> {
+    fn features(&self) -> QueueFeatures {
+        self.inner.features()
+    }
+    async fn ensure_queue(&self, q: &str, s: &QueueSpec) -> Result<()> {
+        self.check()?;
+        self.inner.ensure_queue(q, s).await
+    }
+    async fn enqueue(
+        &self,
+        q: &str,
+        m: &[tinystoragedrivers_types::NewMessage],
+    ) -> Result<Vec<Enqueued>> {
+        self.check()?;
+        self.inner.enqueue(q, m).await
+    }
+    async fn receive(&self, q: &str, n: u32, v: u64, c: &str) -> Result<Vec<Delivery>> {
+        self.inner.receive(q, n, v, c).await
+    }
+    async fn ack(&self, q: &str, r: &Receipt) -> Result<bool> {
+        self.check()?;
+        self.inner.ack(q, r).await
+    }
+    async fn nack(&self, q: &str, r: &Receipt, retry: Retry) -> Result<bool> {
+        self.check()?;
+        self.inner.nack(q, r, retry).await
+    }
+    async fn extend(&self, q: &str, r: &Receipt, v: u64) -> Result<bool> {
+        self.check()?;
+        self.inner.extend(q, r, v).await
+    }
+    async fn stats(&self, q: &str) -> Result<QueueStats> {
+        self.inner.stats(q).await
+    }
+    async fn dead_letters(&self, q: &str, n: usize) -> Result<Vec<DeadLetter>> {
+        self.inner.dead_letters(q, n).await
+    }
+    async fn redrive(&self, q: &str, id: &str) -> Result<bool> {
+        self.check()?;
+        self.inner.redrive(q, id).await
+    }
+    async fn purge(&self, q: &str) -> Result<u64> {
+        self.check()?;
+        self.inner.purge(q).await
+    }
+}
+
+#[async_trait]
+impl<T: SecretStore + ?Sized> SecretStore for Slow<std::sync::Arc<T>> {
+    async fn get(&self, n: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.run(self.inner.get(n)).await
+    }
+    async fn get_versioned(&self, n: &str) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        self.run(self.inner.get_versioned(n)).await
+    }
+    async fn set(&self, n: &str, v: &[u8]) -> Result<()> {
+        self.run(self.inner.set(n, v)).await
+    }
+    async fn set_if(&self, n: &str, v: &[u8], c: SecretPrecondition) -> Result<SecretVersion> {
+        self.run(self.inner.set_if(n, v, c)).await
+    }
+    async fn delete(&self, n: &str) -> Result<bool> {
+        self.run(self.inner.delete(n)).await
+    }
+    async fn list(&self, p: &str) -> Result<Vec<String>> {
+        self.run(self.inner.list(p)).await
+    }
+    fn enumerable(&self) -> bool {
+        self.inner.enumerable()
+    }
+    fn backend_name(&self) -> &'static str {
+        self.inner.backend_name()
+    }
+}
+
+#[async_trait]
+impl<T: SecretStore + ?Sized> SecretStore for ConflictOnce<std::sync::Arc<T>> {
+    async fn get(&self, n: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.inner.get(n).await
+    }
+    async fn get_versioned(&self, n: &str) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        self.inner.get_versioned(n).await
+    }
+    async fn set(&self, n: &str, v: &[u8]) -> Result<()> {
+        self.check()?;
+        self.inner.set(n, v).await
+    }
+    async fn set_if(&self, n: &str, v: &[u8], c: SecretPrecondition) -> Result<SecretVersion> {
+        self.check()?;
+        self.inner.set_if(n, v, c).await
+    }
+    async fn delete(&self, n: &str) -> Result<bool> {
+        self.check()?;
+        self.inner.delete(n).await
+    }
+    async fn list(&self, p: &str) -> Result<Vec<String>> {
+        self.inner.list(p).await
+    }
+    fn enumerable(&self) -> bool {
+        self.inner.enumerable()
+    }
+    fn backend_name(&self) -> &'static str {
+        self.inner.backend_name()
+    }
+}
+
+#[async_trait]
+impl<T: StreamStore + ?Sized> StreamStore for Slow<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn append(&self, s: &str, v: Value) -> Result<u64> {
+        self.run(self.inner.append(s, v)).await
+    }
+    async fn append_batch(&self, s: &str, v: Vec<Value>) -> Result<u64> {
+        self.run(self.inner.append_batch(s, v)).await
+    }
+    async fn append_batch_if_offset(&self, s: &str, e: u64, v: Vec<Value>) -> Result<u64> {
+        self.run(self.inner.append_batch_if_offset(s, e, v)).await
+    }
+    async fn read_window(&self, s: &str, f: u64, l: usize) -> Result<Vec<StreamEntry>> {
+        self.run(self.inner.read_window(s, f, l)).await
+    }
+    async fn len(&self, s: &str) -> Result<u64> {
+        self.run(self.inner.len(s)).await
+    }
+    async fn truncate_before(&self, s: &str, o: u64) -> Result<u64> {
+        self.run(self.inner.truncate_before(s, o)).await
+    }
+    async fn delete_stream(&self, s: &str) -> Result<bool> {
+        self.run(self.inner.delete_stream(s)).await
+    }
+    async fn streams(&self, p: &str) -> Result<Vec<String>> {
+        self.run(self.inner.streams(p)).await
+    }
+    async fn seal(&self, s: &str) -> Result<SealOutcome> {
+        self.run(self.inner.seal(s)).await
+    }
+    async fn delete_sealed_stream(&self, s: &str, t: i64) -> Result<bool> {
+        self.run(self.inner.delete_sealed_stream(s, t)).await
+    }
+    async fn info(&self, s: &str) -> Result<Option<StreamInfo>> {
+        self.run(self.inner.info(s)).await
+    }
+}
+
+#[async_trait]
+impl<T: StreamStore + ?Sized> StreamStore for ConflictOnce<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn append(&self, s: &str, v: Value) -> Result<u64> {
+        self.check()?;
+        self.inner.append(s, v).await
+    }
+    async fn append_batch(&self, s: &str, v: Vec<Value>) -> Result<u64> {
+        self.check()?;
+        self.inner.append_batch(s, v).await
+    }
+    async fn append_batch_if_offset(&self, s: &str, e: u64, v: Vec<Value>) -> Result<u64> {
+        self.check()?;
+        self.inner.append_batch_if_offset(s, e, v).await
+    }
+    async fn read_window(&self, s: &str, f: u64, l: usize) -> Result<Vec<StreamEntry>> {
+        self.inner.read_window(s, f, l).await
+    }
+    async fn len(&self, s: &str) -> Result<u64> {
+        self.inner.len(s).await
+    }
+    async fn truncate_before(&self, s: &str, o: u64) -> Result<u64> {
+        self.check()?;
+        self.inner.truncate_before(s, o).await
+    }
+    async fn delete_stream(&self, s: &str) -> Result<bool> {
+        self.check()?;
+        self.inner.delete_stream(s).await
+    }
+    async fn streams(&self, p: &str) -> Result<Vec<String>> {
+        self.inner.streams(p).await
+    }
+    async fn seal(&self, s: &str) -> Result<SealOutcome> {
+        self.check()?;
+        self.inner.seal(s).await
+    }
+    async fn delete_sealed_stream(&self, s: &str, t: i64) -> Result<bool> {
+        self.check()?;
+        self.inner.delete_sealed_stream(s, t).await
+    }
+    async fn info(&self, s: &str) -> Result<Option<StreamInfo>> {
+        self.inner.info(s).await
+    }
+}
+
+#[async_trait]
+impl<T: DocumentStore + ?Sized> DocumentStore for Slow<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn watch(&self, c: &str, f: &Filter, o: &WatchOptions) -> Result<Box<dyn DocumentWatch>> {
+        self.run(self.inner.watch(c, f, o)).await
+    }
+    async fn ensure_collection(&self, s: &CollectionSpec) -> Result<()> {
+        self.run(self.inner.ensure_collection(s)).await
+    }
+    async fn validate_collection_spec(&self, s: &CollectionSpec) -> Result<()> {
+        self.run(self.inner.validate_collection_spec(s)).await
+    }
+    async fn get(&self, c: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        self.run(self.inner.get(c, id)).await
+    }
+    async fn put(&self, c: &str, id: &str, v: Value, p: Precondition) -> Result<Version> {
+        self.run(self.inner.put(c, id, v, p)).await
+    }
+    async fn put_with(
+        &self,
+        c: &str,
+        id: &str,
+        v: Value,
+        p: Precondition,
+        o: WriteOptions,
+    ) -> Result<Version> {
+        self.run(self.inner.put_with(c, id, v, p, o)).await
+    }
+    async fn delete(&self, c: &str, id: &str, p: Precondition) -> Result<bool> {
+        self.run(self.inner.delete(c, id, p)).await
+    }
+    async fn query(&self, c: &str, q: &Query) -> Result<Page<Versioned<Value>>> {
+        self.run(self.inner.query(c, q)).await
+    }
+    async fn count(&self, c: &str, f: &Filter) -> Result<u64> {
+        self.run(self.inner.count(c, f)).await
+    }
+    async fn delete_where(&self, c: &str, f: &Filter) -> Result<u64> {
+        self.run(self.inner.delete_where(c, f)).await
+    }
+    async fn claim(
+        &self,
+        c: &str,
+        f: &Filter,
+        s: &[Sort],
+        p: &Value,
+    ) -> Result<Option<Versioned<Value>>> {
+        self.run(self.inner.claim(c, f, s, p)).await
+    }
+    async fn atomic_batch(&self, o: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        self.run(self.inner.atomic_batch(o)).await
+    }
+    async fn atomic_batch_checked(
+        &self,
+        c: Vec<ReadCheck>,
+        o: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        self.run(self.inner.atomic_batch_checked(c, o)).await
+    }
+    async fn search(&self, c: &str, t: &str, l: usize) -> Result<Vec<SearchHit>> {
+        self.run(self.inner.search(c, t, l)).await
+    }
+    async fn drop_collection(&self, c: &str) -> Result<()> {
+        self.run(self.inner.drop_collection(c)).await
+    }
+    async fn collections(&self, p: &str) -> Result<Vec<String>> {
+        self.run(self.inner.collections(p)).await
+    }
+}
+
+#[async_trait]
+impl<T: DocumentStore + ?Sized> DocumentStore for ConflictOnce<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn watch(&self, c: &str, f: &Filter, o: &WatchOptions) -> Result<Box<dyn DocumentWatch>> {
+        self.inner.watch(c, f, o).await
+    }
+    async fn ensure_collection(&self, s: &CollectionSpec) -> Result<()> {
+        self.check()?;
+        self.inner.ensure_collection(s).await
+    }
+    async fn validate_collection_spec(&self, s: &CollectionSpec) -> Result<()> {
+        self.inner.validate_collection_spec(s).await
+    }
+    async fn get(&self, c: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        self.inner.get(c, id).await
+    }
+    async fn put(&self, c: &str, id: &str, v: Value, p: Precondition) -> Result<Version> {
+        self.check()?;
+        self.inner.put(c, id, v, p).await
+    }
+    async fn put_with(
+        &self,
+        c: &str,
+        id: &str,
+        v: Value,
+        p: Precondition,
+        o: WriteOptions,
+    ) -> Result<Version> {
+        self.check()?;
+        self.inner.put_with(c, id, v, p, o).await
+    }
+    async fn delete(&self, c: &str, id: &str, p: Precondition) -> Result<bool> {
+        self.check()?;
+        self.inner.delete(c, id, p).await
+    }
+    async fn query(&self, c: &str, q: &Query) -> Result<Page<Versioned<Value>>> {
+        self.inner.query(c, q).await
+    }
+    async fn count(&self, c: &str, f: &Filter) -> Result<u64> {
+        self.inner.count(c, f).await
+    }
+    async fn delete_where(&self, c: &str, f: &Filter) -> Result<u64> {
+        self.check()?;
+        self.inner.delete_where(c, f).await
+    }
+    async fn claim(
+        &self,
+        c: &str,
+        f: &Filter,
+        s: &[Sort],
+        p: &Value,
+    ) -> Result<Option<Versioned<Value>>> {
+        self.check()?;
+        self.inner.claim(c, f, s, p).await
+    }
+    async fn atomic_batch(&self, o: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        self.check()?;
+        self.inner.atomic_batch(o).await
+    }
+    async fn atomic_batch_checked(
+        &self,
+        c: Vec<ReadCheck>,
+        o: Vec<WriteOp>,
+    ) -> Result<Vec<WriteResult>> {
+        self.check()?;
+        self.inner.atomic_batch_checked(c, o).await
+    }
+    async fn search(&self, c: &str, t: &str, l: usize) -> Result<Vec<SearchHit>> {
+        self.inner.search(c, t, l).await
+    }
+    async fn drop_collection(&self, c: &str) -> Result<()> {
+        self.check()?;
+        self.inner.drop_collection(c).await
+    }
+    async fn collections(&self, p: &str) -> Result<Vec<String>> {
+        self.inner.collections(p).await
+    }
+}
+
+#[async_trait]
+impl<T: BlobStore + ?Sized> BlobStore for Slow<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn max_key_len(&self) -> usize {
+        self.inner.max_key_len()
+    }
+    async fn put(&self, k: &str, b: Vec<u8>, t: Option<&str>) -> Result<BlobMeta> {
+        self.run(self.inner.put(k, b, t)).await
+    }
+    async fn put_stream(
+        &self,
+        k: &str,
+        r: BlobReader,
+        l: u64,
+        t: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.run(self.inner.put_stream(k, r, l, t)).await
+    }
+    async fn put_expiring(
+        &self,
+        k: &str,
+        b: Vec<u8>,
+        t: Option<&str>,
+        d: Duration,
+    ) -> Result<BlobMeta> {
+        self.run(self.inner.put_expiring(k, b, t, d)).await
+    }
+    async fn put_stream_expiring(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.run(
+            self.inner
+                .put_stream_expiring(key, reader, len, content_type, ttl),
+        )
+        .await
+    }
+    async fn get(&self, k: &str) -> Result<Option<Blob>> {
+        self.run(self.inner.get(k)).await
+    }
+    async fn get_stream(&self, k: &str) -> Result<Option<BlobStream>> {
+        self.run(self.inner.get_stream(k)).await
+    }
+    async fn get_range(&self, k: &str, r: Range<u64>) -> Result<Option<Vec<u8>>> {
+        self.run(self.inner.get_range(k, r)).await
+    }
+    async fn head(&self, k: &str) -> Result<Option<BlobMeta>> {
+        self.run(self.inner.head(k)).await
+    }
+    async fn delete(&self, k: &str) -> Result<bool> {
+        self.run(self.inner.delete(k)).await
+    }
+    async fn list(&self, p: &str) -> Result<Vec<BlobMeta>> {
+        self.run(self.inner.list(p)).await
+    }
+    async fn list_page(&self, p: &str, a: Option<&str>, l: usize) -> Result<BlobListPage> {
+        self.run(self.inner.list_page(p, a, l)).await
+    }
+    async fn sweep_expired(&self) -> Result<u64> {
+        self.run(self.inner.sweep_expired()).await
+    }
+    async fn presign_get(&self, k: &str, d: Duration) -> Result<String> {
+        self.run(self.inner.presign_get(k, d)).await
+    }
+    async fn presign_put(&self, k: &str, d: Duration) -> Result<String> {
+        self.run(self.inner.presign_put(k, d)).await
+    }
+    async fn list_dir(&self, d: &str) -> Result<Vec<TreeEntry>> {
+        self.run(self.inner.list_dir(d)).await
+    }
+    async fn put_tree(&self, d: &str, f: Vec<TreeFile>) -> Result<Vec<BlobMeta>> {
+        self.run(self.inner.put_tree(d, f)).await
+    }
+    async fn delete_tree(&self, d: &str) -> Result<u64> {
+        self.run(self.inner.delete_tree(d)).await
+    }
+}
+
+#[async_trait]
+impl<T: BlobStore + ?Sized> BlobStore for ConflictOnce<std::sync::Arc<T>> {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn max_key_len(&self) -> usize {
+        self.inner.max_key_len()
+    }
+    async fn put(&self, k: &str, b: Vec<u8>, t: Option<&str>) -> Result<BlobMeta> {
+        self.check()?;
+        self.inner.put(k, b, t).await
+    }
+    async fn put_stream(
+        &self,
+        k: &str,
+        r: BlobReader,
+        l: u64,
+        t: Option<&str>,
+    ) -> Result<BlobMeta> {
+        self.check()?;
+        self.inner.put_stream(k, r, l, t).await
+    }
+    async fn put_expiring(
+        &self,
+        k: &str,
+        b: Vec<u8>,
+        t: Option<&str>,
+        d: Duration,
+    ) -> Result<BlobMeta> {
+        self.check()?;
+        self.inner.put_expiring(k, b, t, d).await
+    }
+    async fn put_stream_expiring(
+        &self,
+        key: &str,
+        reader: BlobReader,
+        len: u64,
+        content_type: Option<&str>,
+        ttl: Duration,
+    ) -> Result<BlobMeta> {
+        self.check()?;
+        self.inner
+            .put_stream_expiring(key, reader, len, content_type, ttl)
+            .await
+    }
+    async fn get(&self, k: &str) -> Result<Option<Blob>> {
+        self.inner.get(k).await
+    }
+    async fn get_stream(&self, k: &str) -> Result<Option<BlobStream>> {
+        self.inner.get_stream(k).await
+    }
+    async fn get_range(&self, k: &str, r: Range<u64>) -> Result<Option<Vec<u8>>> {
+        self.inner.get_range(k, r).await
+    }
+    async fn head(&self, k: &str) -> Result<Option<BlobMeta>> {
+        self.inner.head(k).await
+    }
+    async fn delete(&self, k: &str) -> Result<bool> {
+        self.check()?;
+        self.inner.delete(k).await
+    }
+    async fn list(&self, p: &str) -> Result<Vec<BlobMeta>> {
+        self.inner.list(p).await
+    }
+    async fn list_page(&self, p: &str, a: Option<&str>, l: usize) -> Result<BlobListPage> {
+        self.inner.list_page(p, a, l).await
+    }
+    async fn sweep_expired(&self) -> Result<u64> {
+        self.check()?;
+        self.inner.sweep_expired().await
+    }
+    async fn presign_get(&self, k: &str, d: Duration) -> Result<String> {
+        self.inner.presign_get(k, d).await
+    }
+    async fn presign_put(&self, k: &str, d: Duration) -> Result<String> {
+        self.check()?;
+        self.inner.presign_put(k, d).await
+    }
+    async fn list_dir(&self, d: &str) -> Result<Vec<TreeEntry>> {
+        self.inner.list_dir(d).await
+    }
+    async fn put_tree(&self, d: &str, f: Vec<TreeFile>) -> Result<Vec<BlobMeta>> {
+        self.check()?;
+        self.inner.put_tree(d, f).await
+    }
+    async fn delete_tree(&self, d: &str) -> Result<u64> {
+        self.check()?;
+        self.inner.delete_tree(d).await
+    }
+}

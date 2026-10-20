@@ -47,12 +47,23 @@ let kv = Arc::new(tinystoragedrivers_testkit::NoNativeTtl::new(kv));
 assert!(!kv.capabilities().contains(Capability::Ttl));
 ```
 
-`FaultPlan` and `Failing<T>` provide a shared deterministic schedule for
-hand-written test adapters. Wrap each adapter call with
-`failing.call("put", inner.put(...)).await?`; the inner call is skipped when
-the named failure point is reached. `ConflictOnce<T>::call(future)` injects
-one `Conflict` before delegating later calls, which is useful for retry loops.
-`Slow<T>` provides an explicit `before().await` hook (or
-`run(future).await`) for tests that need a deliberately delayed adapter
-operation. `TestClock` supplies manually advanced millisecond time without
-wall-clock races.
+`Failing<T>`, `Slow<T>`, and `ConflictOnce<T>` implement the storage port
+traits, so a consumer can substitute a decorated trait object directly. The
+decorators preserve the wrapped port's capability flags and optional methods.
+For example, retry tests can use `ConflictOnce` as a `KvStore`:
+
+```rust,ignore
+use std::sync::Arc;
+use tinystoragedrivers_api::KvStore;
+use tinystoragedrivers_testkit::ConflictOnce;
+
+let store: Arc<dyn KvStore> = Arc::new(ConflictOnce::new(real_kv));
+```
+
+`ConflictOnce` injects one conflict before its first mutating operation and
+then forwards normally. `Slow` can delay operations or gate them until a test
+releases each one. `Failing<T>` uses a shared `FaultPlan`; clones share the
+same backend and fault schedule, and its trait implementations inject failures
+at named operations such as `kv.put`. The lower-level `call` helper is also
+available for handwritten adapters. `TestClock` supplies manually advanced
+millisecond time without wall-clock races.

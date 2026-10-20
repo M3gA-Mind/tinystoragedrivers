@@ -113,12 +113,21 @@ impl Default for FaultPlan {
 ///
 /// Port decorators use this shared wrapper so multiple primitive handles can
 /// observe the same deterministic fault plan.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Failing<T: ?Sized> {
     /// Wrapped value.
     pub inner: Arc<T>,
     /// Shared fault schedule.
     pub faults: FaultPlan,
+}
+
+impl<T: ?Sized> Clone for Failing<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            faults: self.faults.clone(),
+        }
+    }
 }
 
 impl<T: ?Sized> Failing<T> {
