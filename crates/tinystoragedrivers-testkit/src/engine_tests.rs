@@ -11,6 +11,7 @@ async fn memory_document_and_stream_ports_pass_shared_conformance() {
     super::documents::run(storage.documents().as_ref()).await;
     super::validated::run(storage.documents().as_ref()).await;
     super::conformance::watch::run(storage.documents().as_ref()).await;
+    super::conformance::semantics::run(storage.documents().as_ref()).await;
     super::streams::run(storage.streams().as_ref()).await;
 }
 
@@ -25,5 +26,6 @@ async fn sqlite_document_and_stream_ports_pass_shared_conformance() {
     super::documents::run(&documents).await;
     super::validated::run(&documents).await;
     super::conformance::watch::run(&documents).await;
+    super::conformance::semantics::run(&documents).await;
     super::streams::run(&streams).await;
 }

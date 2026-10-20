@@ -17,9 +17,9 @@ tokio = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tinystoragedrivers-document = { workspace = true, default-features = false, features = ["memory", "sqlite"] }
+tinystoragedrivers-document = { path = "../tinystoragedrivers-document", version = "1.0.0", default-features = false, features = ["memory", "sqlite"] }
 tempfile = { workspace = true }
-tinystoragedrivers-connect = { workspace = true, features = ["sqlite"] }
+tinystoragedrivers-connect = { path = "../tinystoragedrivers-connect", version = "1.0.0", features = ["sqlite"] }
 
 [lints]
 workspace = true

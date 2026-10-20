@@ -5,7 +5,7 @@
 
 mod conformance;
 mod fault;
-pub use conformance::{documents, queue, streams, validated, watch};
+pub use conformance::{documents, queue, semantics, streams, validated, watch};
 mod clock;
 mod no_native_ttl;
 

@@ -13,6 +13,7 @@ use tinystoragedrivers_types::{Capability, ErrorKind, Result};
 
 pub mod documents;
 pub mod queue;
+pub mod semantics;
 pub mod streams;
 pub mod validated;
 pub mod watch;
