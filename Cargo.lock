@@ -3844,6 +3844,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-kv"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "libc",
+ "mongodb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-types",
+ "tokio",
+]
+
+[[package]]
 name = "tinystoragedrivers-mongodb"
 version = "1.0.0"
 dependencies = [

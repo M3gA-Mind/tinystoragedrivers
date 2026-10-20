@@ -276,6 +276,16 @@ jobs:
       - name: Test the driver against MongoDB
         run: cargo test -p tinystoragedrivers-mongodb --all-features
 
+      - name: Check each KV engine feature independently
+        run: |
+          cargo check -p tinystoragedrivers-kv --no-default-features --features memory
+          cargo check -p tinystoragedrivers-kv --no-default-features --features sqlite
+          cargo check -p tinystoragedrivers-kv --no-default-features --features mongodb
+          cargo check -p tinystoragedrivers-kv --no-default-features --features file
+
+      - name: Test KV engines including native MongoDB storage
+        run: cargo test -p tinystoragedrivers-kv --all-features
+
       - name: Test the facade's mongodb feature
         run: cargo test -p tinystoragedrivers --features mongodb
 
