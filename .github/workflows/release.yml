@@ -36,6 +36,10 @@ jobs:
       # The MongoDB driver's `live_*` tests run against this server, and the
       # coverage gate counts them, exactly as in CI.
       TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
+      TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
+      TSD_S3_URL: s3://tsd-test/ci?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A19000
+      AWS_ACCESS_KEY_ID: tsd-test-access
+      AWS_SECRET_ACCESS_KEY: tsd-test-secret
     outputs:
       crate_name: ${{ steps.version.outputs.crate_name }}
       next_version: ${{ steps.version.outputs.next_version }}
@@ -57,10 +61,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Linux Secret Service build and native probe dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libglib2.0-bin dbus gnome-keyring strace
 
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
+
+      - name: Start RabbitMQ for live queue conformance
+        run: .github/scripts/start-rabbitmq.sh 5672
+
+      - name: Start MinIO for live blob conformance and coverage
+        run: .github/scripts/start-minio.sh 19000 tsd-minio-release
 
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
@@ -92,6 +102,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --all-features
+
+      - name: Stop MinIO
+        if: always()
+        run: .github/scripts/stop-minio.sh tsd-minio-release
+
+      - name: Stop RabbitMQ
+        if: always()
+        run: docker rm -f tsd-rabbitmq >/dev/null 2>&1 || true
 
       - name: Compute next version
         id: version

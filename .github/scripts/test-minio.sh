@@ -9,3 +9,4 @@ export TSD_S3_URL="s3://tsd-test/ci?region=us-east-1&endpoint=http%3A%2F%2F127.0
 export AWS_ACCESS_KEY_ID=tsd-test-access
 export AWS_SECRET_ACCESS_KEY=tsd-test-secret
 cargo test --locked -p tinystoragedrivers-blob --no-default-features --features s3
+cargo test --locked -p tinystoragedrivers --no-default-features --features s3

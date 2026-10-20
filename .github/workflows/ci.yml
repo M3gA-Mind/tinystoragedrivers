@@ -129,6 +129,11 @@ jobs:
       TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
       # Likewise the RabbitMQ queue backend's `live_*` tests.
       TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
+      # The facade S3 conformance test must share the MinIO lifetime with the
+      # full-workspace LLVM coverage run below.
+      TSD_S3_URL: s3://tsd-test/ci?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A19000
+      AWS_ACCESS_KEY_ID: tsd-test-access
+      AWS_SECRET_ACCESS_KEY: tsd-test-secret
     steps:
       - uses: actions/checkout@v7
         with:
@@ -152,6 +157,8 @@ jobs:
         run: .github/scripts/start-mongo-replset.sh 27017
       - name: Start RabbitMQ
         run: .github/scripts/start-rabbitmq.sh 5672
+      - name: Start MinIO for facade blob conformance and coverage
+        run: .github/scripts/start-minio.sh 19000 tsd-minio-rust
 
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
@@ -213,6 +220,9 @@ jobs:
           name: coverage-json
           path: coverage.json
           if-no-files-found: ignore
+      - name: Stop MinIO
+        if: always()
+        run: .github/scripts/stop-minio.sh tsd-minio-rust
 
   facade-feature-matrix:
     name: Facade feature matrix
@@ -341,10 +351,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: MinIO conformance, presigned URLs and 500 MiB streaming roundtrip
+      - name: MinIO blob conformance and facade S3 selection
         run: .github/scripts/test-minio.sh
-      - name: Test composite URL selection
-        run: cargo test --locked -p tinystoragedrivers --no-default-features --features s3
 
   docs:
     name: Docs

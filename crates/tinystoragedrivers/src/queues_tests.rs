@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "rabbitmq")]
+use tinystoragedrivers_types::{NewMessage, QueueSpec};
 
 #[test]
 fn parses_storage_and_hides_broker_credentials() {
@@ -44,8 +46,6 @@ async fn configured_rabbitmq_port_preserves_other_ports_and_delivers_messages() 
     let Ok(url) = std::env::var("TSD_RABBITMQ_URL") else {
         return;
     };
-    use tinystoragedrivers_types::{NewMessage, QueueSpec};
-
     let backend = crate::open(&crate::StorageConfig::Memory).await.unwrap();
     let scope = Scope::new(&format!("facade-rabbit-{}", std::process::id())).unwrap();
     let original = backend.for_scope(&scope).unwrap();
