@@ -27,3 +27,7 @@ pub fn map(operation: &'static str, error: rusqlite::Error) -> StorageError {
 pub fn during(operation: &'static str) -> impl Fn(rusqlite::Error) -> StorageError {
     move |error| map(operation, error)
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

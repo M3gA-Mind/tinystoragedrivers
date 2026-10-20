@@ -51,3 +51,7 @@ impl AmqpConnection {
         self.connection.status().connected()
     }
 }
+
+#[cfg(test)]
+#[path = "amqp_tests.rs"]
+mod tests;
