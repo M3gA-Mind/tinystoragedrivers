@@ -3915,6 +3915,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinystoragedrivers-testkit"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-types",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
 name = "tinystoragedrivers-tinybus"
 version = "1.0.0"
 dependencies = [
