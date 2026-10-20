@@ -22,7 +22,7 @@ impl StorageServer {
             }
             "GetVersioned" => {
                 let r: wire::SecretNameRequest = decode(request)?;
-                let found = native(secrets.get_versioned(&r.name).await)?;
+                let found = native_secret(secrets.get_versioned(&r.name).await)?;
                 encode(&found.map(|(value, version)| wire::VersionedSecretValue {
                     value: value.to_vec(),
                     version,
@@ -35,7 +35,7 @@ impl StorageServer {
             }
             "SetIf" => {
                 let r: wire::SetSecretIfRequest = decode(request)?;
-                let version = native(secrets.set_if(&r.name, &r.value, r.condition).await)?;
+                let version = native_secret(secrets.set_if(&r.name, &r.value, r.condition).await)?;
                 encode(&version)
             }
             "Delete" => {

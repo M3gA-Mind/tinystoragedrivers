@@ -3757,6 +3757,7 @@ dependencies = [
  "tinystoragedrivers-core",
  "tinystoragedrivers-file",
  "tinystoragedrivers-mongodb",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
 ]
@@ -3768,6 +3769,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tinybus",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
@@ -3776,27 +3778,15 @@ name = "tinystoragedrivers-busproxy"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures-core",
  "serde",
  "serde_json",
  "tinybus",
  "tinystoragedrivers-api",
  "tinystoragedrivers-bus",
- "tinystoragedrivers-client",
- "tinystoragedrivers-core",
- "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-client"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tinystoragedrivers-api",
- "tinystoragedrivers-bus",
- "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
  "zeroize",
 ]
@@ -3881,6 +3871,7 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
 ]
@@ -3897,6 +3888,26 @@ dependencies = [
  "sha2 0.10.9",
  "tinystoragedrivers-core",
  "tokio",
+]
+
+[[package]]
+name = "tinystoragedrivers-queue"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "data-encoding",
+ "lapin",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
+ "tokio",
+ "ulid",
 ]
 
 [[package]]
@@ -3959,6 +3970,7 @@ dependencies = [
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
  "winapi-util",
@@ -3985,27 +3997,22 @@ dependencies = [
 name = "tinystoragedrivers-testkit"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
  "serde_json",
  "tempfile",
  "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
  "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
+ "tinystoragedrivers-kv",
+ "tinystoragedrivers-queue",
+ "tinystoragedrivers-secrets",
  "tinystoragedrivers-types",
  "tokio",
  "ulid",
-]
-
-[[package]]
-name = "tinystoragedrivers-tinybus"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tinybus",
- "tinystoragedrivers-bus",
- "tinystoragedrivers-core",
- "tokio",
+ "zeroize",
 ]
 
 [[package]]
