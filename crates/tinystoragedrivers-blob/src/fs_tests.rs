@@ -9,6 +9,10 @@ fn test_clock() -> u64 {
     CLOCK.load(Ordering::SeqCst)
 }
 
+fn write_test_clock() -> u64 {
+    500
+}
+
 fn run<F: std::future::Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -22,7 +26,7 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
 fn file_blob_write_keeps_v1_raw_bytes_and_sidecar_shape() {
     let root = tempfile::tempdir().unwrap();
     let store =
-        FileBlobStore::open_with_clock(root.path(), Scope::new("local").unwrap(), test_clock)
+        FileBlobStore::open_with_clock(root.path(), Scope::new("local").unwrap(), write_test_clock)
             .unwrap();
     run(store.put("dir/a.txt", b"legacy bytes".to_vec(), Some("text/plain"))).unwrap();
     let data = root.path().join("scopes/local/blobs/dir%2Fa%2Etxt");
