@@ -51,7 +51,7 @@ impl std::fmt::Debug for FileKv {
         f.debug_struct("FileKv")
             .field("scope", &self.scope)
             .field("directory", &self.directory)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -76,6 +76,7 @@ impl FileKv {
     ///
     /// # Errors
     /// Returns an error if its reserved scope directory cannot be created.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(connection: FileConnection, scope: Scope) -> Result<Self> {
         let scope_name = scope.as_str().to_owned();
         let directory_scope = encode_components(&scope_name);
@@ -120,7 +121,7 @@ impl FileKv {
         write_atomic(&self.path(&record.key), &serde_json::to_vec(record)?)
     }
 
-    fn live<'a>(record: &'a Record, now: u64) -> Option<&'a Value> {
+    fn live(record: &Record, now: u64) -> Option<&Value> {
         (!record.deleted && record.expires_ms.is_none_or(|expires_ms| expires_ms > now))
             .then_some(&record.value)
     }

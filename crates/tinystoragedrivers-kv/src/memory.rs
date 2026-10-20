@@ -51,12 +51,14 @@ impl fmt::Debug for MemoryKv {
 impl MemoryKv {
     /// Create an empty store reading the system clock.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(scope: tinystoragedrivers_types::Scope) -> Self {
         Self::with_clock(scope, Arc::new(system_clock))
     }
 
     /// Create an empty store reading epoch milliseconds from `clock`.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn with_clock(scope: tinystoragedrivers_types::Scope, clock: Clock) -> Self {
         Self {
             scope: scope.as_str().to_owned(),

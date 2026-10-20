@@ -96,11 +96,12 @@ pub(crate) fn validate_limit(limit: usize) -> Result<()> {
 /// Round positive fractional milliseconds up so a value never expires early.
 pub(crate) fn duration_millis(ttl: Duration) -> u64 {
     let millis = ttl.as_millis();
-    let fractional = u128::from(ttl.subsec_nanos() % 1_000_000 != 0);
+    let fractional = u128::from(!ttl.subsec_nanos().is_multiple_of(1_000_000));
     u64::try_from(millis.saturating_add(fractional)).unwrap_or(u64::MAX)
 }
 
-/// Convert a version to SQLite's signed integer representation.
+/// Convert a version to a signed integer representation used by SQL-backed engines.
+#[cfg(any(feature = "sqlite", feature = "mongodb"))]
 pub(crate) fn version_to_i64(version: Version) -> Result<i64> {
     i64::try_from(version.0).map_err(|_| StorageError::backend("key version space is exhausted"))
 }

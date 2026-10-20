@@ -115,6 +115,7 @@ async fn unreachable_mongodb_errors_are_returned_from_each_public_operation() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn live_native_kv_contract() {
     let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
         return;

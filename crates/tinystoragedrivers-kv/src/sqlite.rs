@@ -38,6 +38,7 @@ impl SqliteKv {
     ///
     /// # Errors
     /// Returns an SQLite schema or connection error.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Result<Self> {
         connection.run_now(|conn| {
             conn.execute_batch(&format!(
@@ -245,7 +246,9 @@ impl SqliteKv {
                 .map_err(tinystoragedrivers_connect::sqlite::error::during("write a KV value"))?;
                 tx.commit()
                     .map_err(tinystoragedrivers_connect::sqlite::error::during("commit KV write"))?;
-                Ok(Version(version as u64))
+                Ok(Version(u64::try_from(version).map_err(|_| {
+                    StorageError::backend("key version space is exhausted")
+                })?))
             })
             .await
     }
