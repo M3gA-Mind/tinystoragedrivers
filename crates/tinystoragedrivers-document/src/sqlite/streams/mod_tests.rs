@@ -114,7 +114,7 @@ async fn validates_names_and_surfaces_corrupt_rows() {
         streams.info("").await.unwrap_err().kind(),
         tinystoragedrivers_types::ErrorKind::InvalidInput
     );
-    assert!(streams.read_window("bad", 0, 1).await.unwrap().is_empty());
+    assert_eq!(streams.read_window("bad", 0, 1).await.unwrap(), Vec::new());
     streams.append("bad", serde_json::json!(1)).await.unwrap();
     let tables = connection.tables().clone();
     connection

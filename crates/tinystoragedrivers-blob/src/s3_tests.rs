@@ -54,8 +54,11 @@ fn s3_sealed_blobs_use_reserved_namespace_without_exposing_it_to_users() {
         run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
         1
     );
-    assert!(run(store.list("")).unwrap().is_empty());
-    assert!(run(store.list_page("", None, 10)).unwrap().items.is_empty());
+    assert_eq!(run(store.list("")).unwrap(), Vec::new());
+    assert_eq!(
+        run(store.list_page("", None, 10)).unwrap().items,
+        Vec::new()
+    );
     assert_eq!(
         run(store.get(key)).unwrap_err().kind(),
         ErrorKind::InvalidInput

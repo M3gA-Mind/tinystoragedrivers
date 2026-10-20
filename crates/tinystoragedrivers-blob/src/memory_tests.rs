@@ -128,8 +128,11 @@ fn memory_sealed_blobs_are_scope_bound_and_hidden_from_user_lists() {
         run(store.list_sealed("_tsd/sealed/events/")).unwrap().len(),
         1
     );
-    assert!(run(store.list("")).unwrap().is_empty());
-    assert!(run(store.list_page("", None, 10)).unwrap().items.is_empty());
+    assert_eq!(run(store.list("")).unwrap(), Vec::new());
+    assert_eq!(
+        run(store.list_page("", None, 10)).unwrap().items,
+        Vec::new()
+    );
     assert_eq!(
         run(store.get(key)).unwrap_err().kind(),
         tinystoragedrivers_types::ErrorKind::InvalidInput
