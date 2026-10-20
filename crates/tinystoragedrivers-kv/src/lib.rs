@@ -1,4 +1,5 @@
-//! Native engine implementations of the scope-bound JSON [`KvStore`] port.
+//! Native engine implementations of the scope-bound JSON
+//! [`KvStore`](tinystoragedrivers_api::KvStore) port.
 //!
 //! The default `memory` feature is useful for ephemeral state and tests. The
 //! optional `file`, `sqlite`, and `mongodb` features persist values using
