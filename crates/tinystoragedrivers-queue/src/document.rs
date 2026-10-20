@@ -493,7 +493,7 @@ impl DocumentQueue {
                     _ => Some(GroupLock {
                         queue: queue.to_owned(),
                         owner: id.to_owned(),
-                        until_ms: until,
+                        until_ms: current.map_or(until, |lock| until.max(lock.until_ms)),
                     }),
                 })
             })
@@ -586,6 +586,42 @@ impl DocumentQueue {
         let key = group_key(queue, group)?;
         self.groups.delete_if(&key, |lock| lock.owner == id).await?;
         Ok(())
+    }
+
+    /// Return the version of `id`'s current group lock, if it still owns it.
+    async fn owned_group_version(
+        &self,
+        queue: &str,
+        group: &str,
+        id: &str,
+    ) -> Result<Option<Version>> {
+        let key = group_key(queue, group)?;
+        Ok(self
+            .groups
+            .get(&key)
+            .await?
+            .filter(|lock| lock.doc.owner == id)
+            .map(|lock| lock.version))
+    }
+
+    /// Free a group only if it is still exactly the lock observed while
+    /// settling a receipt. Owner IDs can be reused by a deduped enqueue.
+    async fn free_group_at_version(
+        &self,
+        queue: &str,
+        group: &str,
+        version: Version,
+    ) -> Result<()> {
+        let key = group_key(queue, group)?;
+        match self
+            .docs
+            .delete(GROUPS, &key, Precondition::Version(version))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::Conflict => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn free_group_of(&self, queue: &str, body: &Body, id: &str) -> Result<()> {
@@ -794,6 +830,10 @@ impl QueueStore for DocumentQueue {
             return Ok(false);
         }
         let body = found.doc;
+        let group_version = match &body.group {
+            Some(group) => self.owned_group_version(queue, group, &receipt.id).await?,
+            None => None,
+        };
         let settled = if body.dedupe_key.is_some() && spec.dedupe_window_ms > 0 {
             let tombstone = Body {
                 state: DONE.to_owned(),
@@ -819,7 +859,9 @@ impl QueueStore for DocumentQueue {
         };
         match settled {
             Ok(true) => {
-                self.free_group_of(queue, &body, &receipt.id).await?;
+                if let (Some(group), Some(version)) = (&body.group, group_version) {
+                    self.free_group_at_version(queue, group, version).await?;
+                }
                 Ok(true)
             }
             Ok(false) => Ok(false),
