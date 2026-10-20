@@ -1,3 +1,4 @@
+use super::*;
 use tinystoragedrivers_document::{
     memory::MemoryConnection,
     sqlite::{SqliteDocuments, SqliteStreams},
@@ -8,14 +9,17 @@ use tinystoragedrivers_types::Scope;
 #[tokio::test]
 async fn six_port_memory_storage_uses_real_engines() {
     let scope = Scope::new("testkit_bundle").unwrap();
-    let storage = crate::memory_storage(&scope);
-    super::conformance::documents::run(storage.documents().as_ref()).await;
-    super::conformance::validated::run(storage.documents().as_ref()).await;
-    super::conformance::watch::run(storage.documents().as_ref()).await;
-    super::conformance::semantics::run(storage.documents().as_ref()).await;
-    super::conformance::streams::run(storage.streams().as_ref()).await;
-    super::conformance::seal::run(storage.streams()).await;
-    super::conformance::queue::run(storage.queues().as_ref()).await;
+    let storage = memory_storage(&scope);
+    conformance::documents::run(storage.documents().as_ref()).await;
+    conformance::validated::run(storage.documents().as_ref()).await;
+    conformance::watch::run(storage.documents().as_ref()).await;
+    conformance::semantics::run(storage.documents().as_ref()).await;
+    conformance::streams::run(storage.streams().as_ref()).await;
+    conformance::seal::run(storage.streams()).await;
+    conformance::queue::run(storage.queues().as_ref()).await;
+    conformance::blobs::run(storage.blobs().as_ref()).await;
+    conformance::kv::run(storage.kv().as_ref()).await;
+    conformance::secrets::run(storage.secrets().as_ref()).await;
 
     storage
         .kv()
@@ -46,9 +50,9 @@ async fn six_port_memory_storage_uses_real_engines() {
 async fn memory_backend_caches_and_separates_scope_bundles() {
     use tinystoragedrivers_api::StorageBackend;
 
-    let backend = crate::memory_backend();
-    super::conformance::isolation::run(&backend).await;
-    super::conformance::isolation::nested(&backend).await;
+    let backend = memory_backend();
+    conformance::isolation::run(&backend).await;
+    conformance::isolation::nested(&backend).await;
     let a = backend
         .for_scope(&Scope::new("testkit_a").unwrap())
         .unwrap();
@@ -84,13 +88,13 @@ async fn memory_backend_caches_and_separates_scope_bundles() {
 async fn memory_document_and_stream_ports_pass_shared_conformance() {
     let scope = Scope::new("testkit_memory").unwrap();
     let storage = MemoryConnection::new().for_scope(scope);
-    super::documents::run(storage.documents().as_ref()).await;
-    super::validated::run(storage.documents().as_ref()).await;
-    super::conformance::watch::run(storage.documents().as_ref()).await;
-    super::conformance::semantics::run(storage.documents().as_ref()).await;
-    super::streams::run(storage.streams().as_ref()).await;
+    documents::run(storage.documents().as_ref()).await;
+    validated::run(storage.documents().as_ref()).await;
+    conformance::watch::run(storage.documents().as_ref()).await;
+    conformance::semantics::run(storage.documents().as_ref()).await;
+    streams::run(storage.streams().as_ref()).await;
     let streams = storage.streams();
-    super::conformance::seal::run(&streams).await;
+    conformance::seal::run(&streams).await;
 }
 
 #[tokio::test]
@@ -102,10 +106,10 @@ async fn sqlite_document_and_stream_ports_pass_shared_conformance() {
     let documents = SqliteDocuments::new(connection.clone(), scope.clone());
     let streams = std::sync::Arc::new(SqliteStreams::new(connection, scope))
         as std::sync::Arc<dyn tinystoragedrivers_api::StreamStore>;
-    super::documents::run(&documents).await;
-    super::validated::run(&documents).await;
-    super::conformance::watch::run(&documents).await;
-    super::conformance::semantics::run(&documents).await;
-    super::streams::run(streams.as_ref()).await;
-    super::conformance::seal::run(&streams).await;
+    documents::run(&documents).await;
+    validated::run(&documents).await;
+    conformance::watch::run(&documents).await;
+    conformance::semantics::run(&documents).await;
+    streams::run(streams.as_ref()).await;
+    conformance::seal::run(&streams).await;
 }

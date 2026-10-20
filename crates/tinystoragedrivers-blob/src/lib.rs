@@ -14,6 +14,10 @@ pub use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Scope, TreeEntry, TreeFile,
 };
 
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod testkit_tests;
+
 #[cfg(feature = "fs")]
 mod fs;
 #[cfg(feature = "fs")]

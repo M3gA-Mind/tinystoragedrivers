@@ -1,8 +1,11 @@
 //! Deterministic operation failure schedules shared by port decorators.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use tinystoragedrivers_types::{ErrorKind, StorageError};
@@ -111,17 +114,17 @@ impl Default for FaultPlan {
 /// Port decorators use this shared wrapper so multiple primitive handles can
 /// observe the same deterministic fault plan.
 #[derive(Clone, Debug)]
-pub struct Failing<T> {
+pub struct Failing<T: ?Sized> {
     /// Wrapped value.
-    pub inner: T,
+    pub inner: Arc<T>,
     /// Shared fault schedule.
     pub faults: FaultPlan,
 }
 
-impl<T> Failing<T> {
+impl<T: ?Sized> Failing<T> {
     /// Wraps `inner` with an inactive schedule.
     #[must_use]
-    pub fn new(inner: T) -> Self {
+    pub fn new(inner: Arc<T>) -> Self {
         Self {
             inner,
             faults: FaultPlan::new(),
@@ -130,7 +133,24 @@ impl<T> Failing<T> {
 
     /// Wraps `inner` with a caller-configured schedule.
     #[must_use]
-    pub fn with_plan(inner: T, faults: FaultPlan) -> Self {
+    pub fn with_plan(inner: Arc<T>, faults: FaultPlan) -> Self {
         Self { inner, faults }
+    }
+
+    /// Checks the operation's failure schedule before awaiting its real call.
+    ///
+    /// Handwritten port decorators can use this helper for each API method,
+    /// preserving the wrapped implementation unless the deterministic plan
+    /// injects an error.
+    ///
+    /// # Errors
+    /// Returns the configured injected error when this operation matches.
+    pub async fn call<R>(
+        &self,
+        operation: &str,
+        future: impl Future<Output = tinystoragedrivers_types::Result<R>>,
+    ) -> tinystoragedrivers_types::Result<R> {
+        self.faults.check(operation)?;
+        future.await
     }
 }
