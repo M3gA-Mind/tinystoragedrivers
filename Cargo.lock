@@ -3837,7 +3837,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
  "tokio",
 ]
 
@@ -3852,7 +3851,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
  "tokio",
 ]
 
@@ -3934,7 +3932,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
  "tokio",
  "zstd",
 ]
