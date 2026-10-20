@@ -12,7 +12,7 @@ HostCallbackBinding. No unsafe ABI implementation is copied here.
 The tests require the built artifact; they are neither ignored nor treated as
 passing when it is absent. They cover native CAS/version/missing-document
 results, captured collection/scope, confidential route refusals, attempted
-selectors, revoked bindings and native stale-fence rejection. The module has
+selectors and revoked bindings. The module has
 no storage implementation dependency.
 
 The fixture is a proof of the wire/admission boundary, not TinyMemes business

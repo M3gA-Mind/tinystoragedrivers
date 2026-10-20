@@ -1,5 +1,6 @@
 //! Confidential typed calls.
 use crate::{DeleteRequest, GetRequest, Outcome, PutRequest, Version, Versioned};
+use serde_json::Value;
 /// Module-side client; names alone never grant confidential admission.
 #[derive(Clone, Debug)]
 pub struct DocumentClient(tinybus::Proxy);
@@ -20,7 +21,10 @@ impl DocumentClient {
     ///
     /// # Errors
     /// Transport/admission failures are outer errors; storage failures are inner.
-    pub async fn get(&self, request: GetRequest) -> tinybus::Result<Outcome<Option<Versioned>>> {
+    pub async fn get(
+        &self,
+        request: GetRequest,
+    ) -> tinybus::Result<Outcome<Option<Versioned<Value>>>> {
         self.0.call_confidential("Get", (request,)).await
     }
     /// Atomically write under the supplied condition.

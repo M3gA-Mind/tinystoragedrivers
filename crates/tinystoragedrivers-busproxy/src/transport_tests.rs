@@ -59,6 +59,13 @@ fn remote_failures_keep_their_category_and_other_errors_become_transport() {
         wire_error(tinybus::Error::ConnectionClosed),
         WireError::Transport(_)
     ));
+    assert_eq!(
+        wire_error(tinybus::Error::NotAttested {
+            name: HOST_NAME.parse().unwrap(),
+            reason: "only a loaded module with a verified artifact may receive a secret",
+        }),
+        WireError::NotAttested
+    );
 }
 
 #[test]

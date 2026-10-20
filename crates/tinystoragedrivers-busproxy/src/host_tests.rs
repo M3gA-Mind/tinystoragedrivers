@@ -1,9 +1,11 @@
 use super::*;
 use crate::PerCallerEndpoint;
+use crate::StorageServer;
 use tinybus::{broker::Broker, transport::memory::MemoryBus};
+use tinystoragedrivers_api::StorageBackend;
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
-use tinystoragedrivers_client::StorageServer;
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_testkit::MemoryBackend;
+use tinystoragedrivers_types::Scope;
 
 async fn service(object: Object) -> (ObjectService, Connection) {
     let bus = MemoryBus::new();
@@ -11,10 +13,10 @@ async fn service(object: Object) -> (ObjectService, Connection) {
     let connection = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryBackend::new();
     let endpoint = PerCallerEndpoint::new(move |_| {
         Some(StorageServer::new(
-            backend.for_scope(&Scope::local()).unwrap(),
+            backend.for_scope(&Scope::new("local").unwrap()).unwrap(),
         ))
     });
     let shared = Arc::new(Shared {
@@ -161,10 +163,10 @@ async fn a_released_and_rebound_caller_gets_a_fresh_signal_forwarder() {
     let connection = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
-    let backend = MemoryStorage::new();
+    let backend = MemoryBackend::new();
     let endpoint = Arc::new(PerCallerEndpoint::new(move |_| {
         Some(StorageServer::new(
-            backend.for_scope(&Scope::local()).unwrap(),
+            backend.for_scope(&Scope::new("local").unwrap()).unwrap(),
         ))
     }));
     let shared = Shared {

@@ -19,6 +19,7 @@ mod blobs;
 mod client;
 mod documents;
 mod inline_json;
+mod kv;
 mod limits;
 mod queues;
 mod secrets;
@@ -26,8 +27,8 @@ mod streams;
 mod types;
 pub use blobs::{
     BLOBS_OBJECT, BLOBS_SELECTORS, BlobBody, BlobCapabilities, BlobInfo, BlobKeyRequest,
-    BlobStreamHead, GetRangeRequest, ListBlobsRequest, PresignRequest, PresignedUrl,
-    PutBlobRequest, PutBlobStreamRequest, is_blobs_selector,
+    BlobStreamHead, GetRangeRequest, ListBlobsPageRequest, ListBlobsRequest, PresignRequest,
+    PresignedUrl, PutBlobRequest, PutBlobStreamRequest, is_blobs_selector,
 };
 pub use client::DocumentClient;
 pub use documents::{
@@ -38,6 +39,10 @@ pub use documents::{
     QueryRequest, QueryResponse, ReadCheck, STORAGE_INTERFACE, SearchHit, SearchRequest,
     SearchSpec, Sort, ValidateCollectionSpecRequest, WatchChanged, WatchCloseRequest, WatchNotice,
     WatchOpenRequest, WatchOpenResponse, WatchReset, WriteOp, WriteResult, is_documents_selector,
+};
+pub use kv::{
+    KV_OBJECT, KV_SELECTORS, KvCapabilitiesReply, KvCasRequest, KvDeleteRequest, KvKeyRequest,
+    KvListRequest, KvPutRequest, KvPutWithTtlRequest, is_kv_selector,
 };
 pub use limits::{
     BLOB_STREAM_CHUNK_BYTES, CONTRACT_VERSION, MAX_BATCH_OPS, MAX_FRAME_BYTES,
@@ -52,8 +57,9 @@ pub use queues::{
     RedriveRequest, is_queues_selector,
 };
 pub use secrets::{
-    ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretValue,
-    SetSecretRequest, is_secrets_selector,
+    ListSecretsRequest, SECRETS_OBJECT, SECRETS_SELECTORS, SecretNameRequest, SecretPrecondition,
+    SecretValue, SecretsCapabilitiesReply, SetSecretIfRequest, SetSecretRequest,
+    VersionedSecretValue, is_secrets_selector,
 };
 pub use streams::{
     AppendBatchIfOffsetRequest, AppendBatchRequest, AppendRequest, AppendResponse,

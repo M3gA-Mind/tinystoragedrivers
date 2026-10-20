@@ -1,33 +1,25 @@
 //! The real `TinyBus` transport for the storage bus.
 //!
-//! `tinystoragedrivers-client` turns the storage ports into typed bus messages
-//! and knows nothing about `TinyBus`; this crate is the other half, on both
-//! ends of a connection:
+//! This crate adapts the shared storage ports to `TinyBus` on both ends of a
+//! connection:
 //!
 //! * **Module side.** [`BusTransport`] implements
-//!   [`StorageTransport`](tinystoragedrivers_client::StorageTransport) over a
-//!   [`tinybus::Connection`]: async JSON calls to the
+//!   [`StorageTransport`] over a [`tinybus::Connection`]: async JSON calls to the
 //!   `ai.tinyhumans.tinystorage.Storage` objects, blobs over `tinybus` streams
 //!   in bounded chunks, watch invalidations as signals. [`connect_storage`]
-//!   is the one call a module makes to obtain its
-//!   [`BusStorage`](tinystoragedrivers_client::BusStorage).
-//! * **Host side.** [`serve`] registers the five objects on the host's
+//!   is the one call a module makes to obtain its six-port [`tinystoragedrivers_api::Storage`].
+//! * **Host side.** [`serve`] registers the six objects on the host's
 //!   connection and hands every call, with the broker-authenticated sender, to
 //!   a [`StorageEndpoint`]. [`PerCallerEndpoint`] is the ready-made endpoint
-//!   that binds each caller to its own `StorageServer`; a host that builds
-//!   that server `with_queue_manifest` serves exactly the queues its manifest
-//!   declares.
+//!   that binds each caller to its own `StorageServer` over a host-composed
+//!   `Storage` bundle.
 //!
 //! ```no_run
-//! # async fn module(connection: tinybus::Connection) -> tinystoragedrivers_core::Result<()> {
-//! use tinystoragedrivers_core::{DocumentStore, CollectionSpec};
+//! # async fn module(connection: tinybus::Connection) -> tinystoragedrivers_types::Result<()> {
+//! use tinystoragedrivers_types::CollectionSpec;
 //!
 //! let storage = tinystoragedrivers_busproxy::connect_storage(connection).await?;
-//! let scoped = tinystoragedrivers_core::StorageBackend::for_scope(
-//!     &storage,
-//!     &tinystoragedrivers_busproxy::module_scope_label(),
-//! )?;
-//! scoped.documents().ensure_collection(&CollectionSpec::new("notes")).await?;
+//! storage.documents().ensure_collection(&CollectionSpec::new("notes")).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -55,21 +47,34 @@
 //! * Watch signals are unicast with `Connection::emit_to` to the subscribing
 //!   caller, so a peer that matches the same path or interface never sees them.
 mod chunks;
+mod client;
+mod convert;
 mod host;
+mod loopback;
 mod names;
 mod per_caller;
+mod server;
+mod tinybus_transport;
 mod transport;
 
+pub use client::{BusBlobs, BusDocuments, BusKv, BusQueues, BusSecrets, BusStorage, BusStreams};
 pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
+pub use loopback::Loopback;
 pub use names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, object_path, watch_path,
 };
 pub use per_caller::PerCallerEndpoint;
-pub use transport::{BusTransport, connect_storage, module_scope_label};
+pub use server::StorageServer;
+pub use tinybus_transport::{BusTransport, connect_storage};
+pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};
 
 #[cfg(test)]
 #[path = "bus_tests.rs"]
 mod bus_tests;
+
+mod callback;
+pub use callback::{endpoint, serve_collection};
+
 #[cfg(test)]
-#[path = "watching_fake.rs"]
-mod watching_fake;
+#[path = "ops_tests.rs"]
+mod ops_tests;

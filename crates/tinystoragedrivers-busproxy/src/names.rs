@@ -1,7 +1,7 @@
 //! Where the storage objects live on the bus, and how errors are named.
+use crate::transport::Object;
 use tinybus::{BusName, InterfaceName, MemberName, ObjectPath};
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
-use tinystoragedrivers_client::Object;
 
 /// The well-known name the host owns, and the interface its objects speak.
 pub const HOST_NAME: &str = STORAGE_INTERFACE;

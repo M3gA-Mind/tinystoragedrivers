@@ -8,7 +8,8 @@ pub const MAX_SECRET_NAME_LEN: usize = 256;
 
 /// An opaque revision token for one stored secret. Debug output never exposes
 /// its bytes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct SecretVersion([u8; 32]);
 
 impl SecretVersion {
@@ -38,7 +39,13 @@ impl fmt::Debug for SecretVersion {
 }
 
 /// Condition required by a conditional secret write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "version",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum SecretPrecondition {
     /// The secret must not exist.
     Absent,

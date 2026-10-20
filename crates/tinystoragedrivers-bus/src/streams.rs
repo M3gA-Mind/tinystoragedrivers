@@ -8,7 +8,7 @@ use serde_json::Value;
 /// Streams object name under [`crate::STORAGE_INTERFACE`].
 pub const STREAMS_OBJECT: &str = "Streams";
 /// Finite selector set; servers must reject every other selector.
-pub const STREAMS_SELECTORS: [&str; 10] = [
+pub const STREAMS_SELECTORS: [&str; 11] = [
     "Append",
     "AppendBatch",
     "AppendBatchIfOffset",
@@ -19,6 +19,7 @@ pub const STREAMS_SELECTORS: [&str; 10] = [
     "Streams",
     "Seal",
     "Info",
+    "Capabilities",
 ];
 
 /// Return whether `selector` belongs to the fixed Streams selector set.

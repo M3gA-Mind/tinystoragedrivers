@@ -3,33 +3,40 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tinystoragedrivers_core::*;
+use tinystoragedrivers_api::{DocumentStore, DocumentWatch, async_trait};
+use tinystoragedrivers_types::{
+    CollectionSpec, Filter, Page, Precondition, Query, Result, Sort, StorageError, Version,
+    Versioned, WatchNotice, WatchOptions,
+};
 use tokio::sync::mpsc;
 
 /// The senders of every watch a [`Docs`] opened, in order.
 #[derive(Debug, Default)]
-pub(crate) struct Source(pub Mutex<Vec<mpsc::UnboundedSender<Option<WatchNotice>>>>);
+pub(crate) struct Source(pub Mutex<Vec<mpsc::UnboundedSender<Result<Option<WatchNotice>>>>>);
 
 #[derive(Debug)]
 pub(crate) struct Docs {
     pub inner: Arc<dyn DocumentStore>,
     pub source: Arc<Source>,
+    pub fail_open: bool,
 }
 
 #[derive(Debug)]
-struct Feed(mpsc::UnboundedReceiver<Option<WatchNotice>>);
+struct Feed(mpsc::UnboundedReceiver<Result<Option<WatchNotice>>>);
 
 #[async_trait]
 impl DocumentWatch for Feed {
     async fn next(&mut self) -> Result<Option<WatchNotice>> {
-        Ok(self.0.recv().await.flatten())
+        self.0.recv().await.unwrap_or(Ok(None))
     }
 }
 
 #[async_trait]
 impl DocumentStore for Docs {
-    fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities().with(Capability::Watch)
+    fn capabilities(&self) -> tinystoragedrivers_types::Capabilities {
+        self.inner
+            .capabilities()
+            .with(tinystoragedrivers_types::Capability::Watch)
     }
     async fn watch(
         &self,
@@ -37,12 +44,18 @@ impl DocumentStore for Docs {
         _filter: &Filter,
         _options: &WatchOptions,
     ) -> Result<Box<dyn DocumentWatch>> {
+        if self.fail_open {
+            return Err(StorageError::backend("private native watch failure"));
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         self.source.0.lock().unwrap().push(tx);
         Ok(Box::new(Feed(rx)))
     }
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         self.inner.ensure_collection(spec).await
+    }
+    async fn validate_collection_spec(&self, spec: &CollectionSpec) -> Result<()> {
+        self.inner.validate_collection_spec(spec).await
     }
     async fn get(&self, c: &str, id: &str) -> Result<Option<Versioned<Value>>> {
         self.inner.get(c, id).await

@@ -10,8 +10,8 @@ mod memory;
 pub use memory::{MemoryBackend, memory_backend, memory_storage};
 mod clock;
 mod decorators;
-mod port_adapters;
 mod no_native_ttl;
+mod port_adapters;
 
 pub use clock::TestClock;
 pub use decorators::{ConflictOnce, Slow};
