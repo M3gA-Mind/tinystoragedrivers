@@ -425,3 +425,7 @@ impl DocumentStore for SqliteDocuments {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
