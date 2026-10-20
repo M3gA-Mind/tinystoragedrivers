@@ -3757,6 +3757,7 @@ dependencies = [
  "tinystoragedrivers-core",
  "tinystoragedrivers-file",
  "tinystoragedrivers-mongodb",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
 ]
@@ -3881,6 +3882,7 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
 ]
@@ -3913,6 +3915,7 @@ dependencies = [
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
  "ulid",
@@ -3978,6 +3981,7 @@ dependencies = [
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",
  "winapi-util",
@@ -4004,14 +4008,22 @@ dependencies = [
 name = "tinystoragedrivers-testkit"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
  "serde_json",
  "tempfile",
  "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
  "tinystoragedrivers-connect",
  "tinystoragedrivers-document",
+ "tinystoragedrivers-kv",
+ "tinystoragedrivers-queue",
+ "tinystoragedrivers-secrets",
  "tinystoragedrivers-types",
  "tokio",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]

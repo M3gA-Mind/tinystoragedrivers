@@ -24,13 +24,16 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 tinystoragedrivers-types = { version = "1.0.0", path = "crates/tinystoragedrivers-types" }
 tinystoragedrivers-api = { version = "1.0.0", path = "crates/tinystoragedrivers-api" }
 # Primitive implementations for scope-bound JSON key/value storage.
-tinystoragedrivers-kv = { path = "crates/tinystoragedrivers-kv" }
+tinystoragedrivers-kv = { version = "1.0.0", path = "crates/tinystoragedrivers-kv", default-features = false }
 # Refuse KV symlink reads on Unix file engines.
 libc = "0.2"
 # Shared storage engine connections; primitive crates use feature-specific handles.
-tinystoragedrivers-connect = { path = "crates/tinystoragedrivers-connect" }
+tinystoragedrivers-connect = { version = "1.0.0", path = "crates/tinystoragedrivers-connect", default-features = false }
 # Standalone document and stream engine implementations.
 tinystoragedrivers-document = { version = "1.0.0", path = "crates/tinystoragedrivers-document", default-features = false }
+tinystoragedrivers-blob = { version = "1.0.0", path = "crates/tinystoragedrivers-blob", default-features = false }
+tinystoragedrivers-queue = { version = "1.0.0", path = "crates/tinystoragedrivers-queue", default-features = false }
+tinystoragedrivers-secrets = { version = "1.0.0", path = "crates/tinystoragedrivers-secrets", default-features = false }
 # Pure declarations and transform wire contracts, shared without runtime dependencies.
 tinystoragedrivers-schema = { path = "crates/tinystoragedrivers-schema" }
 # Minimal document wire clients and confined host callbacks; never linked by core.
@@ -68,11 +71,6 @@ tinystoragedrivers-file = { path = "crates/tinystoragedrivers-file" }
 tempfile = "3"
 # The SQLite driver, forwarded by the facade's `sqlite` feature.
 tinystoragedrivers-sqlite = { path = "crates/tinystoragedrivers-sqlite" }
-# The `SecretStore` port and its drivers. The facade forwards it behind its
-# `secrets` feature; kept out of the core so the core links no cryptography.
-tinystoragedrivers-secrets = { path = "crates/tinystoragedrivers-secrets" }
-# Native queue engines, selected by the queue primitive's features.
-tinystoragedrivers-queue = { version = "1.0.0", path = "crates/tinystoragedrivers-queue" }
 # The MongoDB driver. The facade forwards it behind its `mongodb` feature.
 tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
 # The RabbitMQ queue backend. The facade forwards it behind its `rabbitmq`

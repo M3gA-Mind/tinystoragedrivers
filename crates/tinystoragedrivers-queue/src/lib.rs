@@ -56,3 +56,7 @@ fn validate_spec(spec: &QueueSpec) -> tinystoragedrivers_types::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod testkit_tests;

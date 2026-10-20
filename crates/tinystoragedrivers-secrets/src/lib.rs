@@ -89,3 +89,7 @@ pub use tinystoragedrivers_types::{
 /// The `Zeroizing` wrapper every secret value and key is returned in,
 /// re-exported so callers need not name the dependency.
 pub use zeroize::Zeroizing;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod testkit_tests;

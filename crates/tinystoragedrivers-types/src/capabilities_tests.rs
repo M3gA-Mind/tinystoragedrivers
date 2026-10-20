@@ -6,8 +6,8 @@ fn capability_sets_support_all_set_operations_and_stable_iteration() {
     let all = Capabilities::all();
     assert!(all.contains(Capability::Documents));
     assert!(all.contains(Capability::CrossProcessCas));
-    assert!(all.contains(Capability::BlobListing));
     assert!(all.contains(Capability::ConditionalSecretWrites));
+    assert!(all.contains(Capability::BlobListing));
     assert!(all.require(Capability::Documents).is_ok());
     let chosen = all.without(Capability::FullText).with(Capability::Streams);
     assert!(!chosen.contains(Capability::FullText));
