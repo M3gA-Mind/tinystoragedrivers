@@ -70,9 +70,10 @@ async fn renewal_reports_version_space_exhaustion() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalLeases::new(dir.path(), "node-a").unwrap();
     let grant = store.acquire("alice", 1_000).await.unwrap();
-    let mut held = store.held();
-    held.get_mut("alice").unwrap().version = Version(u64::MAX);
-    drop(held);
+    {
+        let mut held = store.held();
+        held.get_mut("alice").unwrap().version = Version(u64::MAX);
+    }
     let overflow = LeaseGrant {
         version: Version(u64::MAX),
         ..grant
