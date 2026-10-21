@@ -41,7 +41,10 @@ keyring = { version = "3", optional = true, features = ["apple-native", "windows
 reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
 bytes = { workspace = true, optional = true }
 base64 = { version = "0.23", optional = true }
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
+# HMAC 0.13 uses digest 0.11; keep its SHA-256 type separate from the 0.10
+# digest used by HKDF and the rest of this crate.
+sha2-hmac = { package = "sha2", version = "0.11", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -78,7 +81,7 @@ winsafe = { version = "0.0.29", default-features = false, features = ["advapi", 
 [features]
 default = []
 # REST transports with authenticated scope context, without heavyweight SDKs.
-kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:chrono"]
+kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:sha2-hmac", "dep:chrono"]
 kms-gcp = ["dep:reqwest", "dep:base64", "dep:bytes"]
 # `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
 # Credential Manager, the Linux kernel keyring).
