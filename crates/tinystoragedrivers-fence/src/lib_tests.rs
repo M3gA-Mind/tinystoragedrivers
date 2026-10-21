@@ -300,6 +300,8 @@ fn retry_hint_is_zero_for_released_and_lapsed_records() {
     };
     assert!(is_live(&live, 1_499));
     assert_eq!(retry_after_ms(&live, 1_000), 500);
+    assert!(!is_live(&live, u64::MAX));
+    assert_eq!(retry_after_ms(&live, u64::MAX), 0);
     assert!(!is_live(&live, 1_500));
     assert_eq!(retry_after_ms(&live, 1_500), 0);
     let released = LeaseRecord {
