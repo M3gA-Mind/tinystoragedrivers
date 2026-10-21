@@ -27,8 +27,10 @@ chacha20poly1305 = "0.11"
 # direct dependency because chacha20poly1305 0.11 no longer reexports OsRng.
 getrandom = "0.4"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = { workspace = true }
+# HKDF 0.13 and HMAC 0.13 use digest 0.11, so both share this SHA-256 type.
+sha2_11 = { package = "sha2", version = "0.11" }
 # Keys, decrypted values and the decrypted secrets map are wiped on drop.
 zeroize = "1"
 # The cross-process advisory lock on `secrets.enc.lock`. It takes the same
@@ -42,9 +44,6 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true
 bytes = { workspace = true, optional = true }
 base64 = { version = "0.23", optional = true }
 hmac = { version = "0.13", optional = true }
-# HMAC 0.13 uses digest 0.11; keep its SHA-256 type separate from the 0.10
-# digest used by HKDF and the rest of this crate.
-sha2-hmac = { package = "sha2", version = "0.11", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -81,7 +80,7 @@ winsafe = { version = "0.0.29", default-features = false, features = ["advapi", 
 [features]
 default = []
 # REST transports with authenticated scope context, without heavyweight SDKs.
-kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:sha2-hmac", "dep:chrono"]
+kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:chrono"]
 kms-gcp = ["dep:reqwest", "dep:base64", "dep:bytes"]
 # `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
 # Credential Manager, the Linux kernel keyring).
