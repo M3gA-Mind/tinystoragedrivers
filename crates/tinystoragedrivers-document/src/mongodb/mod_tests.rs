@@ -13,8 +13,8 @@ use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_api::StreamStore;
 use tinystoragedrivers_connect::MongoConnection;
 use tinystoragedrivers_types::{
-    Capability, CollectionSpec, ExpectedDocument, Filter, Precondition, ReadCheck, Scope,
-    WatchNotice, WatchOptions, WriteCondition, WriteOp, WriteResult,
+    Capability, CollectionSpec, ExpectedDocument, Filter, Precondition, Query, ReadCheck, Scope,
+    WatchNotice, WatchOptions, WriteCondition, WriteOp, WriteOptions, WriteResult,
 };
 
 #[derive(Debug, Default)]
@@ -253,6 +253,98 @@ async fn test_connection(uri: &str, stem: &str) -> MongoConnection {
 }
 
 #[tokio::test]
+async fn conditioned_mongo_handle_checks_body_deadline_and_allows_same_epoch_renewal() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let connection = test_connection(&uri, "tsd59_body_deadline")
+        .await
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let guard_scope = Scope::new("deadline-guard").unwrap();
+    let target_scope = Scope::new("deadline-target").unwrap();
+    let guard = MongoDocuments::new(connection.clone(), guard_scope.clone());
+    guard
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    let version = guard
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1, "expires_at": 150}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition = WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1))
+        .unwrap()
+        .with_valid_until_field("expires_at")
+        .unwrap();
+    let target = MongoDocuments::conditioned(connection.clone(), target_scope, condition).unwrap();
+    target
+        .put(
+            "items",
+            "before-expiry",
+            serde_json::json!({}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+
+    now.store(150, Ordering::SeqCst);
+    assert_eq!(
+        target
+            .put(
+                "items",
+                "expired",
+                serde_json::json!({}),
+                Precondition::None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(guard.get("leases", "writer").await.unwrap().is_some());
+
+    guard
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1, "expires_at": 200}),
+            Precondition::Version(version),
+        )
+        .await
+        .unwrap();
+    target
+        .put(
+            "items",
+            "renewed",
+            serde_json::json!({}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    now.store(200, Ordering::SeqCst);
+    assert_eq!(
+        target
+            .put(
+                "items",
+                "expired-after-renewal",
+                serde_json::json!({}),
+                Precondition::None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn conditioned_stream_sealing_and_deletion_keep_the_guard_at_metadata_mutations() {
     let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
         return;
@@ -335,6 +427,196 @@ async fn conditioned_stream_sealing_and_deletion_keep_the_guard_at_metadata_muta
         tinystoragedrivers_types::ErrorKind::Conflict
     );
     assert!(streams.info("stale-sealed").await.unwrap().is_some());
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "covers conditioned document writes, queries, collection deletion, and takeover"
+)]
+async fn conditioned_documents_guard_direct_writes_and_deletes() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd59_conditioned_documents").await;
+    let guard_scope = Scope::new("condition-guard").unwrap();
+    let target_scope = Scope::new("condition-target").unwrap();
+    let guard_docs = MongoDocuments::new(connection.clone(), guard_scope.clone());
+    let target_docs = MongoDocuments::new(connection.clone(), target_scope.clone());
+    guard_docs
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    target_docs
+        .ensure_collection(&CollectionSpec::new("items"))
+        .await
+        .unwrap();
+    let guard_version = guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let held = MongoDocuments::conditioned(connection.clone(), target_scope, condition).unwrap();
+    assert_eq!(
+        held.ensure_collection(&CollectionSpec::new("forbidden"))
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Unsupported(Capability::ConditionalWrites)
+    );
+    let version = held
+        .put(
+            "items",
+            "one",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.get("items", "one").await.unwrap().unwrap().doc,
+        serde_json::json!({"value": 1})
+    );
+    held.put_with(
+        "items",
+        "two",
+        serde_json::json!({"value": 2, "group": "conditioned"}),
+        Precondition::Absent,
+        WriteOptions {
+            schema: 2,
+            expires_ms: None,
+            created_ms: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        held.query("items", &Query::filter(Filter::eq("group", "conditioned")),)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        held.count("items", &Filter::eq("group", "conditioned"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        held.delete_where("items", &Filter::eq("group", "conditioned"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(held.get("items", "two").await.unwrap().is_none());
+    assert!(
+        held.delete("items", "one", Precondition::Version(version))
+            .await
+            .unwrap()
+    );
+    assert!(held.get("items", "one").await.unwrap().is_none());
+
+    guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 2}),
+            Precondition::Version(guard_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.put(
+            "items",
+            "stale",
+            serde_json::json!({"value": 2}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(held.get("items", "stale").await.unwrap().is_none());
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn conditioned_stream_delete_is_transactional_for_empty_and_live_generations() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd59_conditioned_stream_delete").await;
+    let guard_scope = Scope::new("condition-guard").unwrap();
+    let target_scope = Scope::new("condition-target").unwrap();
+    let guard_docs = MongoDocuments::new(connection.clone(), guard_scope.clone());
+    guard_docs
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    let guard_version = guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let streams = MongoStreams::conditioned(connection.clone(), target_scope, condition).unwrap();
+    assert!(!streams.delete_stream("empty").await.unwrap());
+    assert!(!streams.delete_stream("empty").await.unwrap());
+    streams
+        .append("events", serde_json::json!({"value": "retained"}))
+        .await
+        .unwrap();
+    assert!(streams.delete_stream("events").await.unwrap());
+    assert_eq!(streams.len("events").await.unwrap(), 0);
+    streams
+        .append("events", serde_json::json!({"value": "retained"}))
+        .await
+        .unwrap();
+    streams
+        .append_batch(
+            "truncate",
+            vec![serde_json::json!("remove"), serde_json::json!("keep")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(streams.truncate_before("truncate", 1).await.unwrap(), 1);
+    assert_eq!(
+        streams.read_window("truncate", 0, 10).await.unwrap(),
+        vec![tinystoragedrivers_types::StreamEntry {
+            offset: 1,
+            value: serde_json::json!("keep"),
+        }]
+    );
+
+    guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 2}),
+            Precondition::Version(guard_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        streams.delete_stream("events").await.unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert_eq!(streams.len("events").await.unwrap(), 1);
     connection.database().drop().await.unwrap();
 }
 

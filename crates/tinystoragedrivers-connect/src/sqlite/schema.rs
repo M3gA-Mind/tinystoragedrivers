@@ -177,11 +177,10 @@ impl SqliteTables {
             updated_ms,
             expires_ms,
         };
-        if !condition
-            .filter()
-            .matches_with(condition.id(), &body, &meta)
-        {
-            return Err(StorageError::conflict("write condition no longer matches"));
+        if !condition.matches_at(condition.id(), &body, &meta, now_ms) {
+            return Err(StorageError::conflict(
+                "write condition no longer matches or is expired",
+            ));
         }
         Ok(())
     }

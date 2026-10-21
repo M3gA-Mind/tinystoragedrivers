@@ -114,16 +114,21 @@ impl MongoDocuments {
             .await
             .map_err(|error| transaction_error("read a write condition", error))?
             .ok_or_else(|| StorageError::conflict("write condition document is absent"))?;
+        let now_ms = (self.clock)();
         let row = decode(&record)?
-            .filter(|row| !expired(&spec, row, (self.clock)()))
+            .filter(|row| !expired(&spec, row, now_ms))
             .ok_or_else(|| {
                 StorageError::conflict("write condition document is absent or expired")
             })?;
-        if !condition
-            .filter()
-            .matches_with(&row.id, &row.doc, &row.meta)
-        {
-            return Err(StorageError::conflict("write condition did not match"));
+        if !condition.matches_at(
+            &row.id,
+            &row.doc,
+            &row.meta,
+            i64::try_from(now_ms).unwrap_or(i64::MAX),
+        ) {
+            return Err(StorageError::conflict(
+                "write condition did not match or is expired",
+            ));
         }
 
         // A read-only predicate in a Mongo snapshot transaction can race a

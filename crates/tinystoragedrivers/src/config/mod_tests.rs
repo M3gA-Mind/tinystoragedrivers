@@ -842,6 +842,16 @@ async fn mongo_conditioned_ports_check_the_guard_in_transaction_and_fail_closed_
         .await
         .unwrap();
 
+    let guard_after_accepted_writes = ordinary
+        .documents()
+        .get("leases", "writer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(guard_after_accepted_writes.doc, original_row.doc);
+    assert_eq!(guard_after_accepted_writes.version, original_row.version);
+    assert_eq!(guard_after_accepted_writes.meta, original_row.meta);
+
     ordinary
         .documents()
         .put(

@@ -6,7 +6,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tinystoragedrivers_types::ErrorKind;
+use tinystoragedrivers_api::DocumentStore;
+use tinystoragedrivers_types::{ErrorKind, Filter, Scope, WriteCondition};
 
 #[test]
 fn serialized_record_preserves_json_null_values() {
@@ -292,6 +293,135 @@ async fn live_native_kv_contract() {
     );
     assert_eq!(store.put("p/expiring", json!(4)).await.unwrap(), Version(2));
 
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn conditioned_kv_checks_guard_for_insert_replace_ttl_and_delete_transactions() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let now = Arc::new(AtomicU64::new(10_000));
+    let clock = Arc::clone(&now);
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let database_name = format!("tsd_epic8131_kv_condition_{}_{suffix}", std::process::id());
+    let connection = MongoConnection::connect(&uri, &database_name)
+        .await
+        .unwrap()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let guard_scope = Scope::new("lease-guard").unwrap();
+    let target_scope = Scope::new("conditioned-kv").unwrap();
+    let guard_docs = tinystoragedrivers_document::mongodb::MongoDocuments::new(
+        connection.clone(),
+        guard_scope.clone(),
+    );
+    guard_docs
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    let guard_version = guard_docs
+        .put(
+            "leases",
+            "writer",
+            json!({"epoch": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let factory = MongoKvFactory::new(connection.clone()).await.unwrap();
+    let kv = factory
+        .conditioned_for_scope(&target_scope, condition)
+        .unwrap();
+    assert!(kv.capabilities().contains(Capability::ConditionalWrites));
+    assert_eq!(
+        kv.put("bad\0key", json!(0)).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+
+    let first = kv.put("profile", json!({"enabled": true})).await.unwrap();
+    assert_eq!(first, Version::FIRST);
+    assert_eq!(
+        kv.get("profile").await.unwrap().unwrap().doc,
+        json!({"enabled": true})
+    );
+    let second = kv
+        .cas(
+            "profile",
+            json!({"enabled": false}),
+            Precondition::Version(first),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second, Version(2));
+    assert_eq!(
+        kv.cas("profile", json!(null), Precondition::Version(first))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+
+    assert!(!kv.delete("missing", Precondition::None).await.unwrap());
+    assert_eq!(
+        kv.delete("missing", Precondition::Version(Version::FIRST))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        kv.delete("profile", Precondition::Version(second))
+            .await
+            .unwrap()
+    );
+    assert!(kv.get("profile").await.unwrap().is_none());
+    assert!(!kv.delete("profile", Precondition::None).await.unwrap());
+
+    kv.put_with_ttl("expiring", json!(1), Duration::from_millis(10))
+        .await
+        .unwrap();
+    now.fetch_add(10, Ordering::SeqCst);
+    assert!(kv.get("expiring").await.unwrap().is_none());
+    assert!(!kv.delete("expiring", Precondition::None).await.unwrap());
+    assert_eq!(kv.put("expiring", json!(2)).await.unwrap(), Version(2));
+
+    guard_docs
+        .put(
+            "leases",
+            "writer",
+            json!({"epoch": 2}),
+            Precondition::Version(guard_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        kv.put("after-takeover", json!(true))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        kv.delete("expiring", Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        factory
+            .for_scope(&target_scope)
+            .get("after-takeover")
+            .await
+            .unwrap()
+            .is_none()
+    );
     connection.database().drop().await.unwrap();
 }
 
