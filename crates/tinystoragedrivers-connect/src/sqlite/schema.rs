@@ -30,7 +30,7 @@
 //! `doc_fields` sub-select of a keyset cursor, and it goes through [`literal`].
 
 use rusqlite::{Connection, OptionalExtension};
-use tinystoragedrivers_types::{Meta, Result, StorageError, WriteCondition};
+use tinystoragedrivers_types::{CollectionSpec, Meta, Result, StorageError, WriteCondition, value};
 
 use super::error::during;
 
@@ -128,7 +128,7 @@ impl SqliteTables {
                 "write condition document is expired",
             ));
         }
-        let body = match body {
+        let body: serde_json::Value = match body {
             rusqlite::types::Value::Text(text) => serde_json::from_str(&text)?,
             rusqlite::types::Value::Blob(bytes) => {
                 let Some((&1, compressed)) = bytes.split_first() else {
@@ -141,6 +141,36 @@ impl SqliteTables {
             }
             _ => return Err(StorageError::backend("corrupt conditional document body")),
         };
+        let spec_sql = format!("SELECT spec FROM {} WHERE coll=?1", ident(&self.specs));
+        let spec_json = conn
+            .query_row(&spec_sql, [condition.collection()], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(during("read condition collection spec"))?;
+        let spec = match spec_json {
+            Some(json) => serde_json::from_str::<CollectionSpec>(&json)?,
+            None => CollectionSpec::new(condition.collection()),
+        };
+        let ttl_expired = spec
+            .ttl_field
+            .as_deref()
+            .and_then(|field| value::lookup(&body, field))
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|expires| {
+                // Epoch milliseconds remain exactly representable at current dates.
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "epoch milliseconds are far below 2^53"
+                )]
+                let now = now_ms as f64;
+                expires <= now
+            });
+        if ttl_expired {
+            return Err(StorageError::conflict(
+                "write condition document is expired",
+            ));
+        }
         let meta = Meta {
             schema,
             created_ms,

@@ -2,9 +2,62 @@ use super::*;
 use tempfile::tempdir;
 use tinystoragedrivers_api::{DocumentStore, StreamStore};
 use tinystoragedrivers_types::{
-    Capability, CollectionSpec, ExpectedDocument, IndexSpec, Precondition, Query, ReadCheck, Scope,
-    Sort, WriteOp,
+    Capability, CollectionSpec, ExpectedDocument, Filter, IndexSpec, Precondition, Query,
+    ReadCheck, Scope, Sort, WriteCondition, WriteOp,
 };
+
+#[tokio::test]
+async fn conditional_write_rejects_guard_expired_by_collection_ttl() {
+    let directory = tempdir().unwrap();
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open_with_clock(
+        directory.path(),
+        std::sync::Arc::new(|| 100),
+    )
+    .unwrap();
+    let guard_scope = Scope::new("ttl-guard").unwrap();
+    let target_scope = Scope::new("ttl-target").unwrap();
+    let ordinary = SqliteDocuments::new(connection.clone(), guard_scope.clone());
+    ordinary
+        .ensure_collection(&CollectionSpec::new("leases").ttl("expires_at"))
+        .await
+        .unwrap();
+    ordinary
+        .put(
+            "leases",
+            "owner",
+            serde_json::json!({"holder": "worker", "expires_at": 99}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    assert!(ordinary.get("leases", "owner").await.unwrap().is_none());
+
+    let condition = WriteCondition::new(
+        guard_scope,
+        "leases",
+        "owner",
+        Filter::eq("holder", "worker"),
+    )
+    .unwrap();
+    let conditioned = SqliteDocuments::conditioned(connection, target_scope, condition);
+    let error = conditioned
+        .put(
+            "items",
+            "must-not-write",
+            serde_json::json!({"value": true}),
+            Precondition::None,
+        )
+        .await
+        .expect_err("a TTL-expired guard must not authorize a mutation");
+    assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    assert!(
+        conditioned
+            .get("items", "must-not-write")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn document_and_stream_engines_share_the_connection_and_scope() {
