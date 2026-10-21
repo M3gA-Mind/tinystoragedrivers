@@ -15,7 +15,7 @@ fn selectors(object: Object) -> Vec<&'static str> {
             .collect(),
         Object::Streams => tinystoragedrivers_bus::STREAMS_SELECTORS.to_vec(),
         Object::Secrets => tinystoragedrivers_bus::SECRETS_SELECTORS.to_vec(),
-        Object::Blobs => vec![],
+        Object::Blobs | Object::Queues => vec![],
     }
 }
 fn path(root: &ObjectPath, object: Object) -> tinybus::Result<ObjectPath> {
