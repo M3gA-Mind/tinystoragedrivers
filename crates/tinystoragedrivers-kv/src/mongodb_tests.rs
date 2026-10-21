@@ -82,6 +82,18 @@ fn persisted_record_validation_and_mongo_error_mapping_are_typed() {
     assert!(mapped.message().contains("MongoDB could not read a value"));
 }
 
+#[test]
+fn transaction_error_keeps_ambiguous_mongo_failure_unavailable() {
+    let error = transaction_error(mongodb::error::Error::custom("ambiguous commit"));
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(
+        error
+            .message()
+            .contains("commit a conditioned KV transaction")
+    );
+    assert!(std::error::Error::source(&error).is_some());
+}
+
 #[tokio::test]
 async fn unreachable_mongodb_errors_are_returned_from_each_public_operation() {
     let uri = "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=25&connectTimeoutMS=25";

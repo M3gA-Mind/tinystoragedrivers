@@ -18,6 +18,20 @@ fn mongo_error_adapter_keeps_operation_context_and_hides_driver_details() {
 }
 
 #[test]
+fn transaction_error_preserves_ambiguous_mongo_failure_as_unavailable() {
+    let error = transaction_error(
+        "commit a conditioned write",
+        mongodb::error::Error::custom("ambiguous network failure"),
+    );
+    assert_eq!(
+        error.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(error.message().contains("commit a conditioned write"));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
 fn definite_write_conflicts_are_retryable_but_ambiguous_commits_are_not() {
     assert!(is_definite_transaction_conflict(Some(112), false, false));
     assert!(is_definite_transaction_conflict(None, true, false));

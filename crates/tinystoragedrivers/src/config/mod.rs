@@ -419,6 +419,13 @@ impl CompositeBackend {
         }
     }
 
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "mongodb")),
+        allow(
+            clippy::unnecessary_wraps,
+            reason = "engine-enabled builds can fail while opening a scope; keep one backend contract across feature sets"
+        )
+    )]
     fn open_scope(&self, scope: &tinystoragedrivers_types::Scope) -> Result<Storage> {
         use std::sync::Arc;
         use tinystoragedrivers_api::Storage;
@@ -596,6 +603,10 @@ impl CompositeBackend {
     }
 
     #[cfg(not(any(feature = "sqlite", feature = "mongodb")))]
+    #[allow(
+        clippy::unused_self,
+        reason = "the memory-only build has no engine to condition, while this method must implement the shared backend contract"
+    )]
     fn open_conditioned_scope(
         &self,
         _scope: &Scope,

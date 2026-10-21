@@ -345,6 +345,53 @@ async fn conditioned_mongo_handle_checks_body_deadline_and_allows_same_epoch_ren
 }
 
 #[tokio::test]
+async fn conditioned_writes_reject_guards_expired_by_collection_ttl() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let connection = test_connection(&uri, "tsd59_guard_collection_ttl")
+        .await
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let guard_scope = Scope::new("ttl-guard").unwrap();
+    let guard_docs = MongoDocuments::new(connection.clone(), guard_scope.clone());
+    guard_docs
+        .ensure_collection(&CollectionSpec::new("leases").ttl("expires_at"))
+        .await
+        .unwrap();
+    guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1, "expires_at": 100}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let target = MongoDocuments::conditioned(
+        connection.clone(),
+        Scope::new("ttl-target").unwrap(),
+        condition,
+    )
+    .unwrap();
+
+    assert_eq!(
+        target
+            .put("items", "denied", serde_json::json!({}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(target.get("items", "denied").await.unwrap().is_none());
+    assert!(guard_docs.get("leases", "writer").await.unwrap().is_none());
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn conditioned_stream_sealing_and_deletion_keep_the_guard_at_metadata_mutations() {
     let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
         return;
@@ -378,6 +425,8 @@ async fn conditioned_stream_sealing_and_deletion_keep_the_guard_at_metadata_muta
         .await
         .unwrap();
     streams.seal("removed-while-current").await.unwrap();
+    let repeated_seal = streams.seal("removed-while-current").await.unwrap();
+    assert_eq!(repeated_seal.len, 1);
     let live_sealed_ms = streams
         .info("removed-while-current")
         .await
