@@ -646,6 +646,20 @@ pub async fn serve_at_address(
     address: StorageAddress,
     endpoint: Arc<dyn StorageEndpoint>,
 ) -> tinybus::Result<ServedStorage> {
+    serve_at_address_with_registration_hook(connection, address, endpoint, |_| async {})
+        .await
+}
+
+async fn serve_at_address_with_registration_hook<F, Fut>(
+    connection: &Connection,
+    address: StorageAddress,
+    endpoint: Arc<dyn StorageEndpoint>,
+    mut after_registration: F,
+) -> tinybus::Result<ServedStorage>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     if connection.unique_name().as_ref() != Some(address.host()) {
         return Err(tinybus::Error::failed(
             "storage address host does not match this connection",
@@ -667,7 +681,7 @@ pub async fn serve_at_address(
         forwarders: Mutex::new(HashMap::new()),
     });
     let mut registered = Vec::new();
-    for (object, path) in ALL.into_iter().zip(paths.iter()) {
+    for (index, (object, path)) in ALL.into_iter().zip(paths.iter()).enumerate() {
         if let Err(error) = connection
             .try_serve_at(
                 path.clone(),
@@ -684,6 +698,7 @@ pub async fn serve_at_address(
             return Err(error);
         }
         registered.push(path.clone());
+        after_registration(index).await;
     }
     Ok(ServedStorage {
         mode: ServedMode::Addressed {
