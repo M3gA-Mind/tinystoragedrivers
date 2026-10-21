@@ -640,7 +640,7 @@ pub async fn serve(
 ///
 /// # Errors
 /// The host identity does not match the connection or `TinyBus` refuses a path
-/// registration.
+/// registration because an interface already owns it.
 pub async fn serve_at_address(
     connection: &Connection,
     address: StorageAddress,
