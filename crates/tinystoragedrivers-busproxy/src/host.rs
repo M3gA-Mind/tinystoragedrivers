@@ -669,7 +669,7 @@ where
         .into_iter()
         .map(|object| address.port_path(object).clone())
         .collect();
-    let active = Arc::new(AtomicBool::new(true));
+    let active = Arc::new(AtomicBool::new(false));
     let transport = HostTransport::Addressed {
         connection: connection.downgrade(),
         watch_path: address.watch_path().clone(),
@@ -700,6 +700,7 @@ where
         registered.push(path.clone());
         after_registration(index).await;
     }
+    active.store(true, Ordering::Release);
     Ok(ServedStorage {
         mode: ServedMode::Addressed {
             connection: connection.downgrade(),
