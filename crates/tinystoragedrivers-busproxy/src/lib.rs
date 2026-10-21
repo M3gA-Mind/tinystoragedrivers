@@ -46,6 +46,7 @@
 //!   another peer is refused and stays available to its owner.
 //! * Watch signals are unicast with `Connection::emit_to` to the subscribing
 //!   caller, so a peer that matches the same path or interface never sees them.
+mod address;
 mod chunks;
 mod client;
 mod convert;
@@ -57,10 +58,11 @@ mod server;
 mod tinybus_transport;
 mod transport;
 
+pub use address::{INVOCATION_OBJECT_ROOT, StorageAddress};
 pub use client::{BusBlobs, BusDocuments, BusKv, BusQueues, BusSecrets, BusStorage, BusStreams};
 pub use host::{
     HostFailure, ServedStorage, StorageCall, StorageEndpoint, prepare_storage_host_callbacks,
-    serve, serve_with_host_callbacks,
+    serve, serve_at_address, serve_with_host_callbacks,
 };
 pub use loopback::Loopback;
 pub use names::{
@@ -68,7 +70,9 @@ pub use names::{
 };
 pub use per_caller::PerCallerEndpoint;
 pub use server::StorageServer;
-pub use tinybus_transport::{BusTransport, connect_storage, connect_storage_at};
+pub use tinybus_transport::{
+    BusTransport, connect_storage, connect_storage_at, connect_storage_at_address,
+};
 pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};
 
 #[cfg(test)]
