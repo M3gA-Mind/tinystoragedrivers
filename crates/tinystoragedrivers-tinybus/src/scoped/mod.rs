@@ -159,5 +159,5 @@ impl ScopedService {
 }
 
 #[cfg(test)]
-#[path = "scoped_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;

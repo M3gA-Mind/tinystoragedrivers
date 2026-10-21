@@ -11,6 +11,8 @@
 //!   in bounded chunks, watch invalidations as signals. [`connect_storage`]
 //!   is the one call a module makes to obtain its
 //!   [`BusStorage`](tinystoragedrivers_client::BusStorage).
+//!   [`connect_scoped_storage`] connects to an exact-instance route that the
+//!   host has already admitted and bound to confidential callback endpoints.
 //! * **Host side.** [`serve`] registers the five objects on the host's
 //!   connection and hands every call, with the broker-authenticated sender, to
 //!   a [`StorageEndpoint`]. [`PerCallerEndpoint`] is the ready-made endpoint
@@ -28,6 +30,20 @@
 //!     &tinystoragedrivers_busproxy::module_scope_label(),
 //! )?;
 //! scoped.documents().ensure_collection(&CollectionSpec::new("notes")).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A module that receives an exact-instance route uses the scoped connector
+//! for the host's finite documents, streams and secrets profile:
+//!
+//! ```no_run
+//! # async fn module(
+//! #     connection: tinybus::Connection,
+//! #     route: tinystoragedrivers_schema::ScopedStorageRoute,
+//! # ) -> tinystoragedrivers_core::Result<()> {
+//! let storage = tinystoragedrivers_busproxy::connect_scoped_storage(connection, route).await?;
+//! let _documents = storage.documents();
 //! # Ok(())
 //! # }
 //! ```

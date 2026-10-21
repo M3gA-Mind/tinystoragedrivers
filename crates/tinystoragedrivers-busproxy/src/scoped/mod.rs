@@ -115,5 +115,5 @@ pub async fn connect_scoped_storage(
 }
 
 #[cfg(test)]
-#[path = "scoped_tests.rs"]
+#[path = "mod_tests.rs"]
 mod tests;
