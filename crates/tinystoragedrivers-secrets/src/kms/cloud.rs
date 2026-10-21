@@ -373,8 +373,8 @@ fn signature(
 }
 #[cfg(feature = "kms-aws")]
 fn mac(key: &[u8], data: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key)
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2_hmac::Sha256>::new_from_slice(key)
         .map_err(|_| StorageError::crypto("aws signing failed"))?;
     mac.update(data);
     Ok(Zeroizing::new(mac.finalize().into_bytes().into()))

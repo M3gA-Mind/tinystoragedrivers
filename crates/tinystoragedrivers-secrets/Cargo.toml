@@ -21,9 +21,11 @@ serde_json = { workspace = true }
 # prompt), so they run on the runtime's blocking pool when one is present.
 tokio = { workspace = true }
 # The AEAD OpenHuman already uses for `enc2:` values and `secrets.enc`; the same
-# crate and version keeps existing ciphertext decrypting byte-for-byte. Its
-# default `getrandom` feature supplies the OS nonce and key generator.
-chacha20poly1305 = "0.10"
+# crate and version keeps existing ciphertext decrypting byte-for-byte.
+chacha20poly1305 = "0.11"
+# Fallible OS randomness for encryption nonces and generated keys. This is a
+# direct dependency because chacha20poly1305 0.11 no longer reexports OsRng.
+getrandom = "0.4"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
 hkdf = "0.12"
 sha2 = { workspace = true }
@@ -39,7 +41,10 @@ keyring = { version = "3", optional = true, features = ["apple-native", "windows
 reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
 bytes = { workspace = true, optional = true }
 base64 = { version = "0.23", optional = true }
-hmac = { version = "0.12", optional = true }
+hmac = { version = "0.13", optional = true }
+# HMAC 0.13 uses digest 0.11; keep its SHA-256 type separate from the 0.10
+# digest used by HKDF and the rest of this crate.
+sha2-hmac = { package = "sha2", version = "0.11", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -76,7 +81,7 @@ winsafe = { version = "0.0.29", default-features = false, features = ["advapi", 
 [features]
 default = []
 # REST transports with authenticated scope context, without heavyweight SDKs.
-kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:chrono"]
+kms-aws = ["dep:reqwest", "dep:base64", "dep:bytes", "dep:hmac", "dep:sha2-hmac", "dep:chrono"]
 kms-gcp = ["dep:reqwest", "dep:base64", "dep:bytes"]
 # `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
 # Credential Manager, the Linux kernel keyring).
