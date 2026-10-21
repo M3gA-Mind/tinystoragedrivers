@@ -18,10 +18,44 @@ struct SignalEndpoint {
 
 struct ReplyEndpoint(Value);
 
+struct CountingEndpoint(Arc<AtomicU64>);
+
 #[async_trait::async_trait]
 impl StorageEndpoint for ReplyEndpoint {
     async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
         Ok(self.0.clone())
+    }
+
+    async fn put_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _head: PutBlobStreamRequest,
+        _body: tinystoragedrivers_api::BlobReader,
+    ) -> Result<Value, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    async fn get_blob_stream(
+        &self,
+        _sender: Option<&BusName>,
+        _request: BlobKeyRequest,
+    ) -> Result<Option<(BlobStreamHead, tinystoragedrivers_api::BlobReader)>, HostFailure> {
+        Err(HostFailure::Denied("test-endpoint"))
+    }
+
+    fn watch_signals(
+        &self,
+        _sender: &BusName,
+    ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageEndpoint for CountingEndpoint {
+    async fn call(&self, _call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(json!("called"))
     }
 
     async fn put_blob_stream(
@@ -478,6 +512,75 @@ async fn partial_address_registration_rolls_back_only_new_paths_and_preserves_si
     host.unserve(&blobs_path).await;
     host.unserve(&documents_path).await;
     host.unserve(&streams_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partially_registered_address_does_not_dispatch_before_all_paths_are_claimed() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let fixed = serve(&host, Arc::new(ReplyEndpoint(json!("fixed-service"))))
+        .await
+        .unwrap();
+    let address = addressed(&host, "registration_window");
+    let blobs_path = address.port_path(Object::Blobs).clone();
+    host.serve_at(
+        blobs_path.clone(),
+        MarkerInterface("late-unrelated-interface"),
+    )
+    .await
+    .unwrap();
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+    let mut registered_tx = Some(registered_tx);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_registration = Arc::clone(&release);
+    let registration_host = host.clone();
+    let result = tokio::spawn(serve_at_address_with_registration_hook(
+        &registration_host,
+        address.clone(),
+        Arc::new(CountingEndpoint(Arc::clone(&calls))),
+        move |index| {
+            let release = Arc::clone(&release_registration);
+            let registered = (index == 0)
+                .then(|| registered_tx.take())
+                .flatten();
+            async move {
+                if let Some(registered) = registered {
+                    registered
+                        .send(())
+                        .expect("registration observer should still be listening");
+                    release.notified().await;
+                }
+            }
+        },
+    ));
+
+    registered_rx.await.unwrap();
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err(),
+        "the first claimed path stays inactive until later paths are claimed"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    release.notify_one();
+    assert!(result.await.unwrap().is_err());
+    assert!(call_addressed(&caller, &address, Object::Documents)
+        .await
+        .is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
+
+    fixed.shutdown().await.unwrap();
+    host.unserve(&blobs_path).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
