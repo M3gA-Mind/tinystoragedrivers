@@ -3882,6 +3882,7 @@ dependencies = [
  "chrono",
  "clack-private-fs",
  "fs4",
+ "getrandom 0.4.3",
  "hkdf",
  "hmac 0.12.1",
  "keyring",

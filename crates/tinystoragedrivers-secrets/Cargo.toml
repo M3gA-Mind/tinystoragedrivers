@@ -21,9 +21,11 @@ serde_json = { workspace = true }
 # prompt), so they run on the runtime's blocking pool when one is present.
 tokio = { workspace = true }
 # The AEAD OpenHuman already uses for `enc2:` values and `secrets.enc`; the same
-# crate and version keeps existing ciphertext decrypting byte-for-byte. Its
-# default `getrandom` feature supplies the OS nonce and key generator.
+# crate and version keeps existing ciphertext decrypting byte-for-byte.
 chacha20poly1305 = "0.11"
+# Fallible OS randomness for encryption nonces and generated keys. This is a
+# direct dependency because chacha20poly1305 0.11 no longer reexports OsRng.
+getrandom = "0.4"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
 hkdf = "0.12"
 sha2 = { workspace = true }
