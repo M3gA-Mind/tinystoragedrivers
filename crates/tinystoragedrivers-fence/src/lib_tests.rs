@@ -242,7 +242,12 @@ async fn local_lock_and_epoch_migrate_from_the_existing_host_format() {
     let root = tempfile::tempdir().unwrap();
     let key = "alice";
     let digest = sha2::Sha256::digest(key.as_bytes());
-    let dir = root.path().join(format!("{digest:x}"));
+    let mut digest_hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut digest_hex, "{byte:02x}").unwrap();
+    }
+    let dir = root.path().join(digest_hex);
     std::fs::create_dir_all(&dir).unwrap();
     let old_lock = std::fs::OpenOptions::new()
         .create(true)

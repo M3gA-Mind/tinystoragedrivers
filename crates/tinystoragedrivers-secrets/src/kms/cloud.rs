@@ -268,7 +268,7 @@ impl AwsKms {
         })
     }
     async fn request(&self, operation: &str, body: SensitiveJson) -> Result<SensitiveJson> {
-        use sha2::{Digest, Sha256};
+        use sha2_11::{Digest, Sha256};
         let creds = self.credentials.credentials().await?;
         let suffix = if self.region.starts_with("cn-") {
             "amazonaws.com.cn"
@@ -334,7 +334,7 @@ fn canonical_request(
     headers: &std::collections::BTreeMap<&str, String>,
     payload: &[u8],
 ) -> (Zeroizing<String>, String) {
-    use sha2::{Digest, Sha256};
+    use sha2_11::{Digest, Sha256};
     let signed = headers.keys().copied().collect::<Vec<_>>().join(";");
     let mut canonical_headers = Zeroizing::new(String::new());
     for (name, value) in headers {

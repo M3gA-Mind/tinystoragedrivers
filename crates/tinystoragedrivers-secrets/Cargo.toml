@@ -28,7 +28,6 @@ chacha20poly1305 = "0.11"
 getrandom = "0.4"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
 hkdf = "0.13"
-sha2 = { workspace = true }
 # HKDF 0.13 and HMAC 0.13 use digest 0.11, so both share this SHA-256 type.
 sha2_11 = { package = "sha2", version = "0.11" }
 # Keys, decrypted values and the decrypted secrets map are wiped on drop.
