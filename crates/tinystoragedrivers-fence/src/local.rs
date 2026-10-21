@@ -339,3 +339,7 @@ impl LeaseStore for LocalLeases {
 fn storage_io(error: std::io::Error) -> StorageError {
     StorageError::backend("local lease file operation failed").with_source(error)
 }
+
+#[cfg(test)]
+#[path = "local_tests.rs"]
+mod tests;
