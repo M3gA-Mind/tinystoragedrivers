@@ -640,7 +640,7 @@ pub async fn serve(
 ///
 /// # Errors
 /// The host identity does not match the connection or `TinyBus` refuses a path
-/// registration.
+/// registration because an interface already owns it.
 pub async fn serve_at_address(
     connection: &Connection,
     address: StorageAddress,
@@ -669,7 +669,7 @@ pub async fn serve_at_address(
     let mut registered = Vec::new();
     for (object, path) in ALL.into_iter().zip(paths.iter()) {
         if let Err(error) = connection
-            .serve_at(
+            .try_serve_at(
                 path.clone(),
                 ObjectService {
                     object,
