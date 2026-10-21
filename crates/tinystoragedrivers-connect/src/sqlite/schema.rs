@@ -96,91 +96,89 @@ impl SqliteTables {
         condition: &WriteCondition,
         now_ms: i64,
     ) -> Result<()> {
-        let sql = format!(
-            "SELECT schema, created_ms, updated_ms, expires_ms, body FROM {} WHERE scope=?1 AND coll=?2 AND id=?3 AND deleted=0",
-            ident(&self.docs)
-        );
-        let stored = conn
-            .query_row(
-                &sql,
-                rusqlite::params![
-                    condition.scope().as_str(),
-                    condition.collection(),
-                    condition.id()
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, u32>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, rusqlite::types::Value>(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(during("read condition document"))?;
-        let Some((schema, created_ms, updated_ms, expires_ms, body)) = stored else {
-            return Err(StorageError::conflict("write condition document is absent"));
-        };
-        if expires_ms.is_some_and(|expires| expires <= now_ms) {
-            return Err(StorageError::conflict(
-                "write condition document is expired",
-            ));
-        }
-        let body: serde_json::Value = match body {
-            rusqlite::types::Value::Text(text) => serde_json::from_str(&text)?,
-            rusqlite::types::Value::Blob(bytes) => {
-                let Some((&1, compressed)) = bytes.split_first() else {
-                    return Err(StorageError::backend("corrupt conditional document body"));
-                };
-                let json = zstd::decode_all(compressed).map_err(|error| {
-                    StorageError::backend("decompress condition document").with_source(error)
-                })?;
-                serde_json::from_slice(&json)?
+        for clause in condition.clauses() {
+            let sql = format!(
+                "SELECT schema, created_ms, updated_ms, expires_ms, body FROM {} WHERE scope=?1 AND coll=?2 AND id=?3 AND deleted=0",
+                ident(&self.docs)
+            );
+            let stored = conn
+                .query_row(
+                    &sql,
+                    rusqlite::params![clause.scope().as_str(), clause.collection(), clause.id()],
+                    |row| {
+                        Ok((
+                            row.get::<_, u32>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, rusqlite::types::Value>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(during("read condition document"))?;
+            let Some((schema, created_ms, updated_ms, expires_ms, body)) = stored else {
+                return Err(StorageError::conflict("write condition document is absent"));
+            };
+            if expires_ms.is_some_and(|expires| expires <= now_ms) {
+                return Err(StorageError::conflict(
+                    "write condition document is expired",
+                ));
             }
-            _ => return Err(StorageError::backend("corrupt conditional document body")),
-        };
-        let spec_sql = format!("SELECT spec FROM {} WHERE coll=?1", ident(&self.specs));
-        let spec_json = conn
-            .query_row(&spec_sql, [condition.collection()], |row| {
-                row.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(during("read condition collection spec"))?;
-        let spec = match spec_json {
-            Some(json) => serde_json::from_str::<CollectionSpec>(&json)?,
-            None => CollectionSpec::new(condition.collection()),
-        };
-        let ttl_expired = spec
-            .ttl_field
-            .as_deref()
-            .and_then(|field| value::lookup(&body, field))
-            .and_then(serde_json::Value::as_f64)
-            .is_some_and(|expires| {
-                // Epoch milliseconds remain exactly representable at current dates.
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "epoch milliseconds are far below 2^53"
-                )]
-                let now = now_ms as f64;
-                expires <= now
-            });
-        if ttl_expired {
-            return Err(StorageError::conflict(
-                "write condition document is expired",
-            ));
-        }
-        let meta = Meta {
-            schema,
-            created_ms,
-            updated_ms,
-            expires_ms,
-        };
-        if !condition.matches_at(condition.id(), &body, &meta, now_ms) {
-            return Err(StorageError::conflict(
-                "write condition no longer matches or is expired",
-            ));
+            let body: serde_json::Value = match body {
+                rusqlite::types::Value::Text(text) => serde_json::from_str(&text)?,
+                rusqlite::types::Value::Blob(bytes) => {
+                    let Some((&1, compressed)) = bytes.split_first() else {
+                        return Err(StorageError::backend("corrupt conditional document body"));
+                    };
+                    let json = zstd::decode_all(compressed).map_err(|error| {
+                        StorageError::backend("decompress condition document").with_source(error)
+                    })?;
+                    serde_json::from_slice(&json)?
+                }
+                _ => return Err(StorageError::backend("corrupt conditional document body")),
+            };
+            let spec_sql = format!("SELECT spec FROM {} WHERE coll=?1", ident(&self.specs));
+            let spec_json = conn
+                .query_row(&spec_sql, [clause.collection()], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(during("read condition collection spec"))?;
+            let spec = match spec_json {
+                Some(json) => serde_json::from_str::<CollectionSpec>(&json)?,
+                None => CollectionSpec::new(clause.collection()),
+            };
+            let ttl_expired = spec
+                .ttl_field
+                .as_deref()
+                .and_then(|field| value::lookup(&body, field))
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|expires| {
+                    // Epoch milliseconds remain exactly representable at current dates.
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "epoch milliseconds are far below 2^53"
+                    )]
+                    let now = now_ms as f64;
+                    expires <= now
+                });
+            if ttl_expired {
+                return Err(StorageError::conflict(
+                    "write condition document is expired",
+                ));
+            }
+            let meta = Meta {
+                schema,
+                created_ms,
+                updated_ms,
+                expires_ms,
+            };
+            if !clause.matches_at(clause.id(), &body, &meta, now_ms) {
+                return Err(StorageError::conflict(
+                    "write condition no longer matches or is expired",
+                ));
+            }
         }
         Ok(())
     }

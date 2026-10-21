@@ -32,7 +32,7 @@ pub use blob::{
     TreeEntry, TreeFile, is_reserved_blob_key,
 };
 pub use capabilities::{Capabilities, Capability};
-pub use condition::WriteCondition;
+pub use condition::{MAX_WRITE_CONDITION_CLAUSES, WriteCondition, WriteConditionClause};
 pub use document::{
     CollectionSpec, Cursor, CursorPosition, ExpectedDocument, IndexSpec, MAX_COLLECTION_LEN,
     MAX_ID_LEN, Meta, Page, Precondition, Query, RESERVED_PREFIX, ReadCheck, SearchHit, SearchSpec,

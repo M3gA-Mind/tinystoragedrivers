@@ -551,6 +551,275 @@ async fn conditioned_documents_guard_direct_writes_and_deletes() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one Mongo transaction test pins conjunction rollback and each independent guard"
+)]
+async fn composed_mongo_conditions_all_check_and_rollback_in_one_mutation_transaction() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let now = Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let clock = Arc::clone(&now);
+    let connection = test_connection(&uri, "tsd59_composed_conditions")
+        .await
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let profile_scope = Scope::new("profile-guard").unwrap();
+    let import_scope = Scope::new("import-guard").unwrap();
+    let target_scope = Scope::new("composed-target").unwrap();
+    let profile_docs = MongoDocuments::new(connection.clone(), profile_scope.clone());
+    let import_docs = MongoDocuments::new(connection.clone(), import_scope.clone());
+    for (docs, collection) in [(&profile_docs, "leases"), (&import_docs, "claims")] {
+        docs.ensure_collection(&CollectionSpec::new(collection))
+            .await
+            .unwrap();
+    }
+    let profile_version = profile_docs
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 1, "expires_ms": 1_000}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let claim_version = import_docs
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "importing", "until_ms": 1_000}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let profile = WriteCondition::new(
+        profile_scope.clone(),
+        "leases",
+        "active",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap()
+    .with_valid_until_field("expires_ms")
+    .unwrap();
+    let import = WriteCondition::new(
+        import_scope.clone(),
+        "claims",
+        "source",
+        Filter::eq("state", "importing"),
+    )
+    .unwrap()
+    .with_valid_until_field("until_ms")
+    .unwrap();
+    let combined = profile.and(import).unwrap();
+    let target = MongoDocuments::conditioned(connection.clone(), target_scope, combined).unwrap();
+    let raw_database = connection.database();
+    let profile_raw = raw_database.collection::<mongodb::bson::Document>("leases");
+    let import_raw = raw_database.collection::<mongodb::bson::Document>("claims");
+    let profile_id = mongodb::bson::doc! {"s": profile_scope.as_str(), "k": "active"};
+    let import_id = mongodb::bson::doc! {"s": import_scope.as_str(), "k": "source"};
+
+    let prepared_claim_version = import_docs
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "prepared", "until_ms": 1_000}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        target
+            .put(
+                "items",
+                "denied-second",
+                serde_json::json!({"value": 1}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(
+        target
+            .get("items", "denied-second")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let profile_after_abort = profile_raw
+        .find_one(mongodb::bson::doc! {"_id": profile_id.clone()})
+        .await
+        .unwrap()
+        .unwrap();
+    let claim_after_abort = import_raw
+        .find_one(mongodb::bson::doc! {"_id": import_id.clone()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(profile_after_abort.get_i64("_tsd_condition_touch").is_err());
+    assert!(claim_after_abort.get_i64("_tsd_condition_touch").is_err());
+
+    let claim_version = import_docs
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "importing", "until_ms": 1_000}),
+            Precondition::Version(prepared_claim_version),
+        )
+        .await
+        .unwrap();
+    target
+        .put(
+            "items",
+            "accepted",
+            serde_json::json!({"value": 2}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    for (collection, id) in [
+        (&profile_raw, profile_id.clone()),
+        (&import_raw, import_id.clone()),
+    ] {
+        assert_eq!(
+            collection
+                .find_one(mongodb::bson::doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i64("_tsd_condition_touch"),
+            Ok(1)
+        );
+    }
+
+    import_docs
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "complete", "until_ms": 1_000}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        target
+            .put(
+                "items",
+                "denied-claim",
+                serde_json::json!({"value": 3}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(target.get("items", "denied-claim").await.unwrap().is_none());
+    let profile_after_claim_failure = profile_raw
+        .find_one(mongodb::bson::doc! {"_id": profile_id.clone()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        profile_after_claim_failure.get_i64("_tsd_condition_touch"),
+        Ok(1)
+    );
+
+    profile_docs
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 2, "expires_ms": 1_000}),
+            Precondition::Version(profile_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        target
+            .put(
+                "items",
+                "denied-profile",
+                serde_json::json!({"value": 4}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(
+        target
+            .get("items", "denied-profile")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn conditioned_document_writes_reject_missing_and_nonmatching_guards() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd59_missing_condition_guard").await;
+    let guard_scope = Scope::new("condition-guard").unwrap();
+    let target_scope = Scope::new("condition-target").unwrap();
+    let condition = WriteCondition::new(
+        guard_scope.clone(),
+        "leases",
+        "writer",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap();
+    let held = MongoDocuments::conditioned(connection.clone(), target_scope, condition).unwrap();
+
+    assert_eq!(
+        held.put(
+            "items",
+            "missing",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(held.get("items", "missing").await.unwrap().is_none());
+
+    let guard_docs = MongoDocuments::new(connection.clone(), guard_scope);
+    guard_docs
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    guard_docs
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 0}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.put(
+            "items",
+            "wrong-epoch",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(held.get("items", "wrong-epoch").await.unwrap().is_none());
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn conditioned_stream_delete_is_transactional_for_empty_and_live_generations() {
     let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
         return;
@@ -574,7 +843,13 @@ async fn conditioned_stream_delete_is_transactional_for_empty_and_live_generatio
         .unwrap();
     let condition =
         WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
-    let streams = MongoStreams::conditioned(connection.clone(), target_scope, condition).unwrap();
+    let blobs = Arc::new(tinystoragedrivers_blob::MongoBlobStore::new(
+        connection.clone(),
+        target_scope.clone(),
+    ));
+    let streams = MongoStreams::conditioned(connection.clone(), target_scope, condition)
+        .unwrap()
+        .with_blob_store(blobs);
     assert!(!streams.delete_stream("empty").await.unwrap());
     assert!(!streams.delete_stream("empty").await.unwrap());
     streams
@@ -602,6 +877,32 @@ async fn conditioned_stream_delete_is_transactional_for_empty_and_live_generatio
             value: serde_json::json!("keep"),
         }]
     );
+
+    let sealed = streams.seal("events").await.unwrap();
+    assert_eq!((sealed.base, sealed.len), (0, 1));
+    let sealed_ms = streams
+        .info("events")
+        .await
+        .unwrap()
+        .unwrap()
+        .sealed_ms
+        .unwrap();
+    assert!(
+        streams
+            .delete_sealed_stream("events", sealed_ms)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !streams
+            .delete_sealed_stream("events", sealed_ms)
+            .await
+            .unwrap()
+    );
+    streams
+        .append("events", serde_json::json!({"value": "after-seal"}))
+        .await
+        .unwrap();
 
     guard_docs
         .put(

@@ -105,49 +105,51 @@ impl MongoDocuments {
         let Some(condition) = &self.condition else {
             return Ok(());
         };
-        let spec = self.collection_spec(condition.collection()).await?;
-        let filter = doc! {"_id": {"s": condition.scope().as_str(), "k": condition.id()}, DELETED: {"$ne": true}};
-        let record = self
-            .collection(condition.collection())
-            .find_one(filter.clone())
-            .session(&mut *session)
-            .await
-            .map_err(|error| transaction_error("read a write condition", error))?
-            .ok_or_else(|| StorageError::conflict("write condition document is absent"))?;
-        let now_ms = (self.clock)();
-        let row = decode(&record)?
-            .filter(|row| !expired(&spec, row, now_ms))
-            .ok_or_else(|| {
-                StorageError::conflict("write condition document is absent or expired")
-            })?;
-        if !condition.matches_at(
-            &row.id,
-            &row.doc,
-            &row.meta,
-            i64::try_from(now_ms).unwrap_or(i64::MAX),
-        ) {
-            return Err(StorageError::conflict(
-                "write condition did not match or is expired",
-            ));
-        }
+        for clause in condition.clauses() {
+            let spec = self.collection_spec(clause.collection()).await?;
+            let filter = doc! {"_id": {"s": clause.scope().as_str(), "k": clause.id()}, DELETED: {"$ne": true}};
+            let record = self
+                .collection(clause.collection())
+                .find_one(filter.clone())
+                .session(&mut *session)
+                .await
+                .map_err(|error| transaction_error("read a write condition", error))?
+                .ok_or_else(|| StorageError::conflict("write condition document is absent"))?;
+            let now_ms = (self.clock)();
+            let row = decode(&record)?
+                .filter(|row| !expired(&spec, row, now_ms))
+                .ok_or_else(|| {
+                    StorageError::conflict("write condition document is absent or expired")
+                })?;
+            if !clause.matches_at(
+                &row.id,
+                &row.doc,
+                &row.meta,
+                i64::try_from(now_ms).unwrap_or(i64::MAX),
+            ) {
+                return Err(StorageError::conflict(
+                    "write condition did not match or is expired",
+                ));
+            }
 
-        // A read-only predicate in a Mongo snapshot transaction can race a
-        // concurrent guard replacement. Touch the private storage envelope
-        // so both this transaction and a takeover write the same physical
-        // record; Mongo then aborts one transaction on write conflict. This
-        // field is outside the logical document body and its public metadata.
-        let version = i64::try_from(row.version.0)
-            .map_err(|_| StorageError::serialization("condition version is out of range"))?;
-        let touched = self.collection(condition.collection())
-            .update_one(
-                doc! {"_id": {"s": condition.scope().as_str(), "k": condition.id()}, VERSION: version, DELETED: {"$ne": true}},
-                doc! {"$inc": {"_tsd_condition_touch": 1_i64}},
-            )
-            .session(&mut *session)
-            .await
-            .map_err(|error| transaction_error("hold a write condition", error))?;
-        if touched.matched_count != 1 {
-            return Err(StorageError::conflict("write condition changed"));
+            // A read-only predicate in a Mongo snapshot transaction can race a
+            // concurrent guard replacement. Touch every private guard envelope
+            // so each takeover conflicts with this transaction. This field is
+            // outside logical document bodies and public metadata.
+            let version = i64::try_from(row.version.0)
+                .map_err(|_| StorageError::serialization("condition version is out of range"))?;
+            let touched = self
+                .collection(clause.collection())
+                .update_one(
+                    doc! {"_id": {"s": clause.scope().as_str(), "k": clause.id()}, VERSION: version, DELETED: {"$ne": true}},
+                    doc! {"$inc": {"_tsd_condition_touch": 1_i64}},
+                )
+                .session(&mut *session)
+                .await
+                .map_err(|error| transaction_error("hold a write condition", error))?;
+            if touched.matched_count != 1 {
+                return Err(StorageError::conflict("write condition changed"));
+            }
         }
         Ok(())
     }

@@ -512,6 +512,7 @@ impl CompositeBackend {
         Ok(Storage::new(documents, streams, kv, blobs, queues, secrets))
     }
 
+    #[cfg(any(feature = "sqlite", feature = "mongodb"))]
     fn open_conditioned_scope(&self, scope: &Scope, condition: &WriteCondition) -> Result<Storage> {
         use std::sync::Arc;
         use tinystoragedrivers_api::Storage;
@@ -592,6 +593,18 @@ impl CompositeBackend {
                 "this storage composition cannot atomically condition every exposed mutation port",
             )),
         }
+    }
+
+    #[cfg(not(any(feature = "sqlite", feature = "mongodb")))]
+    fn open_conditioned_scope(
+        &self,
+        _scope: &Scope,
+        _condition: &WriteCondition,
+    ) -> Result<Storage> {
+        Err(StorageError::unsupported(
+            Capability::ConditionalWrites,
+            "this storage composition cannot atomically condition mutations",
+        ))
     }
 }
 

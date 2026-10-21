@@ -3,9 +3,9 @@
 use super::*;
 #[cfg(feature = "sqlite")]
 use tinystoragedrivers_api::{DocumentStore, KvStore};
-use tinystoragedrivers_types::{
-    Capability, ErrorKind, Filter, Precondition, Scope, WriteCondition,
-};
+#[cfg(feature = "sqlite")]
+use tinystoragedrivers_types::Precondition;
+use tinystoragedrivers_types::{Capability, ErrorKind, Filter, Scope, WriteCondition};
 
 #[test]
 fn parses_every_form() {
@@ -149,6 +149,7 @@ async fn opens_memory_and_names_missing_features() {
 }
 
 #[tokio::test]
+#[cfg(feature = "sqlite")]
 #[allow(
     clippy::too_many_lines,
     reason = "one regression verifies every guarded mutation family across a takeover"
@@ -362,6 +363,174 @@ async fn sqlite_conditioned_ports_refuse_a_stale_holder_after_guard_takeover() {
             .unwrap()
             .doc["epoch"],
         2
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one regression verifies each side of a two-guard takeover"
+)]
+async fn sqlite_condition_conjunction_requires_every_guard_for_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = open(&StorageConfig::Sqlite {
+        path: dir.path().join("condition-conjunction.db"),
+    })
+    .await
+    .unwrap();
+    let profile_scope = Scope::new("profile-guard").unwrap();
+    let import_scope = Scope::new("import-guard").unwrap();
+    let target_scope = Scope::new("import-target").unwrap();
+    let profile_docs = backend.for_scope(&profile_scope).unwrap();
+    let import_docs = backend.for_scope(&import_scope).unwrap();
+    profile_docs
+        .documents()
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    import_docs
+        .documents()
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("claims"))
+        .await
+        .unwrap();
+    let profile_version = profile_docs
+        .documents()
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 1, "expires_ms": i64::MAX}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let claim_version = import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "prepared", "until_ms": i64::MAX}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let profile = WriteCondition::new(profile_scope, "leases", "active", Filter::eq("epoch", 1))
+        .unwrap()
+        .with_valid_until_field("expires_ms")
+        .unwrap();
+    let import = WriteCondition::new(
+        import_scope.clone(),
+        "claims",
+        "source",
+        Filter::eq("state", "importing"),
+    )
+    .unwrap()
+    .with_valid_until_field("until_ms")
+    .unwrap();
+    let held = backend
+        .for_scope_conditioned(&target_scope, &profile.and(import).unwrap())
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied",
+                serde_json::json!({"value": 0}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let claim_version = import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "importing", "until_ms": i64::MAX}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    held.documents()
+        .put(
+            "items",
+            "accepted",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+
+    import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "complete", "until_ms": i64::MAX}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied-claim",
+                serde_json::json!({"value": 2}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied-claim")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    profile_docs
+        .documents()
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 2, "expires_ms": i64::MAX}),
+            Precondition::Version(profile_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied-profile",
+                serde_json::json!({"value": 3}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied-profile")
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 

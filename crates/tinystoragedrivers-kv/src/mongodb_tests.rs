@@ -414,6 +414,13 @@ async fn conditioned_kv_checks_guard_for_insert_replace_ttl_and_delete_transacti
             .kind(),
         ErrorKind::Conflict
     );
+    assert_eq!(
+        kv.cas("expiring", json!(3), Precondition::Version(Version(2)))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
     assert!(
         factory
             .for_scope(&target_scope)
