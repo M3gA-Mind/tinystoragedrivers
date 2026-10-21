@@ -43,10 +43,10 @@ ulimit -n 4096. No tests were disabled or changed to accommodate this limit.
 
 Targeted llvm-cov execution covers the changed executable production files:
 
-- tinystoragedrivers-busproxy/src/scoped.rs: 51/53 lines (96.23%).
+- tinystoragedrivers-busproxy/src/scoped/mod.rs: 51/53 lines (96.23%).
 - tinystoragedrivers-client/src/client/documents.rs: 58/60 lines (96.67%).
 - tinystoragedrivers-client/src/client/mod.rs: 112/121 lines (92.56%).
-- tinystoragedrivers-tinybus/src/scoped.rs: 112/117 lines (95.73%).
+- tinystoragedrivers-tinybus/src/scoped/mod.rs: 112/117 lines (95.73%).
 
 The schema callback DTO has derived serialization only; its exact representation
 and unknown-field/profile rejection are exercised. The canonical Linux native
