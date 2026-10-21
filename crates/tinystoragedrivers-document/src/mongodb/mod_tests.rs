@@ -253,6 +253,85 @@ async fn test_connection(uri: &str, stem: &str) -> MongoConnection {
 }
 
 #[tokio::test]
+async fn transactional_mongo_documents_advertise_cross_process_cas() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd65_capabilities").await;
+    assert!(connection.transactions_available());
+    let capabilities =
+        MongoDocuments::new(connection.clone(), Scope::new("caps").unwrap()).capabilities();
+    assert!(capabilities.contains(Capability::SharedAcrossProcesses));
+    assert!(capabilities.contains(Capability::CrossProcessCas));
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn independent_mongo_connections_arbitrate_absent_and_version_writes() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let first_connection = test_connection(&uri, "tsd65_cas").await;
+    assert!(first_connection.transactions_available());
+    let database = first_connection.database().name().to_owned();
+    let second_connection = MongoConnection::connect(&uri, &database).await.unwrap();
+    assert!(second_connection.transactions_available());
+    let scope = Scope::new("cas-race").unwrap();
+    let first = MongoDocuments::new(first_connection.clone(), scope.clone());
+    let second = MongoDocuments::new(second_connection, scope);
+    first
+        .ensure_collection(&CollectionSpec::new("items"))
+        .await
+        .unwrap();
+
+    let absent_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let absent_write = |docs: MongoDocuments,
+                        barrier: Arc<tokio::sync::Barrier>,
+                        value: &'static str| async move {
+        barrier.wait().await;
+        docs.put(
+            "items",
+            "absent",
+            serde_json::json!({"value": value}),
+            Precondition::Absent,
+        )
+        .await
+    };
+    let (left, right) = tokio::join!(
+        absent_write(first.clone(), absent_barrier.clone(), "left"),
+        absent_write(second.clone(), absent_barrier, "right")
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    for error in [left.err(), right.err()].into_iter().flatten() {
+        assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    }
+
+    let current = first.get("items", "absent").await.unwrap().unwrap();
+    let version_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let version_write = |docs: MongoDocuments,
+                         barrier: Arc<tokio::sync::Barrier>,
+                         value: &'static str| async move {
+        barrier.wait().await;
+        docs.put(
+            "items",
+            "absent",
+            serde_json::json!({"value": value}),
+            Precondition::Version(current.version),
+        )
+        .await
+    };
+    let (left, right) = tokio::join!(
+        version_write(first.clone(), version_barrier.clone(), "next-left"),
+        version_write(second, version_barrier, "next-right")
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    for error in [left.err(), right.err()].into_iter().flatten() {
+        assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    }
+    first_connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn conditioned_mongo_handle_checks_body_deadline_and_allows_same_epoch_renewal() {
     let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
         return;

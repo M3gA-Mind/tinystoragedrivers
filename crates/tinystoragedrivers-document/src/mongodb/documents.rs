@@ -408,7 +408,9 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::FullText)
             .with(Capability::RecordMetadata)
             .with(Capability::CollectionEnumeration)
-            .with(Capability::CollectionValidation);
+            .with(Capability::CollectionValidation)
+            .with(Capability::SharedAcrossProcesses)
+            .with(Capability::CrossProcessCas);
         if self.transactions {
             let capabilities = capabilities
                 .with(Capability::Transactions)
