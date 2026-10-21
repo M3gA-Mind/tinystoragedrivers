@@ -2079,8 +2079,10 @@ version = "2.0.2"
 dependencies = [
  "mongodb",
  "rusqlite",
+ "serde_json",
  "tinystoragedrivers-types",
  "tokio",
+ "zstd",
 ]
 
 [[package]]

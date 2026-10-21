@@ -16,6 +16,7 @@ use serde_json::Value;
 use tinystoragedrivers_api::{StreamStore, async_trait};
 use tinystoragedrivers_types::{
     Capabilities, Capability, Result, Scope, SealOutcome, StorageError, StreamEntry, StreamInfo,
+    WriteCondition,
 };
 
 use crate::sqlite::{SqliteTables, ident};
@@ -28,6 +29,7 @@ use tinystoragedrivers_connect::sqlite::error::during;
 pub struct SqliteStreams {
     connection: SqliteConnection,
     scope: Scope,
+    condition: Option<WriteCondition>,
 }
 
 impl fmt::Debug for SqliteStreams {
@@ -116,7 +118,26 @@ impl SqliteStreams {
     /// Bind a stream adapter to a shared SQLite connection and opaque scope.
     #[must_use]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Self {
-        Self { connection, scope }
+        Self {
+            connection,
+            scope,
+            condition: None,
+        }
+    }
+
+    /// Bind a stream adapter whose mutations check `condition` in their
+    /// SQLite write transaction.
+    #[must_use]
+    pub fn conditioned(
+        connection: SqliteConnection,
+        scope: Scope,
+        condition: WriteCondition,
+    ) -> Self {
+        Self {
+            connection,
+            scope,
+            condition: Some(condition),
+        }
     }
 
     /// Run `f` in a read or immediate write transaction on the shared connection.
@@ -127,6 +148,8 @@ impl SqliteStreams {
     {
         let tables = self.connection.tables().clone();
         let scope = self.scope.clone();
+        let condition = self.condition.clone();
+        let clock = self.connection.clock();
         self.connection
             .run(move |conn| {
                 let tx = if write {
@@ -139,6 +162,10 @@ impl SqliteStreams {
                 } else {
                     "start stream read transaction"
                 }))?;
+                if write && let Some(condition) = &condition {
+                    let now_ms = i64::try_from(clock()).unwrap_or(i64::MAX);
+                    tables.check_write_condition(&tx, condition, now_ms)?;
+                }
                 let value = f(&tx, &tables, scope.as_str())?;
                 tx.commit().map_err(during("finish stream transaction"))?;
                 Ok(value)
@@ -212,10 +239,13 @@ impl SqliteStreams {
 #[async_trait]
 impl StreamStore for SqliteStreams {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        let capabilities = Capabilities::none()
             .with(Capability::Streams)
             .with(Capability::ConditionalStreamAppend)
-            .with(Capability::StreamSeal)
+            .with(Capability::StreamSeal);
+        self.condition.as_ref().map_or(capabilities, |_| {
+            capabilities.with(Capability::ConditionalWrites)
+        })
     }
 
     async fn append(&self, stream: &str, value: Value) -> Result<u64> {

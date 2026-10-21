@@ -1,7 +1,11 @@
 //! URL parsing, redaction and driver selection.
 
 use super::*;
-use tinystoragedrivers_types::{ErrorKind, Scope};
+#[cfg(feature = "sqlite")]
+use tinystoragedrivers_api::{DocumentStore, KvStore};
+#[cfg(any(feature = "sqlite", feature = "mongodb"))]
+use tinystoragedrivers_types::Precondition;
+use tinystoragedrivers_types::{Capability, ErrorKind, Filter, Scope, WriteCondition};
 
 #[test]
 fn parses_every_form() {
@@ -142,6 +146,994 @@ async fn opens_memory_and_names_missing_features() {
             "{error}"
         );
     }
+}
+
+#[tokio::test]
+#[cfg(feature = "sqlite")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one regression verifies every guarded mutation family across a takeover"
+)]
+async fn sqlite_conditioned_ports_refuse_a_stale_holder_after_guard_takeover() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig::Sqlite {
+        path: dir.path().join("conditioned.db"),
+    };
+    let backend = open(&config).await.unwrap();
+    let guard_scope = Scope::new("guard-owner").unwrap();
+    let target_scope = Scope::new("target-owner").unwrap();
+    let ordinary = backend.for_scope(&guard_scope).unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("items"))
+        .await
+        .unwrap();
+    let guard = ordinary
+        .documents()
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+
+    let condition = WriteCondition::new(
+        guard_scope.clone(),
+        "leases",
+        "writer",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap();
+    let held = backend
+        .for_scope_conditioned(&target_scope, &condition)
+        .unwrap();
+    let capability = Capability::ConditionalWrites;
+    assert!(held.documents().capabilities().contains(capability));
+    assert!(held.streams().capabilities().contains(capability));
+    assert!(held.blobs().capabilities().contains(capability));
+    assert!(held.kv().capabilities().contains(Capability::Kv));
+    assert!(
+        held.kv()
+            .capabilities()
+            .contains(Capability::ConditionalWrites)
+    );
+    held.kv()
+        .put("profile", serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    held.queues()
+        .enqueue(
+            "jobs",
+            &[tinystoragedrivers_types::NewMessage::new(
+                serde_json::json!({"work": 1}),
+            )],
+        )
+        .await
+        .unwrap();
+
+    held.documents()
+        .put(
+            "items",
+            "before",
+            serde_json::json!({"ok": true}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    held.streams()
+        .append("events", serde_json::json!({"ok": true}))
+        .await
+        .unwrap();
+    held.blobs()
+        .put("payload", b"before".to_vec(), None)
+        .await
+        .unwrap();
+    held.blobs()
+        .put_sealed("_tsd/sealed/held", b"sealed-before".to_vec(), None)
+        .await
+        .unwrap();
+
+    ordinary
+        .documents()
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 2}),
+            Precondition::Version(guard),
+        )
+        .await
+        .unwrap();
+
+    let stale_doc = held
+        .documents()
+        .put("items", "after", serde_json::json!({}), Precondition::None)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_doc.kind(), ErrorKind::Conflict);
+    let stale_stream = held
+        .streams()
+        .append("events", serde_json::json!({"later": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(stale_stream.kind(), ErrorKind::Conflict);
+    let stale_blob = held
+        .blobs()
+        .put("later", b"later".to_vec(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_blob.kind(), ErrorKind::Conflict);
+    assert_eq!(
+        held.kv()
+            .put("profile", serde_json::json!({"enabled": false}))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.queues()
+            .enqueue(
+                "jobs",
+                &[tinystoragedrivers_types::NewMessage::new(
+                    serde_json::json!({"work": 2}),
+                )],
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+
+    assert!(
+        held.documents()
+            .get("items", "after")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        held.kv().get("profile").await.unwrap().unwrap().doc,
+        serde_json::json!({"enabled": true})
+    );
+    assert_eq!(
+        held.blobs().delete("payload").await.unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.blobs()
+            .delete_sealed("_tsd/sealed/held")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.blobs().sweep_expired().await.unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams()
+            .truncate_before("events", 0)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams().seal("events").await.unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams()
+            .delete_stream("events")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams()
+            .delete_sealed_stream("events", 0)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(held.streams().len("events").await.unwrap(), 1);
+    assert!(held.blobs().get("later").await.unwrap().is_none());
+    assert!(held.blobs().get("payload").await.unwrap().is_some());
+    assert!(
+        held.blobs()
+            .get_sealed("_tsd/sealed/held")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        ordinary
+            .documents()
+            .get("leases", "writer")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc["epoch"],
+        2
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one regression verifies each side of a two-guard takeover"
+)]
+async fn sqlite_condition_conjunction_requires_every_guard_for_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = open(&StorageConfig::Sqlite {
+        path: dir.path().join("condition-conjunction.db"),
+    })
+    .await
+    .unwrap();
+    let profile_scope = Scope::new("profile-guard").unwrap();
+    let import_scope = Scope::new("import-guard").unwrap();
+    let target_scope = Scope::new("import-target").unwrap();
+    let profile_docs = backend.for_scope(&profile_scope).unwrap();
+    let import_docs = backend.for_scope(&import_scope).unwrap();
+    profile_docs
+        .documents()
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    import_docs
+        .documents()
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("claims"))
+        .await
+        .unwrap();
+    let profile_version = profile_docs
+        .documents()
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 1, "expires_ms": i64::MAX}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let claim_version = import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "prepared", "until_ms": i64::MAX}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let profile = WriteCondition::new(profile_scope, "leases", "active", Filter::eq("epoch", 1))
+        .unwrap()
+        .with_valid_until_field("expires_ms")
+        .unwrap();
+    let import = WriteCondition::new(
+        import_scope.clone(),
+        "claims",
+        "source",
+        Filter::eq("state", "importing"),
+    )
+    .unwrap()
+    .with_valid_until_field("until_ms")
+    .unwrap();
+    let held = backend
+        .for_scope_conditioned(&target_scope, &profile.and(import).unwrap())
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied",
+                serde_json::json!({"value": 0}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let claim_version = import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "importing", "until_ms": i64::MAX}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    held.documents()
+        .put(
+            "items",
+            "accepted",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+
+    import_docs
+        .documents()
+        .put(
+            "claims",
+            "source",
+            serde_json::json!({"state": "complete", "until_ms": i64::MAX}),
+            Precondition::Version(claim_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied-claim",
+                serde_json::json!({"value": 2}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied-claim")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    profile_docs
+        .documents()
+        .put(
+            "leases",
+            "active",
+            serde_json::json!({"epoch": 2, "expires_ms": i64::MAX}),
+            Precondition::Version(profile_version),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "denied-profile",
+                serde_json::json!({"value": 3}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        held.documents()
+            .get("items", "denied-profile")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_condition_checks_expiry_and_compressed_guard_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = open(&StorageConfig::Sqlite {
+        path: dir.path().join("condition-body.db"),
+    })
+    .await
+    .unwrap();
+    let guard_scope = Scope::new("condition-body-guard").unwrap();
+    let target_scope = Scope::new("condition-body-target").unwrap();
+    let ordinary = backend.for_scope(&guard_scope).unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+
+    ordinary
+        .documents()
+        .put_with(
+            "leases",
+            "expired",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+            tinystoragedrivers_types::WriteOptions::new().expires_ms(1),
+        )
+        .await
+        .unwrap();
+    let expired = WriteCondition::new(
+        guard_scope.clone(),
+        "leases",
+        "expired",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap();
+    let expired_ports = backend
+        .for_scope_conditioned(&target_scope, &expired)
+        .unwrap();
+    assert_eq!(
+        expired_ports
+            .documents()
+            .put(
+                "items",
+                "refused",
+                serde_json::json!({}),
+                Precondition::None
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+
+    ordinary
+        .documents()
+        .put(
+            "leases",
+            "compressed",
+            serde_json::json!({"epoch": 2, "padding": "x".repeat(32_000)}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let compressed =
+        WriteCondition::new(guard_scope, "leases", "compressed", Filter::eq("epoch", 2)).unwrap();
+    let compressed_ports = backend
+        .for_scope_conditioned(&target_scope, &compressed)
+        .unwrap();
+    compressed_ports
+        .documents()
+        .put(
+            "items",
+            "accepted",
+            serde_json::json!({}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        compressed_ports
+            .documents()
+            .get("items", "accepted")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the lock, queued write, clock advance, and refusal are one deterministic race regression"
+)]
+async fn sqlite_condition_expiry_uses_clock_after_waiting_for_the_connection() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(100));
+    let clock_value = Arc::clone(&now);
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open_with_clock(
+        dir.path().join("condition-clock.db"),
+        Arc::new(move || clock_value.load(Ordering::SeqCst)),
+    )
+    .unwrap();
+    let guard_scope = Scope::new("clock-guard").unwrap();
+    let target_scope = Scope::new("clock-target").unwrap();
+    let guard_documents = tinystoragedrivers_document::sqlite::SqliteDocuments::new(
+        connection.clone(),
+        guard_scope.clone(),
+    );
+    guard_documents
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    guard_documents
+        .put_with(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+            tinystoragedrivers_types::WriteOptions::new().expires_ms(200),
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let target = tinystoragedrivers_document::sqlite::SqliteDocuments::conditioned(
+        connection.clone(),
+        target_scope,
+        condition,
+    );
+    let target_check = target.clone();
+    target
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("items"))
+        .await
+        .unwrap();
+
+    let (lock_started_tx, lock_started_rx) = mpsc::sync_channel(0);
+    let (release_lock_tx, release_lock_rx) = mpsc::sync_channel(0);
+    let blocker_connection = connection.clone();
+    let blocker = tokio::spawn(async move {
+        blocker_connection
+            .run(move |database| {
+                let transaction = database
+                    .transaction_with_behavior(
+                        tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate,
+                    )
+                    .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                        "start a test write lock",
+                    ))?;
+                lock_started_tx.send(()).unwrap();
+                release_lock_rx.recv().unwrap();
+                transaction
+                    .commit()
+                    .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                        "finish a test write lock",
+                    ))
+            })
+            .await
+    });
+    lock_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+
+    let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        let mut operation = Box::pin(target.put(
+            "items",
+            "too-late",
+            serde_json::json!({"value": true}),
+            Precondition::None,
+        ));
+        let mut queued_tx = Some(queued_tx);
+        std::future::poll_fn(|context| {
+            let polled = operation.as_mut().poll(context);
+            if polled.is_pending()
+                && let Some(queued_tx) = queued_tx.take()
+            {
+                queued_tx.send(()).unwrap();
+            }
+            polled
+        })
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), queued_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    now.store(300, Ordering::SeqCst);
+    release_lock_tx.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    assert_eq!(
+        writer.await.unwrap().unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
+    assert!(
+        target_check
+            .get("items", "too-late")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_conditioned_kv_checks_expiry_inside_its_write_transaction() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicU64::new(100));
+    let clock_value = Arc::clone(&now);
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open_with_clock(
+        dir.path().join("conditioned-kv-clock.db"),
+        Arc::new(move || clock_value.load(Ordering::SeqCst)),
+    )
+    .unwrap();
+    let guard_scope = Scope::new("kv-clock-guard").unwrap();
+    let target_scope = Scope::new("kv-clock-target").unwrap();
+    let guard_documents = tinystoragedrivers_document::sqlite::SqliteDocuments::new(
+        connection.clone(),
+        guard_scope.clone(),
+    );
+    guard_documents
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    guard_documents
+        .put_with(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+            tinystoragedrivers_types::WriteOptions::new().expires_ms(200),
+        )
+        .await
+        .unwrap();
+    let condition =
+        WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1)).unwrap();
+    let target =
+        tinystoragedrivers_kv::SqliteKv::conditioned(connection.clone(), target_scope, condition)
+            .unwrap();
+
+    let (lock_started_tx, lock_started_rx) = mpsc::sync_channel(0);
+    let (release_lock_tx, release_lock_rx) = mpsc::sync_channel(0);
+    let blocker_connection = connection.clone();
+    let blocker = tokio::spawn(async move {
+        blocker_connection
+            .run(move |database| {
+                let transaction = database
+                    .transaction_with_behavior(
+                        tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate,
+                    )
+                    .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                        "start a KV test write lock",
+                    ))?;
+                lock_started_tx.send(()).unwrap();
+                release_lock_rx.recv().unwrap();
+                transaction
+                    .commit()
+                    .map_err(tinystoragedrivers_connect::sqlite::error::during(
+                        "finish a KV test write lock",
+                    ))
+            })
+            .await
+    });
+    lock_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+
+    let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        let mut operation = Box::pin(target.put("state", serde_json::json!({"ok": true})));
+        let mut queued_tx = Some(queued_tx);
+        std::future::poll_fn(|context| {
+            let polled = operation.as_mut().poll(context);
+            if polled.is_pending()
+                && let Some(queued_tx) = queued_tx.take()
+            {
+                queued_tx.send(()).unwrap();
+            }
+            polled
+        })
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), queued_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    now.store(300, Ordering::SeqCst);
+    release_lock_tx.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    assert_eq!(
+        writer.await.unwrap().unwrap_err().kind(),
+        ErrorKind::Conflict
+    );
+}
+
+#[tokio::test]
+async fn nonparticipating_backends_reject_conditioning_without_changing_ordinary_handles() {
+    let backend = open(&StorageConfig::Memory).await.unwrap();
+    let scope = Scope::new("ordinary-still-works").unwrap();
+    let condition = WriteCondition::new(
+        Scope::new("guard").unwrap(),
+        "leases",
+        "writer",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap();
+    let error = backend
+        .for_scope_conditioned(&scope, &condition)
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::ConditionalWrites)
+    );
+    let ordinary = backend.for_scope(&scope).unwrap();
+    ordinary
+        .kv()
+        .put("key", serde_json::json!(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        ordinary.kv().get("key").await.unwrap().unwrap().doc,
+        serde_json::json!(1)
+    );
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one live replica-set regression covers the conditioned port matrix and stale takeover"
+)]
+async fn mongo_conditioned_ports_check_the_guard_in_transaction_and_fail_closed_elsewhere() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let database = format!(
+        "tsd_condition_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let backend = open(&StorageConfig::MongoDb {
+        uri: uri.clone(),
+        database: database.clone(),
+    })
+    .await
+    .unwrap();
+    let guard_scope = Scope::new("condition-guard").unwrap();
+    let target_scope = Scope::new("condition-target").unwrap();
+    let ordinary = backend.for_scope(&guard_scope).unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("items"))
+        .await
+        .unwrap();
+    ordinary
+        .ensure_collection(&tinystoragedrivers_types::CollectionSpec::new("drop-items"))
+        .await
+        .unwrap();
+    let original = ordinary
+        .documents()
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let original_row = ordinary
+        .documents()
+        .get("leases", "writer")
+        .await
+        .unwrap()
+        .unwrap();
+    let condition = WriteCondition::new(
+        guard_scope.clone(),
+        "leases",
+        "writer",
+        Filter::eq("epoch", 1),
+    )
+    .unwrap();
+    let held = backend
+        .for_scope_conditioned(&target_scope, &condition)
+        .unwrap();
+    assert!(
+        held.documents()
+            .capabilities()
+            .contains(Capability::ConditionalWrites)
+    );
+    assert!(
+        held.streams()
+            .capabilities()
+            .contains(Capability::ConditionalWrites)
+    );
+    assert!(!held.blobs().capabilities().contains(Capability::Blobs));
+    assert!(held.kv().capabilities().contains(Capability::Kv));
+    assert!(
+        held.kv()
+            .capabilities()
+            .contains(Capability::ConditionalWrites)
+    );
+    assert_eq!(
+        held.documents()
+            .put(
+                "items",
+                "accepted",
+                serde_json::json!({"value": 1}),
+                Precondition::Absent
+            )
+            .await
+            .unwrap(),
+        tinystoragedrivers_types::Version::FIRST
+    );
+    held.streams()
+        .append("events", serde_json::json!("accepted"))
+        .await
+        .unwrap();
+    held.streams()
+        .append("delete-before-takeover", serde_json::json!("accepted"))
+        .await
+        .unwrap();
+    assert!(
+        held.streams()
+            .delete_stream("delete-before-takeover")
+            .await
+            .unwrap()
+    );
+    held.documents()
+        .put(
+            "drop-items",
+            "before-takeover",
+            serde_json::json!({"value": 1}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    held.documents()
+        .drop_collection("drop-items")
+        .await
+        .unwrap();
+    assert!(
+        held.documents()
+            .get("drop-items", "before-takeover")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    held.kv()
+        .put("profile", serde_json::json!({"enabled": true}))
+        .await
+        .unwrap();
+    held.queues()
+        .enqueue(
+            "jobs",
+            &[tinystoragedrivers_types::NewMessage::new(
+                serde_json::json!({"work": 1}),
+            )],
+        )
+        .await
+        .unwrap();
+
+    let guard_after_accepted_writes = ordinary
+        .documents()
+        .get("leases", "writer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(guard_after_accepted_writes.doc, original_row.doc);
+    assert_eq!(guard_after_accepted_writes.version, original_row.version);
+    assert_eq!(guard_after_accepted_writes.meta, original_row.meta);
+
+    ordinary
+        .documents()
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 2}),
+            Precondition::Version(original),
+        )
+        .await
+        .unwrap();
+    let guard_after_takeover = ordinary
+        .documents()
+        .get("leases", "writer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        held.documents()
+            .put("items", "stale", serde_json::json!({}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams()
+            .append("events", serde_json::json!("stale"))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.kv()
+            .put("profile", serde_json::json!({"enabled": false}))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.queues()
+            .enqueue(
+                "jobs",
+                &[tinystoragedrivers_types::NewMessage::new(
+                    serde_json::json!({"work": 2}),
+                )],
+            )
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.streams()
+            .truncate_before("events", 1)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(held.streams().len("events").await.unwrap(), 1);
+    assert!(
+        held.documents()
+            .get("items", "stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let guard_after = ordinary
+        .documents()
+        .get("leases", "writer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        guard_after_takeover.version,
+        original_row.version.next().unwrap()
+    );
+    assert_eq!(guard_after.version, guard_after_takeover.version);
+    assert_eq!(guard_after.meta, guard_after_takeover.meta);
+    assert_eq!(guard_after.doc, serde_json::json!({"epoch": 2}));
+    assert_eq!(
+        held.streams()
+            .delete_stream("events")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(held.streams().len("events").await.unwrap(), 1);
+    assert_eq!(
+        held.documents()
+            .drop_collection("items")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        held.documents()
+            .get("items", "accepted")
+            .await
+            .unwrap()
+            .unwrap()
+            .doc,
+        serde_json::json!({"value": 1})
+    );
+
+    let connection = tinystoragedrivers_connect::MongoConnection::connect(&uri, &database)
+        .await
+        .unwrap();
+    connection.database().drop().await.unwrap();
 }
 
 #[cfg(feature = "file")]

@@ -116,6 +116,7 @@ async fn watch_rejects_invalid_requests_and_unsupported_deployments_before_io() 
         clock: std::sync::Arc::new(|| 0),
         transactions: false,
         origin: mongodb::bson::oid::ObjectId::new(),
+        condition: None,
     };
 
     assert_eq!(

@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = []
-sqlite = ["dep:rusqlite", "dep:tokio"]
+sqlite = ["dep:rusqlite", "dep:tokio", "dep:zstd", "dep:serde_json"]
 mongodb = ["dep:mongodb"]
 s3 = ["dep:object_store", "dep:url"]
 amqp = ["dep:lapin"]
@@ -19,6 +19,8 @@ file = ["dep:tokio"]
 [dependencies]
 tinystoragedrivers-types = { workspace = true }
 rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+zstd = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt"], optional = true }
 mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
 object_store = { version = "0.14.2", default-features = false, features = ["aws"], optional = true }

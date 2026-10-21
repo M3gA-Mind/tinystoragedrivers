@@ -8,7 +8,7 @@ use tinystoragedrivers_api::KvStore;
 use tinystoragedrivers_connect::sqlite::{SqliteConnection, rusqlite};
 use tinystoragedrivers_types::{
     Capabilities, Capability, Cursor, Meta, Page, Precondition, Result, Scope, StorageError,
-    Version, Versioned,
+    Version, Versioned, WriteCondition,
 };
 
 use crate::common::{
@@ -30,6 +30,7 @@ struct Record {
 pub struct SqliteKv {
     connection: SqliteConnection,
     scope: String,
+    condition: Option<WriteCondition>,
 }
 
 impl SqliteKv {
@@ -59,7 +60,29 @@ impl SqliteKv {
         Ok(Self {
             connection,
             scope: scope.as_str().to_owned(),
+            condition: None,
         })
+    }
+
+    /// Bind this KV handle to a host condition checked in the same SQLite
+    /// write transaction as each mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying SQLite connection cannot initialize
+    /// the scoped KV handle.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the condition is retained by this handle"
+    )]
+    pub fn conditioned(
+        connection: SqliteConnection,
+        scope: Scope,
+        condition: WriteCondition,
+    ) -> Result<Self> {
+        let mut kv = Self::new(connection, scope)?;
+        kv.condition = Some(condition);
+        Ok(kv)
     }
 
     fn now_ms(&self) -> i64 {
@@ -70,11 +93,16 @@ impl SqliteKv {
 #[async_trait]
 impl KvStore for SqliteKv {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        let capabilities = Capabilities::none()
             .with(Capability::Kv)
             .with(Capability::Ttl)
             .with(Capability::SharedAcrossProcesses)
-            .with(Capability::CrossProcessCas)
+            .with(Capability::CrossProcessCas);
+        if self.condition.is_some() {
+            capabilities.with(Capability::ConditionalWrites)
+        } else {
+            capabilities
+        }
     }
 
     async fn get(&self, key: &str) -> Result<Option<Versioned<Value>>> {
@@ -111,12 +139,18 @@ impl KvStore for SqliteKv {
         let connection = self.connection.clone();
         let scope = self.scope.clone();
         let key = key.to_owned();
-        let now = self.now_ms();
+        let condition = self.condition.clone();
+        let tables = self.connection.tables().clone();
+        let clock = self.connection.clock();
         connection
             .run(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(tinystoragedrivers_connect::sqlite::error::during("begin KV delete"))?;
+                let now = i64::try_from(clock()).unwrap_or(i64::MAX);
+                if let Some(condition) = &condition {
+                    tables.check_write_condition(&tx, condition, now)?;
+                }
                 let old = read_record(&tx, &scope, &key)?;
                 let current = old.as_ref().filter(|record| record.live(now)).map(|r| r.version);
                 check_precondition(expected, current)?;
@@ -229,12 +263,18 @@ impl SqliteKv {
         let connection = self.connection.clone();
         let scope = self.scope.clone();
         let key = key.to_owned();
-        let now = self.now_ms();
+        let condition = self.condition.clone();
+        let tables = self.connection.tables().clone();
+        let clock = self.connection.clock();
         connection
             .run(move |conn| {
                 let tx = conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(tinystoragedrivers_connect::sqlite::error::during("begin KV write"))?;
+                let now = i64::try_from(clock()).unwrap_or(i64::MAX);
+                if let Some(condition) = &condition {
+                    tables.check_write_condition(&tx, condition, now)?;
+                }
                 let old = read_record(&tx, &scope, &key)?;
                 let current = old.as_ref().filter(|record| record.live(now)).map(|r| r.version);
                 check_precondition(expected, current)?;

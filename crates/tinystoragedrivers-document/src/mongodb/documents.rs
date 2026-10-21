@@ -9,8 +9,8 @@ use tinystoragedrivers_api::{DocumentStore, DocumentWatch, async_trait};
 use tinystoragedrivers_types::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, Filter, Meta, Page,
     Precondition, Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version,
-    Versioned, WatchOptions, WriteOp, WriteOptions, WriteResult, sort_documents_with_meta,
-    validate_collection, validate_doc, validate_id,
+    Versioned, WatchOptions, WriteCondition, WriteOp, WriteOptions, WriteResult,
+    sort_documents_with_meta, validate_collection, validate_doc, validate_id,
 };
 
 use tinystoragedrivers_connect::MongoConnection;
@@ -36,6 +36,7 @@ pub struct MongoDocuments {
     pub(super) clock: crate::Clock,
     pub(super) transactions: bool,
     pub(super) origin: mongodb::bson::oid::ObjectId,
+    pub(super) condition: Option<WriteCondition>,
 }
 
 impl std::fmt::Debug for MongoDocuments {
@@ -63,7 +64,94 @@ impl MongoDocuments {
             clock: connection.clock(),
             transactions: connection.transactions_available(),
             origin: connection.origin(),
+            condition: None,
         }
+    }
+
+    /// Bind this document port to a host condition checked in every write
+    /// transaction. The connection must support MongoDB transactions.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unsupported` when the connection cannot run transactions.
+    pub fn conditioned(
+        connection: MongoConnection,
+        scope: Scope,
+        condition: WriteCondition,
+    ) -> Result<Self> {
+        if !connection.transactions_available() {
+            return Err(StorageError::unsupported(
+                Capability::ConditionalWrites,
+                "conditioned MongoDB documents require transactions",
+            ));
+        }
+        let mut documents = Self::new(connection, scope);
+        documents.condition = Some(condition);
+        Ok(documents)
+    }
+
+    /// Check and transactionally hold this handle's host write condition.
+    ///
+    /// This is exposed for sibling native engines that must mutate their own
+    /// collection in the same MongoDB transaction as the document guard.
+    /// It must only be called with the active transaction session used for
+    /// the guarded mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` when the condition is absent, expired, or no longer
+    /// matches, and propagates database errors from the transaction.
+    pub async fn check_condition(&self, session: &mut ClientSession) -> Result<()> {
+        let Some(condition) = &self.condition else {
+            return Ok(());
+        };
+        for clause in condition.clauses() {
+            let spec = self.collection_spec(clause.collection()).await?;
+            let filter = doc! {"_id": {"s": clause.scope().as_str(), "k": clause.id()}, DELETED: {"$ne": true}};
+            let record = self
+                .collection(clause.collection())
+                .find_one(filter.clone())
+                .session(&mut *session)
+                .await
+                .map_err(|error| transaction_error("read a write condition", error))?
+                .ok_or_else(|| StorageError::conflict("write condition document is absent"))?;
+            let now_ms = (self.clock)();
+            let row = decode(&record)?
+                .filter(|row| !expired(&spec, row, now_ms))
+                .ok_or_else(|| {
+                    StorageError::conflict("write condition document is absent or expired")
+                })?;
+            if !clause.matches_at(
+                &row.id,
+                &row.doc,
+                &row.meta,
+                i64::try_from(now_ms).unwrap_or(i64::MAX),
+            ) {
+                return Err(StorageError::conflict(
+                    "write condition did not match or is expired",
+                ));
+            }
+
+            // A read-only predicate in a Mongo snapshot transaction can race a
+            // concurrent guard replacement. Touch every private guard envelope
+            // so each takeover conflicts with this transaction. This field is
+            // outside logical document bodies and public metadata.
+            let version = i64::try_from(row.version.0)
+                .map_err(|_| StorageError::serialization("condition version is out of range"))?;
+            let touched = self
+                .collection(clause.collection())
+                .update_one(
+                    doc! {"_id": {"s": clause.scope().as_str(), "k": clause.id()}, VERSION: version, DELETED: {"$ne": true}},
+                    doc! {"$inc": {"_tsd_condition_touch": 1_i64}},
+                )
+                .session(&mut *session)
+                .await
+                .map_err(|error| transaction_error("hold a write condition", error))?;
+            if touched.matched_count != 1 {
+                return Err(StorageError::conflict("write condition changed"));
+            }
+        }
+        Ok(())
     }
 
     fn collection(&self, collection: &str) -> Collection<Document> {
@@ -105,6 +193,13 @@ impl MongoDocuments {
         options: WriteOptions,
         mut session: Option<&mut ClientSession>,
     ) -> Result<Version> {
+        if let Some(session) = session.as_deref_mut() {
+            self.check_condition(session).await?;
+        } else if self.condition.is_some() {
+            return Err(StorageError::backend(
+                "conditioned document write has no transaction",
+            ));
+        }
         validate_collection(collection)?;
         validate_id(id)?;
         validate_doc(&value)?;
@@ -193,6 +288,13 @@ impl MongoDocuments {
         precondition: Precondition,
         mut session: Option<&mut ClientSession>,
     ) -> Result<bool> {
+        if let Some(session) = session.as_deref_mut() {
+            self.check_condition(session).await?;
+        } else if self.condition.is_some() {
+            return Err(StorageError::backend(
+                "conditioned document delete has no transaction",
+            ));
+        }
         validate_collection(collection)?;
         validate_id(id)?;
         let spec = self.collection_spec(collection).await?;
@@ -308,10 +410,15 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::CollectionEnumeration)
             .with(Capability::CollectionValidation);
         if self.transactions {
-            capabilities
+            let capabilities = capabilities
                 .with(Capability::Transactions)
                 .with(Capability::ValidatedBatch)
-                .with(Capability::Watch)
+                .with(Capability::Watch);
+            if self.condition.is_some() {
+                capabilities.with(Capability::ConditionalWrites)
+            } else {
+                capabilities
+            }
         } else {
             capabilities
         }
@@ -327,6 +434,12 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
+        if self.condition.is_some() {
+            return Err(StorageError::unsupported(
+                Capability::ConditionalWrites,
+                "conditioned MongoDB handles cannot mutate collection declarations",
+            ));
+        }
         spec.validate()?;
         let metadata = self.database.collection::<Document>(META_COLLECTION);
         for _ in 0..16 {
@@ -429,6 +542,39 @@ impl DocumentStore for MongoDocuments {
         precondition: Precondition,
         options: WriteOptions,
     ) -> Result<Version> {
+        if self.condition.is_some() {
+            let mut session = self
+                .client
+                .start_session()
+                .await
+                .map_err(mongo_error("start a conditioned document write"))?;
+            session
+                .start_transaction()
+                .await
+                .map_err(mongo_error("start a conditioned document write"))?;
+            let result = self
+                .put_with_session(
+                    collection,
+                    id,
+                    value,
+                    precondition,
+                    options,
+                    Some(&mut session),
+                )
+                .await;
+            return match result {
+                Ok(version) => {
+                    session.commit_transaction().await.map_err(|error| {
+                        transaction_error("commit a conditioned document write", error)
+                    })?;
+                    Ok(version)
+                }
+                Err(error) => {
+                    let _ = session.abort_transaction().await;
+                    Err(error)
+                }
+            };
+        }
         for attempt in 0..64 {
             match self
                 .put_with_session(collection, id, value.clone(), precondition, options, None)
@@ -447,6 +593,32 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        if self.condition.is_some() {
+            let mut session = self
+                .client
+                .start_session()
+                .await
+                .map_err(mongo_error("start a conditioned document delete"))?;
+            session
+                .start_transaction()
+                .await
+                .map_err(mongo_error("start a conditioned document delete"))?;
+            let result = self
+                .delete_with_session(collection, id, precondition, Some(&mut session))
+                .await;
+            return match result {
+                Ok(removed) => {
+                    session.commit_transaction().await.map_err(|error| {
+                        transaction_error("commit a conditioned document delete", error)
+                    })?;
+                    Ok(removed)
+                }
+                Err(error) => {
+                    let _ = session.abort_transaction().await;
+                    Err(error)
+                }
+            };
+        }
         self.delete_with_session(collection, id, precondition, None)
             .await
     }
@@ -606,16 +778,20 @@ impl DocumentStore for MongoDocuments {
         }
         for check in &checks {
             check.validate()?;
-            self.ensure_collection(&CollectionSpec::new(check.collection.as_str()))
-                .await?;
+            if self.condition.is_none() {
+                self.ensure_collection(&CollectionSpec::new(check.collection.as_str()))
+                    .await?;
+            }
         }
         for op in &ops {
             let collection = match op {
                 WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. } => collection,
             };
             validate_collection(collection)?;
-            self.ensure_collection(&CollectionSpec::new(collection.as_str()))
-                .await?;
+            if self.condition.is_none() {
+                self.ensure_collection(&CollectionSpec::new(collection.as_str()))
+                    .await?;
+            }
         }
 
         let mut session = self
@@ -762,6 +938,58 @@ impl DocumentStore for MongoDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
+        if self.condition.is_some() {
+            let mut session = self
+                .client
+                .start_session()
+                .await
+                .map_err(mongo_error("start a conditioned collection drop"))?;
+            session
+                .start_transaction()
+                .await
+                .map_err(mongo_error("start a conditioned collection drop"))?;
+            let result = async {
+                self.check_condition(&mut session).await?;
+                let table = self.collection(collection);
+                let mut cursor = table
+                    .find(doc! {SCOPE: self.scope.as_str(), DELETED: {"$ne": true}})
+                    .session(&mut session)
+                    .await
+                    .map_err(|error| transaction_error("read documents to drop a collection", error))?;
+                while let Some(record) = cursor.next(&mut session).await {
+                    let record = record
+                        .map_err(|error| transaction_error("read documents to drop a collection", error))?;
+                    let id = record
+                        .get_str(KEY)
+                        .map_err(|_| StorageError::serialization("stored document has no key"))?;
+                    let version = record
+                        .get_i64(VERSION)
+                        .map_err(|_| StorageError::serialization("stored document has no version"))?;
+                    let result = table
+                        .update_one(
+                            doc! {"_id": self.scoped_id(id), VERSION: version, DELETED: {"$ne": true}},
+                            doc! {"$set": {BODY: {}, DELETED: true}},
+                        )
+                        .session(&mut session)
+                        .await
+                        .map_err(|error| transaction_error("drop scoped documents", error))?;
+                    if result.matched_count != 1 {
+                        return Err(StorageError::conflict("document changed during collection drop"));
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            return match result {
+                Ok(()) => session.commit_transaction().await.map_err(|error| {
+                    transaction_error("commit a conditioned collection drop", error)
+                }),
+                Err(error) => {
+                    let _ = session.abort_transaction().await;
+                    Err(error)
+                }
+            };
+        }
         let table = self.collection(collection);
         let mut cursor = table
             .find(doc! {SCOPE: self.scope.as_str()})

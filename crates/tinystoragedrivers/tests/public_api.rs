@@ -1,7 +1,9 @@
 //! The facade's public surface composes API handles from a URL.
 
 use tinystoragedrivers::{StorageConfig, types::Scope};
-use tinystoragedrivers_types::{Precondition, StorageError};
+#[cfg(feature = "mongodb")]
+use tinystoragedrivers_types::Precondition;
+use tinystoragedrivers_types::StorageError;
 
 async fn check_core_conformance(
     backend: &dyn tinystoragedrivers::StorageBackend,

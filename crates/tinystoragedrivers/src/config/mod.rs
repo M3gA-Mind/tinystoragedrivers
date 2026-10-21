@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinystoragedrivers_api::{Storage, StorageBackend};
-use tinystoragedrivers_types::{Result, StorageError};
+use tinystoragedrivers_types::{Capability, Result, Scope, StorageError, WriteCondition};
 
 /// A parsed storage location.
 ///
@@ -419,6 +419,13 @@ impl CompositeBackend {
         }
     }
 
+    #[cfg_attr(
+        not(any(feature = "sqlite", feature = "mongodb")),
+        allow(
+            clippy::unnecessary_wraps,
+            reason = "engine-enabled builds can fail while opening a scope; keep one backend contract across feature sets"
+        )
+    )]
     fn open_scope(&self, scope: &tinystoragedrivers_types::Scope) -> Result<Storage> {
         use std::sync::Arc;
         use tinystoragedrivers_api::Storage;
@@ -511,6 +518,105 @@ impl CompositeBackend {
         };
         Ok(Storage::new(documents, streams, kv, blobs, queues, secrets))
     }
+
+    #[cfg(any(feature = "sqlite", feature = "mongodb"))]
+    fn open_conditioned_scope(&self, scope: &Scope, condition: &WriteCondition) -> Result<Storage> {
+        use std::sync::Arc;
+        use tinystoragedrivers_api::Storage;
+
+        let unsupported = Storage::unsupported();
+        match &self.engine {
+            #[cfg(feature = "sqlite")]
+            Engine::Sqlite(connection) => {
+                let documents = Arc::new(
+                    tinystoragedrivers_document::sqlite::SqliteDocuments::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    ),
+                ) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(
+                    tinystoragedrivers_document::sqlite::SqliteStreams::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    ),
+                ) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(tinystoragedrivers_kv::SqliteKv::conditioned(
+                    connection.clone(),
+                    scope.clone(),
+                    condition.clone(),
+                )?) as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let blobs = Arc::new(tinystoragedrivers_blob::SqliteBlobStore::conditioned(
+                    connection.clone(),
+                    scope.clone(),
+                    condition.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&documents))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                Ok(Storage::new(
+                    documents,
+                    streams,
+                    kv,
+                    blobs,
+                    queues,
+                    unsupported.secrets().clone(),
+                ))
+            }
+            #[cfg(feature = "mongodb")]
+            Engine::Mongo {
+                connection,
+                kv_factory,
+            } => {
+                let documents = Arc::new(
+                    tinystoragedrivers_document::mongodb::MongoDocuments::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    )?,
+                ) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                let streams = Arc::new(
+                    tinystoragedrivers_document::mongodb::MongoStreams::conditioned(
+                        connection.clone(),
+                        scope.clone(),
+                        condition.clone(),
+                    )?,
+                ) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(kv_factory.conditioned_for_scope(scope, condition.clone())?)
+                    as Arc<dyn tinystoragedrivers_api::KvStore>;
+                let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&documents))
+                    as Arc<dyn tinystoragedrivers_api::QueueStore>;
+                Ok(Storage::new(
+                    documents,
+                    streams,
+                    kv,
+                    unsupported.blobs().clone(),
+                    queues,
+                    unsupported.secrets().clone(),
+                ))
+            }
+            _ => Err(StorageError::unsupported(
+                Capability::ConditionalWrites,
+                "this storage composition cannot atomically condition every exposed mutation port",
+            )),
+        }
+    }
+
+    #[cfg(not(any(feature = "sqlite", feature = "mongodb")))]
+    #[allow(
+        clippy::unused_self,
+        reason = "the memory-only build has no engine to condition, while this method must implement the shared backend contract"
+    )]
+    fn open_conditioned_scope(
+        &self,
+        _scope: &Scope,
+        _condition: &WriteCondition,
+    ) -> Result<Storage> {
+        Err(StorageError::unsupported(
+            Capability::ConditionalWrites,
+            "this storage composition cannot atomically condition mutations",
+        ))
+    }
 }
 
 #[cfg(any(feature = "file", feature = "sqlite", feature = "mongodb"))]
@@ -535,6 +641,10 @@ impl StorageBackend for CompositeBackend {
         let storage = self.open_scope(scope)?;
         handles.insert(key, storage.clone());
         Ok(storage)
+    }
+
+    fn for_scope_conditioned(&self, scope: &Scope, condition: &WriteCondition) -> Result<Storage> {
+        self.open_conditioned_scope(scope, condition)
     }
 }
 

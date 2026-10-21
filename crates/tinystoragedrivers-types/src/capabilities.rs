@@ -55,10 +55,12 @@ pub enum Capability {
     BlobListing,
     /// Secret writes support atomic preconditions.
     ConditionalSecretWrites,
+    /// Every mutation through this bound port atomically checks its host-supplied document condition.
+    ConditionalWrites,
 }
 
 impl Capability {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::Documents,
         Self::Streams,
         Self::Kv,
@@ -82,6 +84,7 @@ impl Capability {
         Self::CrossProcessCas,
         Self::BlobListing,
         Self::ConditionalSecretWrites,
+        Self::ConditionalWrites,
     ];
     const fn bit(self) -> u32 {
         match self {
@@ -108,6 +111,7 @@ impl Capability {
             Self::CrossProcessCas => 1 << 20,
             Self::BlobListing => 1 << 21,
             Self::ConditionalSecretWrites => 1 << 22,
+            Self::ConditionalWrites => 1 << 23,
         }
     }
 }
@@ -137,6 +141,7 @@ impl fmt::Display for Capability {
             Self::CrossProcessCas => "cross_process_cas",
             Self::BlobListing => "blob_listing",
             Self::ConditionalSecretWrites => "conditional_secret_writes",
+            Self::ConditionalWrites => "conditional_writes",
         })
     }
 }
@@ -153,7 +158,7 @@ impl Capabilities {
     /// Returns every capability defined by this crate version.
     #[must_use]
     pub const fn all() -> Self {
-        Self((1 << 23) - 1)
+        Self((1 << 24) - 1)
     }
     /// Returns this set with one capability added.
     #[must_use]

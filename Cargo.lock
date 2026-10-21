@@ -3789,10 +3789,12 @@ dependencies = [
  "mongodb",
  "object_store",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tinystoragedrivers-types",
  "tokio",
  "url",
+ "zstd",
 ]
 
 [[package]]
@@ -3831,6 +3833,7 @@ dependencies = [
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
  "tinystoragedrivers-testkit",
  "tinystoragedrivers-types",
  "tokio",

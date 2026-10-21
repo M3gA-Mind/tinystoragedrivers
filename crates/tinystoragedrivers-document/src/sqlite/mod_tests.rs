@@ -2,9 +2,115 @@ use super::*;
 use tempfile::tempdir;
 use tinystoragedrivers_api::{DocumentStore, StreamStore};
 use tinystoragedrivers_types::{
-    Capability, CollectionSpec, ExpectedDocument, IndexSpec, Precondition, Query, ReadCheck, Scope,
-    Sort, WriteOp,
+    Capability, CollectionSpec, ExpectedDocument, Filter, IndexSpec, Precondition, Query,
+    ReadCheck, Scope, Sort, WriteCondition, WriteOp,
 };
+
+#[tokio::test]
+async fn conditional_write_rejects_guard_expired_by_collection_ttl() {
+    let directory = tempdir().unwrap();
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open_with_clock(
+        directory.path(),
+        std::sync::Arc::new(|| 100),
+    )
+    .unwrap();
+    let guard_scope = Scope::new("ttl-guard").unwrap();
+    let target_scope = Scope::new("ttl-target").unwrap();
+    let ordinary = SqliteDocuments::new(connection.clone(), guard_scope.clone());
+    ordinary
+        .ensure_collection(&CollectionSpec::new("leases").ttl("expires_at"))
+        .await
+        .unwrap();
+    ordinary
+        .put(
+            "leases",
+            "owner",
+            serde_json::json!({"holder": "worker", "expires_at": 99}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    assert!(ordinary.get("leases", "owner").await.unwrap().is_none());
+
+    let condition = WriteCondition::new(
+        guard_scope,
+        "leases",
+        "owner",
+        Filter::eq("holder", "worker"),
+    )
+    .unwrap();
+    let conditioned = SqliteDocuments::conditioned(connection, target_scope, condition);
+    let error = conditioned
+        .put(
+            "items",
+            "must-not-write",
+            serde_json::json!({"value": true}),
+            Precondition::None,
+        )
+        .await
+        .expect_err("a TTL-expired guard must not authorize a mutation");
+    assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    assert!(
+        conditioned
+            .get("items", "must-not-write")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn conditional_write_rechecks_a_body_deadline_at_mutation_time() {
+    let directory = tempdir().unwrap();
+    let now = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let clock = std::sync::Arc::clone(&now);
+    let connection = tinystoragedrivers_connect::sqlite::SqliteConnection::open_with_clock(
+        directory.path(),
+        std::sync::Arc::new(move || clock.load(std::sync::atomic::Ordering::SeqCst)),
+    )
+    .unwrap();
+    let guard_scope = Scope::new("deadline-guard").unwrap();
+    let target_scope = Scope::new("deadline-target").unwrap();
+    let ordinary = SqliteDocuments::new(connection.clone(), guard_scope.clone());
+    ordinary
+        .ensure_collection(&CollectionSpec::new("leases"))
+        .await
+        .unwrap();
+    ordinary
+        .put(
+            "leases",
+            "writer",
+            serde_json::json!({"epoch": 1, "expires_at": 150}),
+            Precondition::Absent,
+        )
+        .await
+        .unwrap();
+    let condition = WriteCondition::new(guard_scope, "leases", "writer", Filter::eq("epoch", 1))
+        .unwrap()
+        .with_valid_until_field("expires_at")
+        .unwrap();
+    let conditioned = SqliteDocuments::conditioned(connection, target_scope, condition);
+
+    now.store(150, std::sync::atomic::Ordering::SeqCst);
+    let error = conditioned
+        .put(
+            "items",
+            "must-not-write",
+            serde_json::json!({"value": true}),
+            Precondition::None,
+        )
+        .await
+        .expect_err("an expired body deadline must not authorize a mutation");
+    assert_eq!(error.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    assert!(ordinary.get("leases", "writer").await.unwrap().is_some());
+    assert!(
+        conditioned
+            .get("items", "must-not-write")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn document_and_stream_engines_share_the_connection_and_scope() {

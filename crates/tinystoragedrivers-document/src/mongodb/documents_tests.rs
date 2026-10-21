@@ -18,12 +18,72 @@ fn mongo_error_adapter_keeps_operation_context_and_hides_driver_details() {
 }
 
 #[test]
+fn transaction_error_preserves_ambiguous_mongo_failure_as_unavailable() {
+    let error = transaction_error(
+        "commit a conditioned write",
+        mongodb::error::Error::custom("ambiguous network failure"),
+    );
+    assert_eq!(
+        error.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(error.message().contains("commit a conditioned write"));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
 fn definite_write_conflicts_are_retryable_but_ambiguous_commits_are_not() {
     assert!(is_definite_transaction_conflict(Some(112), false, false));
     assert!(is_definite_transaction_conflict(None, true, false));
     assert!(!is_definite_transaction_conflict(Some(112), true, true));
     assert!(!is_definite_transaction_conflict(None, false, true));
     assert!(!is_definite_transaction_conflict(Some(91), false, false));
+}
+
+#[test]
+fn mongo_command_conflict_maps_to_retryable_storage_conflict() {
+    let command: mongodb::error::CommandError =
+        serde_json::from_value(serde_json::json!({"code": 112, "message": "write conflict"}))
+            .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+
+    let mapped = transaction_error("commit a conditioned write", error);
+    assert_eq!(mapped.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    assert!(mapped.message().contains("transaction conflicted"));
+}
+
+#[test]
+fn unrelated_command_and_index_errors_remain_unavailable() {
+    let command: mongodb::error::CommandError = serde_json::from_value(serde_json::json!({
+        "code": 11000,
+        "errmsg": "duplicate key error index: unrelated_unique dup key"
+    }))
+    .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+
+    assert_eq!(
+        duplicate_key_index(&error).as_deref(),
+        Some("unrelated_unique")
+    );
+    let mapped = map_document_write_error(error);
+    assert_eq!(
+        mapped.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(std::error::Error::source(&mapped).is_some());
+
+    let command: mongodb::error::CommandError = serde_json::from_value(serde_json::json!({
+        "code": 91,
+        "message": "not primary"
+    }))
+    .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+    let mapped = transaction_error("commit a conditioned write", error);
+    assert_eq!(
+        mapped.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(mapped.message().contains("commit a conditioned write"));
 }
 
 #[tokio::test]
@@ -40,6 +100,7 @@ async fn document_debug_reports_binding_without_logging_client_credentials() {
         clock: std::sync::Arc::new(|| 0),
         transactions: true,
         origin: mongodb::bson::oid::ObjectId::new(),
+        condition: None,
     };
     let output = format!("{documents:?}");
     assert!(output.contains("debug"));

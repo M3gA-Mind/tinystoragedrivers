@@ -9,8 +9,8 @@ use tinystoragedrivers_types::{
     Blob, BlobMeta, Capabilities, Capability, CollectionSpec, Cursor, DeadLetter, Delivery,
     Enqueued, Filter, NewMessage, Page, Precondition, Query, QueueFeatures, QueueSpec, QueueStats,
     ReadCheck, Receipt, Result, Retry, Scope, SearchHit, Sort, StorageError, StreamEntry,
-    StreamInfo, TreeEntry, TreeFile, Version, Versioned, WatchOptions, WriteOp, WriteOptions,
-    WriteResult,
+    StreamInfo, TreeEntry, TreeFile, Version, Versioned, WatchOptions, WriteCondition, WriteOp,
+    WriteOptions, WriteResult,
 };
 use zeroize::Zeroizing;
 
@@ -30,6 +30,29 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// Returns an error when the backend cannot serve the scope or open its
     /// primitive handles.
     fn for_scope(&self, scope: &Scope) -> Result<Storage>;
+
+    /// Open a capability-restricted bundle whose participating mutation
+    /// ports atomically check `condition` against its guard document.
+    ///
+    /// A successful result exposes only ports that enforce the condition on
+    /// every mutation. All other ports must be returned as unsupported
+    /// handles; implementations must never return ordinary writable handles
+    /// for a port that cannot participate. Backends may reject the request
+    /// when the guard and target cannot share one atomic domain.
+    ///
+    /// # Errors
+    /// Returns `Unsupported(ConditionalWrites)` when the backend cannot
+    /// provide the requested guarantee, or a backend/configuration error.
+    fn for_scope_conditioned(
+        &self,
+        _scope: &Scope,
+        _condition: &WriteCondition,
+    ) -> Result<Storage> {
+        Err(StorageError::unsupported(
+            Capability::ConditionalWrites,
+            "atomic condition-bound writes are unsupported by this backend",
+        ))
+    }
 }
 
 /// Cloneable bundle of all primitive handles for one scope.
