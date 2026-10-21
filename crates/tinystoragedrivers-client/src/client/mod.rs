@@ -164,6 +164,58 @@ impl StorageBackend for BusStorage {
     }
 }
 
+/// Documents, native JSON streams and secrets, with no blob or watch surface.
+///
+/// The host fixes scope, admission, fences and generations. This deliberately
+/// does not implement `StorageBackend`, whose baseline includes blob storage.
+#[derive(Clone, Debug)]
+pub struct BusStoragePorts {
+    wire: Wire,
+    capabilities: Capabilities,
+}
+impl BusStoragePorts {
+    /// Probe only documents on an already bound three-port transport.
+    ///
+    /// # Errors
+    /// Refuses unavailable or invalid capability replies.
+    pub async fn connect(transport: Arc<dyn StorageTransport>) -> Result<Self> {
+        let wire = Wire::new(transport);
+        let reply: CapabilitiesReply = wire
+            .call(Object::Documents, "Capabilities", &(), None)
+            .await?;
+        let mut capabilities = capabilities_of(&reply.capabilities);
+        for capability in HOST_ONLY.into_iter().chain([
+            Capability::Watch,
+            Capability::StreamingBlobs,
+            Capability::PresignedUrls,
+            Capability::BlobTtl,
+        ]) {
+            capabilities = capabilities.without(capability);
+        }
+        Ok(Self { wire, capabilities })
+    }
+    /// Capabilities of the admitted document and JSON-stream ports.
+    #[must_use]
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+    /// The host-bound documents port.
+    #[must_use]
+    pub fn documents(&self) -> Arc<BusDocuments> {
+        Arc::new(BusDocuments::new(self.wire.clone(), self.capabilities))
+    }
+    /// The host-bound native JSON streams port.
+    #[must_use]
+    pub fn streams(&self) -> Arc<BusStreams> {
+        Arc::new(BusStreams::new(self.wire.clone()))
+    }
+    /// The host-bound confidential secrets port.
+    #[must_use]
+    pub fn secrets(&self) -> Arc<BusSecrets> {
+        Arc::new(BusSecrets::new(self.wire.clone()))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use tinystoragedrivers_core::DocumentWatch;

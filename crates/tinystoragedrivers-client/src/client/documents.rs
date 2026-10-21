@@ -61,6 +61,7 @@ impl DocumentStore for BusDocuments {
         filter: &Filter,
         options: &WatchOptions,
     ) -> Result<Box<dyn DocumentWatch>> {
+        self.capabilities.require(Capability::Watch)?;
         options.validate()?;
         let interval_ms = u64::try_from(options.interval.as_millis())
             .map_err(|_| StorageError::invalid_input("invalid watch interval"))?;

@@ -6,6 +6,9 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
+tinystoragedrivers-client = { path = "../../../crates/tinystoragedrivers-client" }
+tinystoragedrivers-schema = { path = "../../../crates/tinystoragedrivers-schema" }
+tinystoragedrivers-secrets = { path = "../../../crates/tinystoragedrivers-secrets" }
 serde_json.workspace = true
 tinybus = { workspace = true, features = ["modules"] }
 tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
@@ -13,5 +16,6 @@ tinystoragedrivers-tinybus = { path = "../../../crates/tinystoragedrivers-tinybu
 tinystoragedrivers-core = { path = "../../../crates/tinystoragedrivers-core" }
 
 [dev-dependencies]
+async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"

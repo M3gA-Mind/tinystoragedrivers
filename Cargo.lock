@@ -3765,6 +3765,7 @@ dependencies = [
  "tinystoragedrivers-bus",
  "tinystoragedrivers-client",
  "tinystoragedrivers-core",
+ "tinystoragedrivers-schema",
  "tinystoragedrivers-secrets",
  "tokio",
 ]
@@ -3934,6 +3935,7 @@ dependencies = [
  "serde_json",
  "tinybus",
  "tinystoragedrivers-bus",
+ "tinystoragedrivers-client",
  "tinystoragedrivers-core",
  "tokio",
 ]

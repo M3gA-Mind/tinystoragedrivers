@@ -9,6 +9,10 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+tinystoragedrivers-busproxy = { path = "../../../crates/tinystoragedrivers-busproxy" }
+tinystoragedrivers-core = { path = "../../../crates/tinystoragedrivers-core" }
+tinystoragedrivers-schema = { path = "../../../crates/tinystoragedrivers-schema" }
+tinystoragedrivers-secrets = { path = "../../../crates/tinystoragedrivers-secrets" }
 async-trait = "0.1"
 serde_json.workspace = true
 tinystoragedrivers-bus = { path = "../../../crates/tinystoragedrivers-bus" }
