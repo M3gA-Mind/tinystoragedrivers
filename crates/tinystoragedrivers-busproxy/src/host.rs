@@ -646,8 +646,7 @@ pub async fn serve_at_address(
     address: StorageAddress,
     endpoint: Arc<dyn StorageEndpoint>,
 ) -> tinybus::Result<ServedStorage> {
-    serve_at_address_with_registration_hook(connection, address, endpoint, |_| async {})
-        .await
+    serve_at_address_with_registration_hook(connection, address, endpoint, |_| async {}).await
 }
 
 async fn serve_at_address_with_registration_hook<F, Fut>(

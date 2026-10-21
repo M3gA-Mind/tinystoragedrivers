@@ -551,9 +551,7 @@ async fn a_partially_registered_address_does_not_dispatch_before_all_paths_are_c
             endpoint,
             move |index| {
                 let release = Arc::clone(&release_registration);
-                let registered = (index == 0)
-                    .then(|| registered_tx.take())
-                    .flatten();
+                let registered = (index == 0).then(|| registered_tx.take()).flatten();
                 async move {
                     if let Some(registered) = registered {
                         registered
@@ -578,9 +576,11 @@ async fn a_partially_registered_address_does_not_dispatch_before_all_paths_are_c
 
     release.notify_one();
     assert!(result.await.unwrap().is_err());
-    assert!(call_addressed(&caller, &address, Object::Documents)
-        .await
-        .is_err());
+    assert!(
+        call_addressed(&caller, &address, Object::Documents)
+            .await
+            .is_err()
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(call_fixed(&caller).await.unwrap(), json!("fixed-service"));
 
