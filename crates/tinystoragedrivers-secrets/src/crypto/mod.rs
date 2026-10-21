@@ -29,8 +29,7 @@
 //! # Ok::<(), tinystoragedrivers_core::StorageError>(())
 //! ```
 
-use chacha20poly1305::aead::rand_core::RngCore;
-use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
+use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use tinystoragedrivers_core::{Result, StorageError};
 use zeroize::Zeroizing;
@@ -61,9 +60,7 @@ pub fn generate_key() -> Result<Zeroizing<[u8; KEY_LEN]>> {
 /// Fill `buf` from the OS generator, reporting a failure instead of
 /// panicking as `RngCore::fill_bytes` would.
 fn fill_random(buf: &mut [u8]) -> Result<()> {
-    OsRng
-        .try_fill_bytes(buf)
-        .map_err(|_| StorageError::crypto("the os random source failed"))
+    getrandom::fill(buf).map_err(|_| StorageError::crypto("the os random source failed"))
 }
 
 /// Encrypt `plaintext` into a `nonce ‖ ciphertext ‖ tag` blob under a fresh
@@ -75,11 +72,12 @@ fn fill_random(buf: &mut [u8]) -> Result<()> {
 /// OS random source fails, or the cipher refuses the input (only possible
 /// beyond its 256 GiB limit).
 pub fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let key = Key::from(*key);
+    let cipher = ChaCha20Poly1305::new(&key);
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .encrypt(&Nonce::from(nonce), plaintext)
         .map_err(|_| StorageError::crypto("encryption failed"))?;
     let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     blob.extend_from_slice(&nonce);
@@ -101,9 +99,12 @@ pub fn decrypt(key: &[u8; KEY_LEN], blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         ));
     }
     let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce = Nonce::try_from(nonce)
+        .map_err(|_| StorageError::crypto("encrypted blob has an invalid nonce"))?;
+    let key = Key::from(*key);
+    let cipher = ChaCha20Poly1305::new(&key);
     cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map(Zeroizing::new)
         .map_err(|_| StorageError::crypto("decryption failed: wrong key or tampered data"))
 }

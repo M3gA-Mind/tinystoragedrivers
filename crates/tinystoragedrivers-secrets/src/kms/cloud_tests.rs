@@ -138,7 +138,7 @@ fn signing_hmac_matches_rfc_4231_vector() {
 fn aws_published_iam_signing_example_matches_canonical_hash_and_signature() {
     // AWS IAM SigV4 example: GET /?Action=ListUsers&Version=2010-05-08,
     // https://docs.aws.amazon.com/IAM/latest/UserGuide/create-signed-request.html
-    use sha2_legacy::{Digest, Sha256};
+    use sha2_11::{Digest, Sha256};
     let headers = std::collections::BTreeMap::from([
         (
             "content-type",

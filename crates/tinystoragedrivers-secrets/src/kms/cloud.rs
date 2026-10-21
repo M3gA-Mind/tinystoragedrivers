@@ -268,7 +268,7 @@ impl AwsKms {
         })
     }
     async fn request(&self, operation: &str, body: SensitiveJson) -> Result<SensitiveJson> {
-        use sha2_legacy::{Digest, Sha256};
+        use sha2_11::{Digest, Sha256};
         let creds = self.credentials.credentials().await?;
         let suffix = if self.region.starts_with("cn-") {
             "amazonaws.com.cn"
@@ -334,7 +334,7 @@ fn canonical_request(
     headers: &std::collections::BTreeMap<&str, String>,
     payload: &[u8],
 ) -> (Zeroizing<String>, String) {
-    use sha2_legacy::{Digest, Sha256};
+    use sha2_11::{Digest, Sha256};
     let signed = headers.keys().copied().collect::<Vec<_>>().join(";");
     let mut canonical_headers = Zeroizing::new(String::new());
     for (name, value) in headers {
@@ -373,8 +373,8 @@ fn signature(
 }
 #[cfg(feature = "kms-aws")]
 fn mac(key: &[u8], data: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<sha2_legacy::Sha256>::new_from_slice(key)
+    use hmac::{Hmac, KeyInit, Mac};
+    let mut mac = Hmac::<sha2_11::Sha256>::new_from_slice(key)
         .map_err(|_| StorageError::crypto("aws signing failed"))?;
     mac.update(data);
     Ok(Zeroizing::new(mac.finalize().into_bytes().into()))
