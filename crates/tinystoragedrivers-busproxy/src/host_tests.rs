@@ -542,11 +542,12 @@ async fn a_partially_registered_address_does_not_dispatch_before_all_paths_are_c
     let release = Arc::new(tokio::sync::Notify::new());
     let release_registration = Arc::clone(&release);
     let registration_host = host.clone();
+    let registration_address = address.clone();
     let endpoint = Arc::new(CountingEndpoint(Arc::clone(&calls)));
     let result = tokio::spawn(async move {
         serve_at_address_with_registration_hook(
             &registration_host,
-            address.clone(),
+            registration_address,
             endpoint,
             move |index| {
                 let release = Arc::clone(&release_registration);
