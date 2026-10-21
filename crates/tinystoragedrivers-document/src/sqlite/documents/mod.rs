@@ -25,8 +25,9 @@ use std::fmt;
 use tinystoragedrivers_api::{DocumentStore, async_trait};
 use tinystoragedrivers_types::{
     Capabilities, Capability, CollectionSpec, Cursor, CursorPosition, Filter, Page, Precondition,
-    Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
-    WriteOptions, WriteResult, validate_collection, validate_doc, validate_id, value,
+    Query, ReadCheck, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned,
+    WriteCondition, WriteOp, WriteOptions, WriteResult, validate_collection, validate_doc,
+    validate_id, value,
 };
 
 use tinystoragedrivers_connect::sqlite::SqliteConnection;
@@ -53,6 +54,7 @@ pub(crate) fn capabilities() -> Capabilities {
 pub struct SqliteDocuments {
     connection: SqliteConnection,
     scope: Scope,
+    condition: Option<WriteCondition>,
 }
 
 impl fmt::Debug for SqliteDocuments {
@@ -79,7 +81,26 @@ impl SqliteDocuments {
     /// Bind a document adapter to a shared SQLite connection and opaque scope.
     #[must_use]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Self {
-        Self { connection, scope }
+        Self {
+            connection,
+            scope,
+            condition: None,
+        }
+    }
+
+    /// Bind a document adapter whose mutations check `condition` in their
+    /// SQLite write transaction.
+    #[must_use]
+    pub fn conditioned(
+        connection: SqliteConnection,
+        scope: Scope,
+        condition: WriteCondition,
+    ) -> Self {
+        Self {
+            connection,
+            scope,
+            condition: Some(condition),
+        }
     }
 
     /// Run `f` with a context for this handle, inside an immediate
@@ -91,9 +112,11 @@ impl SqliteDocuments {
     {
         let tables = self.connection.tables().clone();
         let scope = self.scope.clone();
-        let now_ms = (self.connection.clock())();
+        let condition = self.condition.clone();
+        let clock = self.connection.clock();
         self.connection
             .run(move |conn| {
+                let now_ms = clock();
                 let ctx = Ctx {
                     tables: &tables,
                     scope: scope.as_str(),
@@ -115,6 +138,16 @@ impl SqliteDocuments {
                     .map_err(tinystoragedrivers_connect::sqlite::error::during(
                         "start write transaction",
                     ))?;
+                if access == Access::Write
+                    && let Some(condition) = &condition
+                {
+                    let condition_now_ms = clock();
+                    tables.check_write_condition(
+                        &tx,
+                        condition,
+                        i64::try_from(condition_now_ms).unwrap_or(i64::MAX),
+                    )?;
+                }
                 let value = f(&tx, ctx)?;
                 tx.commit()
                     .map_err(tinystoragedrivers_connect::sqlite::error::during(
@@ -151,7 +184,10 @@ fn parse_cursor(collection: &str, scope: &Scope, query: &Query) -> Result<Option
 #[async_trait]
 impl DocumentStore for SqliteDocuments {
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        let capabilities = capabilities();
+        self.condition.as_ref().map_or(capabilities, |_| {
+            capabilities.with(Capability::ConditionalWrites)
+        })
     }
 
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {

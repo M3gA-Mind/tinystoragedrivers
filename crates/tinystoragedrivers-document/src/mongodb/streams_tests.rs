@@ -24,6 +24,7 @@ async fn streams_without_server() -> MongoStreams {
         clock: std::sync::Arc::new(|| 0),
         transactions: false,
         blobs: None,
+        condition_guard: None,
         truncate_pause: None,
     }
 }

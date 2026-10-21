@@ -40,6 +40,7 @@ async fn document_debug_reports_binding_without_logging_client_credentials() {
         clock: std::sync::Arc::new(|| 0),
         transactions: true,
         origin: mongodb::bson::oid::ObjectId::new(),
+        condition: None,
     };
     let output = format!("{documents:?}");
     assert!(output.contains("debug"));

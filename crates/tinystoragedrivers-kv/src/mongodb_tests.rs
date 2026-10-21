@@ -94,11 +94,13 @@ async fn unreachable_mongodb_errors_are_returned_from_each_public_operation() {
 
     let client = mongodb::Client::with_uri_str(uri).await.unwrap();
     let store = MongoKv {
+        client: client.clone(),
         collection: client
             .database("tsd_kv_unreachable_test")
             .collection(COLLECTION),
         scope: "unreachable".to_owned(),
         clock: Arc::new(|| 1_000),
+        condition_guard: None,
     };
     assert!(format!("{store:?}").contains("unreachable"));
     for error in [

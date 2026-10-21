@@ -14,7 +14,7 @@ use tinystoragedrivers_connect::{
 };
 use tinystoragedrivers_types::{
     Blob, BlobListEntry, BlobListPage, BlobMeta, Capabilities, Capability,
-    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError,
+    MAX_BLOB_LIST_PAGE_ITEMS, Result, Scope, StorageError, WriteCondition,
 };
 
 use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix, validate_sealed_key};
@@ -24,13 +24,33 @@ use crate::key::{MAX_KEY_LEN, clamp_range, validate_key, validate_prefix, valida
 pub struct SqliteBlobStore {
     connection: SqliteConnection,
     scope: Scope,
+    condition: Option<WriteCondition>,
 }
 
 impl SqliteBlobStore {
     /// Bind a shared database connection to one scope.
     #[must_use]
     pub fn new(connection: SqliteConnection, scope: Scope) -> Self {
-        Self { connection, scope }
+        Self {
+            connection,
+            scope,
+            condition: None,
+        }
+    }
+
+    /// Bind a blob adapter whose mutations check `condition` in their SQLite
+    /// write transaction.
+    #[must_use]
+    pub fn conditioned(
+        connection: SqliteConnection,
+        scope: Scope,
+        condition: WriteCondition,
+    ) -> Self {
+        Self {
+            connection,
+            scope,
+            condition: Some(condition),
+        }
     }
 
     fn now(clock: &Clock) -> u64 {
@@ -41,10 +61,13 @@ impl SqliteBlobStore {
 #[async_trait]
 impl BlobStore for SqliteBlobStore {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::none()
+        let capabilities = Capabilities::none()
             .with(Capability::Blobs)
             .with(Capability::BlobTtl)
-            .with(Capability::BlobListing)
+            .with(Capability::BlobListing);
+        self.condition.as_ref().map_or(capabilities, |_| {
+            capabilities.with(Capability::ConditionalWrites)
+        })
     }
     fn max_key_len(&self) -> usize {
         MAX_KEY_LEN
@@ -106,10 +129,24 @@ impl BlobStore for SqliteBlobStore {
         let key = key.to_owned();
         let blobs = self.connection.tables().blobs().to_owned();
         let written = self.connection.tables().blob_written().to_owned();
+        let tables = self.connection.tables().clone();
         let now = Self::now(&self.connection.clock());
+        let clock = self.connection.clock();
+        let condition = self.condition.clone();
         self.connection
             .run(move |connection| {
-                let transaction = connection.transaction().map_err(sql_error)?;
+                let transaction = connection
+                    .transaction_with_behavior(
+                        tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate,
+                    )
+                    .map_err(sql_error)?;
+                if let Some(condition) = &condition {
+                    tables.check_write_condition(
+                        &transaction,
+                        condition,
+                        to_i64(Self::now(&clock)),
+                    )?;
+                }
                 let query = format!("SELECT expires_ms FROM \"{blobs}\" WHERE scope=?1 AND key=?2");
                 let expires: Option<Option<i64>> = transaction
                     .query_row(&query, params![scope, key], |row| row.get(0))
@@ -206,10 +243,24 @@ impl BlobStore for SqliteBlobStore {
         let key = key.to_owned();
         let blobs = self.connection.tables().blobs().to_owned();
         let written = self.connection.tables().blob_written().to_owned();
+        let tables = self.connection.tables().clone();
         let now = Self::now(&self.connection.clock());
+        let clock = self.connection.clock();
+        let condition = self.condition.clone();
         self.connection
             .run(move |connection| {
-                let tx = connection.transaction().map_err(sql_error)?;
+                let tx = connection
+                    .transaction_with_behavior(
+                        tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate,
+                    )
+                    .map_err(sql_error)?;
+                if let Some(condition) = &condition {
+                    tables.check_write_condition(
+                        &tx,
+                        condition,
+                        to_i64(Self::now(&clock)),
+                    )?;
+                }
                 let q = format!("SELECT expires_ms FROM \"{blobs}\" WHERE scope=?1 AND key=?2");
                 let expires: Option<Option<i64>> = tx
                     .query_row(&q, params![scope, key], |row| row.get(0))
@@ -274,9 +325,15 @@ impl BlobStore for SqliteBlobStore {
         let scope = self.scope.as_str().to_owned();
         let blobs = self.connection.tables().blobs().to_owned();
         let written = self.connection.tables().blob_written().to_owned();
-        let now = to_i64(Self::now(&self.connection.clock()));
+        let tables = self.connection.tables().clone();
+        let clock = self.connection.clock();
+        let condition = self.condition.clone();
         self.connection.run(move |connection| {
-            let transaction = connection.transaction().map_err(sql_error)?;
+            let transaction = connection.transaction_with_behavior(tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
+            if let Some(condition) = &condition {
+                tables.check_write_condition(&transaction, condition, to_i64(Self::now(&clock)))?;
+            }
+            let now = to_i64(Self::now(&clock));
             let select = format!("SELECT key FROM \"{blobs}\" WHERE scope=?1 AND expires_ms IS NOT NULL AND expires_ms<=?2");
             let keys = {
                 let mut statement = transaction.prepare(&select).map_err(sql_error)?;
@@ -312,13 +369,23 @@ impl SqliteBlobStore {
         let content_type = content_type.map(str::to_owned);
         let blobs = self.connection.tables().blobs().to_owned();
         let written = self.connection.tables().blob_written().to_owned();
+        let tables = self.connection.tables().clone();
         let now = Self::now(&self.connection.clock());
+        let clock = self.connection.clock();
         let expires =
             ttl.map(|ttl| now.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
         let hash = Sha256::digest(&bytes).to_vec();
         let len = bytes.len() as u64;
+        let condition = self.condition.clone();
         self.connection.run(move |connection| {
-            let transaction = connection.transaction().map_err(sql_error)?;
+            let transaction = connection.transaction_with_behavior(tinystoragedrivers_connect::sqlite::rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
+            if let Some(condition) = &condition {
+                tables.check_write_condition(
+                    &transaction,
+                    condition,
+                    to_i64(Self::now(&clock)),
+                )?;
+            }
             let put = format!("INSERT OR REPLACE INTO \"{blobs}\" (scope,key,content_type,size,sha256,expires_ms,bytes) VALUES (?1,?2,?3,?4,?5,?6,?7)");
             transaction.execute(&put, params![scope, key, content_type, i64::try_from(len).unwrap_or(i64::MAX), hash, expires.map(to_i64), bytes]).map_err(sql_error)?;
             let age = format!("INSERT OR REPLACE INTO \"{written}\" (scope,key,written_ms) VALUES (?1,?2,?3)");
