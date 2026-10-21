@@ -6,19 +6,23 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tinybus::{Connection, Error, Interface, InterfaceName, MemberName, Result};
 use tinystoragedrivers_api::{DocumentWatch, Storage};
-use tinystoragedrivers_busproxy::connect_storage_at;
+use tinystoragedrivers_busproxy::{StorageAddress, connect_storage_at, connect_storage_at_address};
 use tinystoragedrivers_types::{
     CollectionSpec, Filter, NewMessage, Precondition, QueueSpec, SecretPrecondition, WatchNotice,
     WatchOptions,
 };
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Config {
     host: tinybus::BusName,
+    #[serde(default)]
+    object_root: Option<String>,
 }
 
 struct StorageModule {
-    storage: Storage,
+    connection: Connection,
+    config: Config,
+    storage: tokio::sync::OnceCell<Storage>,
     watch: tokio::sync::Mutex<Option<Box<dyn DocumentWatch>>>,
 }
 
@@ -29,21 +33,72 @@ impl Interface for StorageModule {
     }
 
     fn members(&self) -> Vec<MemberName> {
-        ["Exercise", "OpenWatch", "ReadWatch"]
-            .into_iter()
-            .map(|member| member.parse().unwrap())
-            .collect()
+        [
+            "Ready",
+            "Exercise",
+            "OpenWatch",
+            "ReadWatch",
+            "Addressed",
+            "AddressedSecretsDenied",
+            "AddressedRead",
+        ]
+        .into_iter()
+        .map(|member| member.parse().unwrap())
+        .collect()
     }
 
     async fn call(&self, member: &MemberName, args: Value) -> Result<Value> {
         if args != json!([]) {
             return Err(Error::failed("callback proof takes no arguments"));
         }
+        // This readiness probe deliberately does not touch storage. The host
+        // uses it to wait for module setup before publishing the invocation
+        // endpoint that the module will connect to on its first storage call.
+        if member.as_str() == "Ready" {
+            return Ok(json!(true));
+        }
+        let storage = self.storage().await?;
         match member.as_str() {
-            "Exercise" => self.exercise().await,
+            "Exercise" => self.exercise(storage).await,
+            "Addressed" => {
+                storage
+                    .documents()
+                    .ensure_collection(&CollectionSpec::new("addressed"))
+                    .await
+                    .map_err(|_| Error::failed("addressed collection ensure failed"))?;
+                storage
+                    .documents()
+                    .put(
+                        "addressed",
+                        "module",
+                        json!({"value": 63}),
+                        Precondition::Absent,
+                    )
+                    .await
+                    .map_err(|_| Error::failed("addressed document put failed"))?;
+                let value = storage
+                    .documents()
+                    .get("addressed", "module")
+                    .await
+                    .map_err(|_| Error::failed("addressed document get failed"))?
+                    .ok_or_else(|| Error::failed("addressed document readback missing"))?;
+                Ok(json!(value.doc["value"] == 63))
+            }
+            "AddressedSecretsDenied" => {
+                let result = storage
+                    .secrets()
+                    .get_versioned("addressed/secret")
+                    .await;
+                Ok(json!(result.is_err()))
+            }
+            "AddressedRead" => storage
+                .documents()
+                .get("addressed", "module")
+                .await
+                .map(|value| json!(value.is_some()))
+                .map_err(|_| Error::failed("addressed document read failed")),
             "OpenWatch" => {
-                let watch = self
-                    .storage
+                let watch = storage
                     .documents()
                     .watch(
                         "callback-proof",
@@ -77,8 +132,26 @@ impl Interface for StorageModule {
 }
 
 impl StorageModule {
-    async fn exercise(&self) -> Result<Value> {
-        let storage = &self.storage;
+    async fn storage(&self) -> Result<&Storage> {
+        self.storage
+            .get_or_try_init(|| async {
+                let storage = if let Some(object_root) = &self.config.object_root {
+                    let address = StorageAddress::try_new(
+                        self.config.host.clone(),
+                        object_root.parse()?,
+                    )?;
+                    connect_storage_at_address(self.connection.clone(), address).await
+                } else {
+                    connect_storage_at(self.connection.clone(), self.config.host.clone()).await
+                };
+                storage.map_err(|error| {
+                    Error::failed(format!("host callback storage connection failed: {error}"))
+                })
+            })
+            .await
+    }
+
+    async fn exercise(&self, storage: &Storage) -> Result<Value> {
         let docs = storage.documents();
         docs.ensure_collection(&CollectionSpec::new("callback-proof"))
             .await
@@ -221,16 +294,22 @@ impl StorageModule {
 }
 
 async fn setup(connection: Connection, config: Config) -> Result<()> {
-    let storage = connect_storage_at(connection.clone(), config.host)
-        .await
-        .map_err(|_| Error::failed("host callback storage connection failed"))?;
+    let module = StorageModule {
+        connection: connection.clone(),
+        config: config.clone(),
+        storage: tokio::sync::OnceCell::new(),
+        watch: tokio::sync::Mutex::new(None),
+    };
+    // Ordinary callback fixtures keep their established eager setup path.
+    // The invocation-address fixture defers its first storage call until after
+    // ModuleHost has admitted this instance and served its peer-bound endpoint.
+    if config.object_root.is_none() {
+        module.storage().await?;
+    }
     connection
         .serve_at(
             "/storage_proof".parse()?,
-            StorageModule {
-                storage,
-                watch: tokio::sync::Mutex::new(None),
-            },
+            module,
         )
         .await?;
     connection
@@ -243,6 +322,14 @@ tinybus_module::module_export! {
     setup = setup, config = Config,
     worker_threads = 1,
     provides = ["org.example.StorageCallbackProof"],
-    methods = ["Exercise", "OpenWatch", "ReadWatch"],
+        methods = [
+            "Ready",
+            "Exercise",
+            "OpenWatch",
+            "ReadWatch",
+            "Addressed",
+            "AddressedSecretsDenied",
+            "AddressedRead",
+        ],
     signals = ["WatchChanged"], requires = [], optional = [], lazy = false,
 }

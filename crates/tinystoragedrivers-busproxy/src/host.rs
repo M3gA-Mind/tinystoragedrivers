@@ -5,9 +5,11 @@
 //! sender and must derive the caller's scope, grant and audit from it; nothing
 //! in a request can name a scope (the wire types reject unknown fields).
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use crate::StorageAddress;
 use crate::transport::{Admission, Object};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -131,11 +133,23 @@ pub trait StorageEndpoint: Send + Sync + 'static {
 #[derive(Clone)]
 enum HostTransport {
     Connection(WeakConnection),
+    Addressed {
+        connection: WeakConnection,
+        watch_path: tinybus::ObjectPath,
+        active: Arc<AtomicBool>,
+    },
     Callback(Weak<HostCallbackBinding>),
 }
 
 enum ServedMode {
     Connection(Connection),
+    Addressed {
+        connection: WeakConnection,
+        paths: Vec<tinybus::ObjectPath>,
+        active: Arc<AtomicBool>,
+        runtime: tokio::runtime::Handle,
+        watch_path: tinybus::ObjectPath,
+    },
     Callback(Arc<HostCallbackBinding>),
 }
 
@@ -146,6 +160,13 @@ struct Shared {
 }
 
 impl Shared {
+    fn is_active(&self) -> bool {
+        match &self.transport {
+            HostTransport::Addressed { active, .. } => active.load(Ordering::Acquire),
+            HostTransport::Connection(_) | HostTransport::Callback(_) => true,
+        }
+    }
+
     /// Start relaying `sender`'s watch signals if they are not already.
     fn forward_watch_signals(&self, sender: &BusName) {
         let Ok(mut forwarders) = self.forwarders.lock() else {
@@ -169,6 +190,9 @@ impl Shared {
                 };
                 (path, self.transport.clone())
             }
+            HostTransport::Addressed { watch_path, .. } => {
+                (watch_path.clone(), self.transport.clone())
+            }
             HostTransport::Callback(_) => (callback_watch_path(), self.transport.clone()),
         };
         // A forwarder for a binding that was released is replaced, not kept.
@@ -182,7 +206,8 @@ impl Shared {
                 match signals.recv().await {
                     Ok(signal) => {
                         let emitted = match &transport {
-                            HostTransport::Connection(connection) => {
+                            HostTransport::Connection(connection)
+                            | HostTransport::Addressed { connection, .. } => {
                                 let Some(connection) = connection.upgrade() else {
                                     return;
                                 };
@@ -265,7 +290,7 @@ fn request_of(args: Value) -> Result<Value, HostFailure> {
 impl ObjectService {
     fn connection(&self) -> Result<Connection, HostFailure> {
         match &self.shared.transport {
-            HostTransport::Connection(connection) => {
+            HostTransport::Connection(connection) | HostTransport::Addressed { connection, .. } => {
                 connection
                     .upgrade()
                     .ok_or(HostFailure::Storage(StorageFailure {
@@ -284,7 +309,7 @@ impl ObjectService {
         stream: &StreamRef,
     ) -> Result<StreamReader, HostFailure> {
         match &self.shared.transport {
-            HostTransport::Connection(_) => {
+            HostTransport::Connection(_) | HostTransport::Addressed { .. } => {
                 let caller = context
                     .authenticated_sender()
                     .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
@@ -308,7 +333,7 @@ impl ObjectService {
         descriptor: StreamDescriptor,
     ) -> Result<StreamWriter, HostFailure> {
         match &self.shared.transport {
-            HostTransport::Connection(_) => {
+            HostTransport::Connection(_) | HostTransport::Addressed { .. } => {
                 let caller = context
                     .authenticated_sender()
                     .ok_or(HostFailure::Denied("unauthenticated-caller"))?;
@@ -416,6 +441,9 @@ impl Interface for ObjectService {
         args: Value,
         context: &CallContext,
     ) -> tinybus::Result<Value> {
+        if !self.shared.is_active() {
+            return Err(HostFailure::Denied("storage-endpoint-closed").into());
+        }
         let sender = context.authenticated_sender();
         let selector = member.as_str();
         let outcome = match (self.object, selector) {
@@ -466,6 +494,17 @@ impl ServedMode {
     fn transport(&self) -> HostTransport {
         match self {
             Self::Connection(connection) => HostTransport::Connection(connection.downgrade()),
+            Self::Addressed {
+                connection,
+                paths: _,
+                active,
+                runtime: _,
+                watch_path,
+            } => HostTransport::Addressed {
+                connection: connection.clone(),
+                watch_path: watch_path.clone(),
+                active: Arc::clone(active),
+            },
             Self::Callback(binding) => HostTransport::Callback(Arc::downgrade(binding)),
         }
     }
@@ -488,14 +527,58 @@ impl ServedStorage {
                 task.abort();
             }
         }
-        match self.mode {
+        match &self.mode {
             ServedMode::Connection(connection) => {
                 for object in ALL {
                     connection.unserve(&object_path(object)).await;
                 }
                 connection.release_name(HOST_NAME).await
             }
+            ServedMode::Addressed { active, .. } => {
+                if active.swap(false, Ordering::AcqRel) {
+                    self.unregister_addressed().await;
+                }
+                Ok(())
+            }
             ServedMode::Callback(binding) => binding.close().await,
+        }
+    }
+
+    async fn unregister_addressed(&self) {
+        if let ServedMode::Addressed {
+            connection, paths, ..
+        } = &self.mode
+            && let Some(connection) = connection.upgrade()
+        {
+            for path in paths {
+                connection.unserve(path).await;
+            }
+        }
+    }
+}
+
+impl Drop for ServedStorage {
+    fn drop(&mut self) {
+        if let ServedMode::Addressed {
+            connection,
+            paths,
+            active,
+            runtime,
+            ..
+        } = &self.mode
+        {
+            if !active.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            let connection = connection.clone();
+            let paths = paths.clone();
+            runtime.spawn(async move {
+                if let Some(connection) = connection.upgrade() {
+                    for path in paths {
+                        connection.unserve(&path).await;
+                    }
+                }
+            });
         }
     }
 }
@@ -542,6 +625,74 @@ pub async fn serve(
     }
     Ok(ServedStorage {
         mode: ServedMode::Connection(connection.clone()),
+        shared,
+    })
+}
+
+/// Serve a request-scoped storage endpoint beneath an invocation root on an
+/// already-attested host connection.
+///
+/// The address host must be this connection's unique broker name. This does
+/// not claim a name or alter the normal host service; each invocation gets
+/// distinct object paths. Dropping the returned guard immediately disables
+/// dispatch and asynchronously unregisters only those paths. Call
+/// [`ServedStorage::shutdown`] when synchronous cleanup is required.
+///
+/// # Errors
+/// The host identity does not match the connection or `TinyBus` refuses a path
+/// registration.
+pub async fn serve_at_address(
+    connection: &Connection,
+    address: StorageAddress,
+    endpoint: Arc<dyn StorageEndpoint>,
+) -> tinybus::Result<ServedStorage> {
+    if connection.unique_name().as_ref() != Some(address.host()) {
+        return Err(tinybus::Error::failed(
+            "storage address host does not match this connection",
+        ));
+    }
+    let paths: Vec<_> = ALL
+        .into_iter()
+        .map(|object| address.port_path(object).clone())
+        .collect();
+    let active = Arc::new(AtomicBool::new(true));
+    let transport = HostTransport::Addressed {
+        connection: connection.downgrade(),
+        watch_path: address.watch_path().clone(),
+        active: Arc::clone(&active),
+    };
+    let shared = Arc::new(Shared {
+        transport,
+        endpoint,
+        forwarders: Mutex::new(HashMap::new()),
+    });
+    let mut registered = Vec::new();
+    for (object, path) in ALL.into_iter().zip(paths.iter()) {
+        if let Err(error) = connection
+            .serve_at(
+                path.clone(),
+                ObjectService {
+                    object,
+                    shared: Arc::clone(&shared),
+                },
+            )
+            .await
+        {
+            for path in registered {
+                connection.unserve(&path).await;
+            }
+            return Err(error);
+        }
+        registered.push(path.clone());
+    }
+    Ok(ServedStorage {
+        mode: ServedMode::Addressed {
+            connection: connection.downgrade(),
+            paths,
+            active,
+            runtime: tokio::runtime::Handle::current(),
+            watch_path: address.watch_path().clone(),
+        },
         shared,
     })
 }

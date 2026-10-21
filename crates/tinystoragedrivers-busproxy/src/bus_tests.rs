@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use tinybus::{BusName, Connection, broker::Broker, transport::memory::MemoryBus};
+use tinybus::{BusName, Connection, ObjectPath, broker::Broker, transport::memory::MemoryBus};
 use tinystoragedrivers_api::{Storage, StorageBackend};
 use tinystoragedrivers_testkit::{MemoryBackend, conformance};
 use tinystoragedrivers_types::{Result, Scope};
@@ -99,6 +99,102 @@ async fn independent_callers_receive_independent_storage_bindings() {
         .await
         .unwrap();
     assert!(second.kv().get("private").await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invocation_addresses_isolate_parallel_endpoints_on_one_attested_connection() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let host = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let host_name = host.unique_name().unwrap();
+    let address = |id: &str| {
+        StorageAddress::try_new(
+            host_name.clone(),
+            ObjectPath::new(format!("{INVOCATION_OBJECT_ROOT}/{id}")).unwrap(),
+        )
+        .unwrap()
+    };
+
+    let make_endpoint = |scope: &str| {
+        let storage = MemoryBackend::new()
+            .for_scope(&Scope::new(scope).unwrap())
+            .unwrap();
+        Arc::new(PerCallerEndpoint::new(move |_| {
+            Some(StorageServer::new(storage.clone()))
+        }))
+    };
+    // The long-lived well-known service shares the same connection and remains
+    // registered while both request-scoped endpoints come and go.
+    let fixed = serve(&host, make_endpoint("fixed")).await.unwrap();
+    let first_address = address("invocation_a");
+    let second_address = address("invocation_b");
+    let wrong_host_address = StorageAddress::try_new(
+        BusName::new(":1.999").unwrap(),
+        ObjectPath::new(format!("{INVOCATION_OBJECT_ROOT}/invocation_a")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        serve_at_address(&host, wrong_host_address, make_endpoint("wrong-host"))
+            .await
+            .is_err(),
+        "an address cannot redirect registration to a different unique host"
+    );
+    let first_guard = serve_at_address(&host, first_address.clone(), make_endpoint("first"))
+        .await
+        .unwrap();
+    let second_guard = serve_at_address(&host, second_address.clone(), make_endpoint("second"))
+        .await
+        .unwrap();
+
+    let client_a = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let client_b = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let storage_a = connect_storage_at_address(client_a, first_address)
+        .await
+        .unwrap();
+    let storage_b = connect_storage_at_address(client_b, second_address)
+        .await
+        .unwrap();
+    storage_a
+        .kv()
+        .put("same", serde_json::json!("first"))
+        .await
+        .unwrap();
+    storage_b
+        .kv()
+        .put("same", serde_json::json!("second"))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage_a.kv().get("same").await.unwrap().unwrap().doc,
+        serde_json::json!("first")
+    );
+    assert_eq!(
+        storage_b.kv().get("same").await.unwrap().unwrap().doc,
+        serde_json::json!("second")
+    );
+
+    first_guard.shutdown().await.unwrap();
+    assert!(storage_a.kv().get("same").await.is_err());
+    assert_eq!(
+        storage_b.kv().get("same").await.unwrap().unwrap().doc,
+        serde_json::json!("second")
+    );
+    // The ordinary destination is still intact and independent.
+    let ordinary_client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let ordinary = connect_storage(ordinary_client).await.unwrap();
+    assert!(ordinary.kv().get("same").await.unwrap().is_none());
+
+    drop(second_guard);
+    assert!(storage_b.kv().get("same").await.is_err());
+    fixed.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

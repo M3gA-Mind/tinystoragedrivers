@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::address::StorageAddress;
 use crate::transport::{Object, StorageTransport, WireError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -45,6 +46,7 @@ pub struct BusTransport {
     /// accepted only from it.
     owner: BusName,
     callback: bool,
+    address: Option<StorageAddress>,
     timeout: Duration,
     signals: broadcast::Sender<WatchChanged>,
     forwarder: JoinHandle<()>,
@@ -75,7 +77,7 @@ impl BusTransport {
             .name_owner(HOST_NAME)
             .await?
             .ok_or_else(|| tinybus::Error::NameHasNoOwner(host_name()))?;
-        Self::connect_to(connection, host_name(), owner, false).await
+        Self::connect_to(connection, host_name(), owner, false, None, None).await
     }
 
     /// Attach to the exact unique host-callback destination supplied by the
@@ -94,7 +96,43 @@ impl BusTransport {
                 "storage callback destination must be a unique bus name",
             ));
         }
-        Self::connect_to(connection, destination.clone(), destination, true).await
+        Self::connect_to(
+            connection,
+            destination.clone(),
+            destination,
+            true,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Attach to a host's invocation-scoped storage endpoint.
+    ///
+    /// Calls are routed only to the unique host and paths in `address`; this
+    /// never looks up or falls back to the global storage service.
+    ///
+    /// # Errors
+    /// Returns an error when the address is invalid for the connection or a
+    /// required endpoint cannot be reached.
+    pub async fn connect_at_address(
+        connection: Connection,
+        address: StorageAddress,
+    ) -> tinybus::Result<Self> {
+        if !address.host().is_unique() {
+            return Err(tinybus::Error::failed(
+                "storage address host must be a unique bus name",
+            ));
+        }
+        Self::connect_to(
+            connection,
+            address.host().clone(),
+            address.host().clone(),
+            false,
+            Some(address.clone()),
+            Some(address.watch_path().clone()),
+        )
+        .await
     }
 
     async fn connect_to(
@@ -102,6 +140,8 @@ impl BusTransport {
         host: BusName,
         owner: BusName,
         callback: bool,
+        address: Option<StorageAddress>,
+        addressed_watch_path: Option<tinybus::ObjectPath>,
     ) -> tinybus::Result<Self> {
         let me = connection
             .unique_name()
@@ -111,10 +151,10 @@ impl BusTransport {
             .sender(owner.clone())
             .interface(interface())
             .member(member(WATCH_MEMBER));
-        rule.path = Some(if callback {
-            callback_watch_path()
-        } else {
-            watch_path(&me)?
+        rule.path = Some(match addressed_watch_path {
+            Some(path) => path,
+            None if callback => callback_watch_path(),
+            None => watch_path(&me)?,
         });
         // Subscribe before returning so no watch signal can be missed.
         let mut received = connection.add_match(rule).await?;
@@ -139,6 +179,7 @@ impl BusTransport {
             host,
             owner,
             callback,
+            address,
             timeout: CALL_TIMEOUT,
             signals,
             forwarder,
@@ -156,17 +197,24 @@ impl BusTransport {
         tinybus::Proxy::new(
             self.connection.clone(),
             self.host.clone(),
-            object_path(object),
+            self.port_path(object),
             interface(),
         )
         .map(|proxy| proxy.with_timeout(self.timeout))
         .map_err(|error| transport_error(&error))
     }
 
+    fn port_path(&self, object: Object) -> tinybus::ObjectPath {
+        self.address.as_ref().map_or_else(
+            || object_path(object),
+            |address| address.port_path(object).clone(),
+        )
+    }
+
     fn streamed_call(&self, selector: &str, body: Value) -> Message {
         Message::method_call(
             self.host.clone(),
-            object_path(Object::Blobs),
+            self.port_path(Object::Blobs),
             interface(),
             member(selector),
             body,
@@ -379,6 +427,24 @@ pub async fn connect_storage_at(
     destination: BusName,
 ) -> tinystoragedrivers_types::Result<tinystoragedrivers_api::Storage> {
     let transport = BusTransport::connect_at(connection, destination)
+        .await
+        .map_err(|error| tinystoragedrivers_types::StorageError::unavailable(error.to_string()))?;
+    crate::client::BusStorage::connect(Arc::new(transport)).await
+}
+
+/// Build storage ports addressed to one invocation-rooted endpoint.
+///
+/// This is distinct from [`connect_storage_at`], which addresses an SDK
+/// callback binding with fixed object paths.
+///
+/// # Errors
+/// Returns an error if the address cannot be reached or a required port fails
+/// to initialize.
+pub async fn connect_storage_at_address(
+    connection: Connection,
+    address: StorageAddress,
+) -> tinystoragedrivers_types::Result<tinystoragedrivers_api::Storage> {
+    let transport = BusTransport::connect_at_address(connection, address)
         .await
         .map_err(|error| tinystoragedrivers_types::StorageError::unavailable(error.to_string()))?;
     crate::client::BusStorage::connect(Arc::new(transport)).await

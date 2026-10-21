@@ -1,5 +1,9 @@
 //! Real hashed and admitted TinyBus module storage callback proofs.
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -10,11 +14,14 @@ use tinybus::{
     transport::memory::MemoryBus,
 };
 use tinystoragedrivers_api::{BlobReader, Storage, StorageBackend};
-use tinystoragedrivers_bus::{STORAGE_INTERFACE, WatchChanged};
+use tinystoragedrivers_bus::{
+    BlobCapabilities, CapabilitiesReply, KvCapabilitiesReply, QueueFeaturesReply,
+    SecretsCapabilitiesReply, STORAGE_INTERFACE, WatchChanged,
+};
 use tinystoragedrivers_busproxy::{
-    HostFailure, Object, PerCallerEndpoint, ServedStorage, StorageCall, StorageEndpoint,
-    StorageServer, connect_storage_at, object_path, prepare_storage_host_callbacks,
-    serve_with_host_callbacks,
+    HostFailure, Object, PerCallerEndpoint, ServedStorage, StorageAddress, StorageCall,
+    StorageEndpoint, StorageServer, connect_storage_at, connect_storage_at_address, object_path,
+    prepare_storage_host_callbacks, serve_at_address, serve_with_host_callbacks,
 };
 use tinystoragedrivers_connect::MongoConnection;
 use tinystoragedrivers_document::mongodb::{MongoDocuments, MongoStreams};
@@ -25,6 +32,8 @@ use tokio::sync::Notify;
 struct ObservedEndpoint<F> {
     inner: PerCallerEndpoint<F>,
     watch_opened: Arc<Notify>,
+    documents_only: bool,
+    expected_peer: Option<BusName>,
 }
 
 #[async_trait]
@@ -33,6 +42,44 @@ where
     F: Fn(&BusName) -> Option<StorageServer> + Send + Sync + 'static,
 {
     async fn call(&self, call: StorageCall<'_>) -> Result<Value, HostFailure> {
+        if self.documents_only {
+            let Some(sender) = call.sender.filter(|sender| sender.is_unique()) else {
+                return Err(HostFailure::Denied(
+                    "invocation-storage-peer-not-authenticated",
+                ));
+            };
+            if self.expected_peer.as_ref() != Some(sender) {
+                return Err(HostFailure::Denied("invocation-storage-peer-not-admitted"));
+            }
+            if call.object != Object::Documents {
+                // BusStorage performs a fixed capability handshake for each
+                // port. Advertise no optional features there, then refuse all
+                // data operations on ports outside this invocation's Docs
+                // grant. Secrets remains non-enumerable and data-denied.
+                let capabilities = match (call.object, call.selector) {
+                    (Object::Streams, "Capabilities") => {
+                        Some(serde_json::to_value(CapabilitiesReply::default()).unwrap())
+                    }
+                    (Object::Blobs, "Capabilities") => {
+                        Some(serde_json::to_value(BlobCapabilities::default()).unwrap())
+                    }
+                    (Object::Kv, "Capabilities") => {
+                        Some(serde_json::to_value(KvCapabilitiesReply::default()).unwrap())
+                    }
+                    (Object::Queues, "Features") => {
+                        Some(serde_json::to_value(QueueFeaturesReply::default()).unwrap())
+                    }
+                    (Object::Secrets, "Capabilities") => {
+                        Some(serde_json::to_value(SecretsCapabilitiesReply::default()).unwrap())
+                    }
+                    _ => None,
+                };
+                if let Some(capabilities) = capabilities {
+                    return Ok(capabilities);
+                }
+                return Err(HostFailure::Denied("invocation-storage-documents-only"));
+            }
+        }
         self.inner.call(call).await
     }
 
@@ -42,6 +89,9 @@ where
         head: tinystoragedrivers_bus::PutBlobStreamRequest,
         body: BlobReader,
     ) -> Result<Value, HostFailure> {
+        if self.documents_only {
+            return Err(HostFailure::Denied("invocation-storage-documents-only"));
+        }
         self.inner.put_blob_stream(sender, head, body).await
     }
 
@@ -50,6 +100,9 @@ where
         sender: Option<&BusName>,
         request: tinystoragedrivers_bus::BlobKeyRequest,
     ) -> Result<Option<(tinystoragedrivers_bus::BlobStreamHead, BlobReader)>, HostFailure> {
+        if self.documents_only {
+            return Err(HostFailure::Denied("invocation-storage-documents-only"));
+        }
         self.inner.get_blob_stream(sender, request).await
     }
 
@@ -79,12 +132,19 @@ struct Fixture {
     attacker: Connection,
     watch_opened: Arc<Notify>,
     _artifact_dir: tempfile::TempDir,
-    _served: ServedStorage,
+    served: Option<ServedStorage>,
+    _address_host: Option<Connection>,
+    address: Option<StorageAddress>,
+    module_peer: Option<BusName>,
     _broker_task: tokio::task::JoinHandle<tinybus::Result<()>>,
 }
 
 impl Fixture {
     async fn new() -> Self {
+        Self::new_with_address(false).await
+    }
+
+    async fn new_with_address(addressed: bool) -> Self {
         let artifact = PathBuf::from(
             std::env::var_os("TSD_STORAGE_CALLBACK_MODULE")
                 .expect("run scripts/test-storage-callback.sh"),
@@ -130,29 +190,124 @@ impl Fixture {
         let inner =
             PerCallerEndpoint::new(move |_| Some(StorageServer::new(endpoint_storage.clone())));
         let watch_opened = Arc::new(Notify::new());
-        let endpoint = Arc::new(ObservedEndpoint {
-            inner,
-            watch_opened: Arc::clone(&watch_opened),
-        });
-
         let bus = MemoryBus::new();
         let broker = Broker::new();
         let broker_task = broker.spawn(bus.clone());
         let host = ModuleHost::new(broker);
         let binding = prepare_storage_host_callbacks(&host).await.unwrap();
-        let served = serve_with_host_callbacks(Arc::clone(&binding), endpoint)
-            .await
+        let address_host = if addressed {
+            Some(
+                Connection::connect(bus.connect().await.unwrap())
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let (config, address) = if let Some(address_host) = &address_host {
+            let root = format!(
+                "{}/proof_{}",
+                tinystoragedrivers_busproxy::INVOCATION_OBJECT_ROOT,
+                NEXT_DATABASE.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let address = StorageAddress::try_new(
+                address_host
+                    .unique_name()
+                    .clone()
+                    .expect("connected host has a unique bus name"),
+                root.parse().unwrap(),
+            )
             .unwrap();
-        host.load_file_with_host_callbacks(
-            staged,
-            json!({"host": binding.unique_name()}),
-            &binding,
-        )
-        .await
-        .unwrap();
+            let config = json!({
+                "host": address_host.unique_name(),
+                "object_root": root,
+            });
+            (config, Some(address))
+        } else {
+            let config = json!({"host": binding.unique_name()});
+            (config, None)
+        };
         let client = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
+        let (served, module_peer) = if addressed {
+            let info = host.load_file_with_config(staged, config).unwrap();
+            let ready: bool = client
+                .proxy(
+                    "org.example.StorageCallbackProof",
+                    "/storage_proof",
+                    "org.example.StorageCallbackProof",
+                )
+                .unwrap()
+                .with_timeout(Duration::from_secs(5))
+                .call("Ready", ())
+                .await
+                .expect("module setup must finish without requiring its storage endpoint");
+            assert!(ready);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let state = host
+                        .list()
+                        .into_iter()
+                        .find(|module| module.name == info.name)
+                        .expect("loaded module remains registered")
+                        .state;
+                    match state {
+                        tinybus::module::ModuleState::Ready => break,
+                        tinybus::module::ModuleState::Serving => tokio::task::yield_now().await,
+                        other => panic!("module left service state before Ready: {other:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("readiness call must return module to Ready");
+            let module_peer = host
+                .authenticated_peer(&info.name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "loaded module has no live authenticated peer after Ready: info={info:?}, modules={:?}",
+                        host.list()
+                    )
+                });
+            let owner = address_host
+                .as_ref()
+                .unwrap()
+                .name_owner("org.example.StorageCallbackProof")
+                .await
+                .unwrap()
+                .expect("compiled module has requested its well-known name");
+            assert_eq!(module_peer, owner);
+            let endpoint = Arc::new(ObservedEndpoint {
+                inner,
+                watch_opened: Arc::clone(&watch_opened),
+                documents_only: true,
+                expected_peer: Some(module_peer.clone()),
+            });
+            let served = serve_at_address(
+                address_host.as_ref().unwrap(),
+                address.clone().unwrap(),
+                endpoint,
+            )
+            .await
+            .unwrap();
+            (served, Some(module_peer))
+        } else {
+            let endpoint = Arc::new(ObservedEndpoint {
+                inner,
+                watch_opened: Arc::clone(&watch_opened),
+                documents_only: false,
+                expected_peer: None,
+            });
+            // Keep the established confidential callback path available before
+            // module setup so its original admission proof remains unchanged.
+            let served = serve_with_host_callbacks(Arc::clone(&binding), endpoint)
+                .await
+                .unwrap();
+            host.load_file_with_host_callbacks(staged, config, &binding)
+                .await
+                .unwrap();
+            (served, None)
+        };
         let attacker = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
@@ -166,7 +321,10 @@ impl Fixture {
             attacker,
             watch_opened,
             _artifact_dir: artifact_dir,
-            _served: served,
+            served: Some(served),
+            _address_host: address_host,
+            address,
+            module_peer,
             _broker_task: broker_task,
         }
     }
@@ -193,6 +351,53 @@ impl Fixture {
 }
 
 static NEXT_DATABASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compiled_module_connects_to_invocation_scoped_storage_address() {
+    let mut fixture = Fixture::new_with_address(true).await;
+
+    // A guessed caller cannot claim an unguessable invocation path by arriving
+    // first; only the peer returned by ModuleHost admission is authorized.
+    assert!(
+        connect_storage_at_address(fixture.attacker.clone(), fixture.address.clone().unwrap())
+            .await
+            .is_err(),
+        "an unadmitted caller cannot establish the invocation-scoped storage connection"
+    );
+
+    let succeeded: bool = fixture.module().call("Addressed", ()).await.unwrap();
+    assert!(succeeded);
+    assert!(fixture.module_peer.as_ref().is_some_and(BusName::is_unique));
+    let stored = fixture
+        .storage
+        .documents()
+        .get("addressed", "module")
+        .await
+        .unwrap()
+        .expect("compiled module wrote through the request-scoped endpoint");
+    assert_eq!(stored.doc, json!({"value": 63}));
+    let denied_secret: bool = fixture
+        .module()
+        .call("AddressedSecretsDenied", ())
+        .await
+        .unwrap();
+    assert!(
+        denied_secret,
+        "the ordinary invocation endpoint must refuse Secrets"
+    );
+
+    // Release the guard and make sure the call cannot continue through this
+    // invocation path after its host-owned lifetime ends.
+    drop(fixture.served.take());
+    assert!(
+        fixture
+            .module()
+            .call::<bool>("AddressedRead", ())
+            .await
+            .is_err()
+    );
+    fixture.cleanup().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_module_uses_all_six_ports_with_confidential_secret_cas_and_streams() {
