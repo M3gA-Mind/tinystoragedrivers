@@ -9,7 +9,7 @@
 use std::fmt;
 
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2_11::Sha256;
 use tinystoragedrivers_core::{Result, Scope, StorageError};
 use zeroize::Zeroizing;
 

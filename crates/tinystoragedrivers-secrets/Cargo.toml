@@ -27,6 +27,8 @@ chacha20poly1305 = "0.10"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
 hkdf = "0.13"
 sha2 = { workspace = true }
+# HKDF 0.13 uses digest 0.11, so its SHA-256 type must come from this version.
+sha2_11 = { package = "sha2", version = "0.11" }
 # Keys, decrypted values and the decrypted secrets map are wiped on drop.
 zeroize = "1"
 # The cross-process advisory lock on `secrets.enc.lock`. It takes the same
