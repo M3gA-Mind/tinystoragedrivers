@@ -669,7 +669,7 @@ pub async fn serve_at_address(
     let mut registered = Vec::new();
     for (object, path) in ALL.into_iter().zip(paths.iter()) {
         if let Err(error) = connection
-            .serve_at(
+            .try_serve_at(
                 path.clone(),
                 ObjectService {
                     object,
