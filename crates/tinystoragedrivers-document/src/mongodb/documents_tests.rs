@@ -40,6 +40,52 @@ fn definite_write_conflicts_are_retryable_but_ambiguous_commits_are_not() {
     assert!(!is_definite_transaction_conflict(Some(91), false, false));
 }
 
+#[test]
+fn mongo_command_conflict_maps_to_retryable_storage_conflict() {
+    let command: mongodb::error::CommandError =
+        serde_json::from_value(serde_json::json!({"code": 112, "message": "write conflict"}))
+            .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+
+    let mapped = transaction_error("commit a conditioned write", error);
+    assert_eq!(mapped.kind(), tinystoragedrivers_types::ErrorKind::Conflict);
+    assert!(mapped.message().contains("transaction conflicted"));
+}
+
+#[test]
+fn unrelated_command_and_index_errors_remain_unavailable() {
+    let command: mongodb::error::CommandError = serde_json::from_value(serde_json::json!({
+        "code": 11000,
+        "errmsg": "duplicate key error index: unrelated_unique dup key"
+    }))
+    .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+
+    assert_eq!(
+        duplicate_key_index(&error).as_deref(),
+        Some("unrelated_unique")
+    );
+    let mapped = map_document_write_error(error);
+    assert_eq!(
+        mapped.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(std::error::Error::source(&mapped).is_some());
+
+    let command: mongodb::error::CommandError = serde_json::from_value(serde_json::json!({
+        "code": 91,
+        "message": "not primary"
+    }))
+    .unwrap();
+    let error: mongodb::error::Error = mongodb::error::ErrorKind::Command(command).into();
+    let mapped = transaction_error("commit a conditioned write", error);
+    assert_eq!(
+        mapped.kind(),
+        tinystoragedrivers_types::ErrorKind::Unavailable
+    );
+    assert!(mapped.message().contains("commit a conditioned write"));
+}
+
 #[tokio::test]
 async fn document_debug_reports_binding_without_logging_client_credentials() {
     let client = Client::with_uri_str(

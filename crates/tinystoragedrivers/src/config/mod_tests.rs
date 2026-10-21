@@ -3,7 +3,7 @@
 use super::*;
 #[cfg(feature = "sqlite")]
 use tinystoragedrivers_api::{DocumentStore, KvStore};
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "mongodb"))]
 use tinystoragedrivers_types::Precondition;
 use tinystoragedrivers_types::{Capability, ErrorKind, Filter, Scope, WriteCondition};
 
