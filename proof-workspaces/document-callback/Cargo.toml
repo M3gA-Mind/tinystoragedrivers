@@ -1,5 +1,5 @@
 [workspace]
-members = ["module", "runner"]
+members = ["module", "replacement", "runner"]
 resolver = "3"
 
 [workspace.dependencies]

@@ -9,6 +9,7 @@ description = "Confined document callbacks over captured native storage ports."
 publish = false
 
 [dependencies]
+tinystoragedrivers-client.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

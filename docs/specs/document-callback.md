@@ -24,3 +24,7 @@ module business logic.
 
 This foundation is not TinyMemes persistence, legacy import authority, or proof
 of lifecycle draining beyond the pinned canonical TinyBus contract.
+
+For native metadata, admitted collections, JSON streams and secrets, use the
+[scoped native profile](scoped-storage-callback.md). The collection-only API
+above remains compatible.

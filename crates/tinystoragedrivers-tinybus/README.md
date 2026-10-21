@@ -1,8 +1,11 @@
 # Captured document callback adapter
 
-A trusted host calls endpoint, prepares a canonical TinyBus HostCallbackBinding,
-then serves one already-admitted DocumentStore and fixed collection with
-serve_collection. It loads the real verified module using that same binding.
+A trusted host prepares a canonical TinyBus HostCallbackBinding and loads the
+verified module using that same binding. For a fixed document collection, the
+host serves an already-admitted DocumentStore with `serve_collection`. For the
+finite documents, native JSON streams and secrets profile, it serves an
+already-scoped `StorageServer` with `serve_scoped_storage`; this registers only
+the three declared confidential endpoints and does not open a backend.
 
 The service implementation is private. There is no ordinary service constructor
 or public direct dispatch method. Registration and calls cannot select another

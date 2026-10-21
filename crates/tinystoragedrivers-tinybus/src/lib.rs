@@ -1,6 +1,8 @@
-//! Confined native document callbacks for compiled `TinyBus` modules.
+//! Confined native document and three-port callbacks for compiled `TinyBus` modules.
 //!
-//! Registration captures an already-admitted store and fixed collection.
+//! Registration captures an already-admitted native store or server.
+//! [`serve_scoped_storage`] preserves metadata, JSON streams and secrets;
+//! [`serve_collection`] retains the minimal fixed-collection interface.
 //! It never opens a backend or declares schema. Native storage owns atomic
 //! conditions, validation, leases and generations. Native messages and source
 //! chains never cross this wire boundary.
@@ -209,3 +211,6 @@ impl Interface for DocumentService {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+mod scoped;
+pub use scoped::{scoped_storage_endpoints, serve_scoped_storage};

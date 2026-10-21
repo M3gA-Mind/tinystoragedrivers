@@ -12,6 +12,25 @@
 //! optional `migration-delivery` feature implements assembly and lifecycle;
 //! neither crate supplies a `TinyBus` adapter.
 //!
+//! [`ScopedStorageRoute`] and [`ScopedStorageProfile`] describe the finite
+//! documents, native JSON streams and secrets callback profile. They are
+//! routing data only: scope, admission, fences and generations remain with the
+//! host and its native storage adapter.
+//!
+//! ```
+//! use tinystoragedrivers_schema::{ScopedStorageProfile, ScopedStorageRoute};
+//! let route = ScopedStorageRoute {
+//!     version: 1,
+//!     destination: ":1.42".into(),
+//!     object_root: "/storage".into(),
+//!     profile: ScopedStorageProfile::DocumentsStreamsSecretsV1,
+//! };
+//! let wire = serde_json::to_value(route)?;
+//! assert_eq!(wire["version"], 1);
+//! assert!(wire.get("scope").is_none());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! ```
 //! use tinystoragedrivers_schema::{Owner, SchemaDeclaration};
 //! let schema = SchemaDeclaration {
@@ -45,3 +64,6 @@ pub use transform::{
     StepDeclaration, StreamTransformOutput, StreamTransformRequest, TransformDescriptor,
     TransformError, TransformErrorKind, TransformKind, TransformResult,
 };
+
+mod callback;
+pub use callback::{ScopedStorageProfile, ScopedStorageRoute};
