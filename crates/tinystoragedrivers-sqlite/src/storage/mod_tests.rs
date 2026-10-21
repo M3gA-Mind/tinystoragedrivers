@@ -521,6 +521,106 @@ async fn historical_reset_receipts_survive_reopen_in_each_path_layout() {
 }
 
 #[tokio::test]
+async fn purge_refuses_a_fence_guard_inside_the_scope_it_would_erase() {
+    use tinystoragedrivers_core::{ErrorKind, Fence, PurgeMode, PurgeRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("self-guarded-purge").unwrap();
+    let plain = storage.for_scope(&scope).unwrap();
+    plain
+        .documents()
+        .put(
+            "records",
+            "keep",
+            json!({"alive": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    let fence = Fence::epoch(scope.clone(), "leases", "holder", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&scope, &fence).unwrap();
+
+    assert_eq!(
+        fenced
+            .purge(&PurgeRequest {
+                operation_id: "self-guarded-reset".into(),
+                mode: PurgeMode::Atomic,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(
+        plain
+            .documents()
+            .get("records", "keep")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn purge_refuses_generation_overflow_without_erasing_current_data() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest, ScopeGeneration};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("overflow-reset").unwrap();
+    let base = storage.for_scope(&scope).unwrap();
+    storage
+        .db
+        .run_now(|conn| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (scope, generation, operation) VALUES (?1, ?2, ?3)",
+                    crate::sql::ident(&storage.tables.admissions)
+                ),
+                rusqlite::params![scope.as_str(), i64::MAX, "near_overflow"],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let current = storage
+        .for_scope_generation(&scope, ScopeGeneration(i64::MAX as u64))
+        .unwrap();
+    current
+        .documents()
+        .put(
+            "records",
+            "keep",
+            json!({"alive": true}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        current
+            .purge(&PurgeRequest {
+                operation_id: "overflow-reset".into(),
+                mode: PurgeMode::Atomic,
+            })
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Backend
+    );
+    assert!(
+        current
+            .documents()
+            .get("records", "keep")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    drop(base);
+}
+
+#[tokio::test]
 async fn upgrading_receipt_schema_preserves_the_last_completed_reset() {
     use tinystoragedrivers_core::{PurgeMode, PurgeRequest};
     let dir = tempfile::tempdir().unwrap();
@@ -849,6 +949,38 @@ async fn corrupt_or_exhausted_scope_generation_never_erases_data() {
 }
 
 #[tokio::test]
+async fn sqlite_purge_validators_track_current_and_revoked_generations() {
+    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = SqliteStorage::open(dir.path()).unwrap();
+    let scope = Scope::new("explicit-purge-validation").unwrap();
+    let old = storage.for_scope(&scope).unwrap();
+    old.validate_purge_generation().await.unwrap();
+    old.validate_purge_binding().await.unwrap();
+    let receipt = old
+        .purge(&PurgeRequest {
+            operation_id: "validate-reset".into(),
+            mode: PurgeMode::Atomic,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        old.validate_purge_generation().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    assert_eq!(
+        old.validate_purge_binding().await.unwrap_err().kind(),
+        ErrorKind::ScopeGenerationRejected
+    );
+    let current = storage
+        .for_scope_generation(&scope, receipt.generation)
+        .unwrap();
+    current.validate_purge_generation().await.unwrap();
+    current.validate_purge_binding().await.unwrap();
+}
+
+#[tokio::test]
 async fn retired_scope_handles_cannot_read_replacement_data() {
     use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
     let dir = tempfile::tempdir().unwrap();
@@ -896,4 +1028,130 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
         old.blobs().get("blob").await.unwrap_err().kind(),
         ErrorKind::ScopeGenerationRejected
     );
+}
+
+#[test]
+fn read_only_probe_reads_rollback_database_without_changing_its_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("existing.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE records (value TEXT); \
+             INSERT INTO records VALUES ('fixture');",
+        )
+        .unwrap();
+    drop(connection);
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects =
+        SqliteStorage::probe_read_only(&file).expect("existing rollback database is readable");
+
+    assert_eq!(schema_objects, 1);
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_accepts_checkpointed_wal_database_without_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("wal.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE records (value TEXT); \
+             INSERT INTO records VALUES ('fixture');",
+        )
+        .unwrap();
+    drop(connection);
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects = SqliteStorage::probe_read_only(&file)
+        .expect("a checkpointed WAL database is readable through a read-only connection");
+    assert_eq!(schema_objects, 1);
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_reads_schema_committed_only_in_active_wal_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("active.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE records (value TEXT);")
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE wal_only (value TEXT); INSERT INTO wal_only VALUES ('fixture');",
+        )
+        .unwrap();
+    assert!(dir.path().join("active.db-wal").exists());
+    assert!(dir.path().join("active.db-shm").exists());
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects = SqliteStorage::probe_read_only(&file)
+        .expect("a healthy WAL database is readable through a read-only connection");
+
+    assert_eq!(schema_objects, 2, "the committed WAL schema is included");
+    assert_eq!(before, snapshot_tree(dir.path()));
+    drop(connection);
+}
+
+#[test]
+fn read_only_probe_rejects_corrupt_database_without_changing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("corrupt.db");
+    std::fs::write(&file, b"not a sqlite database").unwrap();
+    let before = snapshot_tree(dir.path());
+
+    assert!(SqliteStorage::probe_read_only(&file).is_err());
+
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_does_not_create_a_missing_database_or_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("missing").join("nested");
+    let file = parent.join("storage.db");
+
+    assert!(SqliteStorage::probe_read_only(&file).is_err());
+
+    assert!(!parent.exists());
+}
+
+fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+    fn walk(
+        current: &Path,
+        root: &Path,
+        snapshot: &mut std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+    ) {
+        for entry in std::fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                snapshot.insert(relative, None);
+                walk(&path, root, snapshot);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                // SQLite may update derived `-shm` coordination or create an
+                // empty `-wal` on a read-only connection. Database and
+                // committed WAL bytes remain part of this fingerprint.
+                if name.ends_with("-shm") || (name.ends_with("-wal") && bytes.is_empty()) {
+                    continue;
+                }
+                snapshot.insert(relative, Some(bytes));
+            }
+        }
+    }
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    walk(root, root, &mut snapshot);
+    snapshot
 }

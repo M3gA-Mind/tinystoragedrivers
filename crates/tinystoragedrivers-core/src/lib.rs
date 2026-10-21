@@ -9,6 +9,9 @@
 //!   expiry, transactions and full-text search.
 //! - [`StreamStore`]: append-only logs with dense offsets.
 //! - [`BlobStore`]: opaque bytes by key.
+//! - [`QueueStore`]: durable at-least-once message queues with leases,
+//!   retries, dead letters, groups and dedupe; [`queue::DocumentQueue`] runs
+//!   one on any [`DocumentStore`].
 //!
 //! Typed repositories (sessions, approvals, workflow runs) belong to the crates
 //! that own those records and are built on these ports; this crate knows
@@ -62,6 +65,7 @@ mod filter;
 mod key;
 mod memory;
 pub mod primitives;
+pub mod queue;
 pub mod schema;
 mod scope;
 mod stream;
@@ -102,6 +106,7 @@ pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStrea
 pub use primitives::{
     Acquire, Acquisition, Counters, Kv, Lease, LeaseRecord, Leases, Repo, RetryPolicy,
 };
+pub use queue::QueueStore;
 pub use schema::{
     Expiry, Item, MIGRATIONS_COLLECTION, MigrateOptions, MigrationReport, Migrations, Owner,
     Progress, Registry, Schema, ScopeClass, SourceRecord, Step, StepFn, StepReport, TargetRecord,

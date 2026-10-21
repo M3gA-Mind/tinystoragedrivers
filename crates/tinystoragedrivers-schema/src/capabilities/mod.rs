@@ -69,10 +69,23 @@ pub enum Capability {
     /// `StreamStore::seal`: close a stream to
     /// appends and keep its entries as one compressed blob.
     StreamSeal,
+    /// Independently opened backends on the same store agree: they see each
+    /// other's writes at once, and the compare-and-swap rules (version
+    /// preconditions, `Absent` creates, claims, fences) hold between them, so
+    /// racing handles, in this process or another, get exactly one winner.
+    /// Only a driver whose engine arbitrates between connections reports it
+    /// (`SQLite` and `MongoDB`); the memory driver is one process's heap, and the
+    /// file driver serializes only among the handles of one process.
+    SharedAcrossProcesses,
+    /// Version preconditions, `Absent` creates, claims and fences arbitrate
+    /// atomically across processes, so racing conditional writes have exactly
+    /// one winner. This capability names that subset of the broader
+    /// [`Capability::SharedAcrossProcesses`] guarantee explicitly.
+    CrossProcessCas,
 }
 
 impl Capability {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 21] = [
         Self::ExistingSchema,
         Self::CollectionValidation,
         Self::FullText,
@@ -92,6 +105,8 @@ impl Capability {
         Self::Maintenance,
         Self::ScopeEnumeration,
         Self::StreamSeal,
+        Self::SharedAcrossProcesses,
+        Self::CrossProcessCas,
     ];
 
     const fn bit(self) -> u32 {
@@ -115,6 +130,8 @@ impl Capability {
             Self::Maintenance => 1 << 17,
             Self::ScopeEnumeration => 1 << 18,
             Self::StreamSeal => 1 << 19,
+            Self::SharedAcrossProcesses => 1 << 20,
+            Self::CrossProcessCas => 1 << 21,
         }
     }
 }
@@ -141,6 +158,8 @@ impl fmt::Display for Capability {
             Self::Maintenance => "maintenance",
             Self::ScopeEnumeration => "scope_enumeration",
             Self::StreamSeal => "stream_seal",
+            Self::SharedAcrossProcesses => "shared_across_processes",
+            Self::CrossProcessCas => "cross_process_cas",
         })
     }
 }
@@ -193,7 +212,9 @@ impl Capabilities {
                 | Capability::RecordMetadata.bit()
                 | Capability::Maintenance.bit()
                 | Capability::ScopeEnumeration.bit()
-                | Capability::StreamSeal.bit(),
+                | Capability::StreamSeal.bit()
+                | Capability::SharedAcrossProcesses.bit()
+                | Capability::CrossProcessCas.bit(),
         )
     }
 

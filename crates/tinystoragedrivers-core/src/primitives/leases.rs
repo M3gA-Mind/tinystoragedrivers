@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 use super::LEASES;
@@ -20,6 +21,7 @@ use super::repo::{Repo, RetryPolicy};
 use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
+use crate::filter::Filter;
 use crate::key::Key;
 use crate::memory::{Clock, system_clock};
 use crate::scope::Scope;
@@ -45,19 +47,44 @@ fn is_false(value: &bool) -> bool {
 
 /// The stored state of one lease, live or not, as [`Leases::inspect`] reads
 /// it. [`Lease`] is a holder's proof; this is an observer's view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRecord {
     /// Who holds (or last held) the lease.
+    #[serde(alias = "owner")]
     pub holder: String,
     /// Where the holder can be reached, when it said so at acquisition.
+    #[serde(default)]
     pub endpoint: Option<String>,
     /// The fencing epoch of the holder's tenure.
     pub epoch: u64,
     /// Unix epoch milliseconds at which the lease lapses.
+    #[serde(alias = "expires_at_ms", deserialize_with = "deserialize_expiry")]
     pub expires_ms: i64,
     /// The holder let go cleanly. A released record is never live; a record
     /// that is merely past `expires_ms` was abandoned (crash, partition).
+    #[serde(default)]
     pub released: bool,
+}
+
+fn deserialize_expiry<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Expiry {
+        Signed(i64),
+        Unsigned(u64),
+    }
+
+    match Expiry::deserialize(deserializer)? {
+        Expiry::Signed(value) => Ok(value),
+        // Backend-less leases use u64::MAX as their "until the OS lock is
+        // dropped" sentinel. Saturating it preserves its non-expiring intent
+        // in the shared signed-millisecond representation.
+        Expiry::Unsigned(u64::MAX) => Ok(i64::MAX),
+        Expiry::Unsigned(value) => i64::try_from(value).map_err(D::Error::custom),
+    }
 }
 
 impl LeaseRecord {
@@ -148,6 +175,30 @@ impl Lease {
     #[must_use]
     pub fn fence(&self, scope: &Scope) -> Fence {
         Fence::epoch(scope.clone(), LEASES, self.id.clone(), "epoch", self.epoch)
+    }
+
+    /// A [`Fence`] that holds only while this very tenure is intact: the
+    /// stored `epoch` is still this lease's, its `holder` is still this
+    /// lease's holder, and the record has not been `released`.
+    ///
+    /// [`fence`](Self::fence) checks the epoch alone, so a holder that
+    /// released the lease cleanly (the record and its epoch stay for the next
+    /// takeover to continue) can still land writes until someone takes over.
+    /// This fence refuses them as soon as the holder lets go, as it does once
+    /// another holder takes over or the record is compacted away.
+    ///
+    /// `scope` is the scope the lease record lives in, as for
+    /// [`fence`](Self::fence).
+    #[must_use]
+    pub fn holder_fence(&self, scope: &Scope) -> Fence {
+        Fence::new(
+            scope.clone(),
+            LEASES,
+            self.id.clone(),
+            Filter::eq("epoch", self.epoch)
+                .and(Filter::eq("holder", self.holder.as_str()))
+                .and(Filter::exists("released", false)),
+        )
     }
 
     fn from_body(id: String, body: Body) -> Self {
