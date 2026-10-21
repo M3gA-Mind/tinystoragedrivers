@@ -17,6 +17,7 @@ use tinystoragedrivers_core::{
 use crate::blobs::SqliteBlobs;
 use crate::connection::Db;
 use crate::documents::{SqliteDocuments, capabilities};
+use crate::error::during;
 use crate::fence::Fencing;
 use crate::maintenance;
 use crate::native::SqliteNative;
@@ -89,6 +90,42 @@ impl SqliteStorage {
             path.join(ROOT_FILE)
         };
         Self::assemble(&file, Arc::new(system_clock))
+    }
+
+    /// Open an existing database read-only and count its schema objects.
+    ///
+    /// SQLite may update or create its derived `-shm` index and an empty
+    /// `-wal` file while coordinating access to a WAL database. This probe
+    /// does not create the database or its parent, change database pages,
+    /// alter committed WAL frames, initialize driver tables, or migrate a
+    /// schema.
+    ///
+    /// The path follows [`Self::open`]: a `.db` or `.sqlite` path names one
+    /// file; other paths name a directory containing `storage.db`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the file cannot be read, is corrupt, or
+    /// is busy with a writer.
+    pub fn probe_read_only(path: impl AsRef<Path>) -> Result<u64> {
+        let path = path.as_ref();
+        let file = if is_file_path(path) {
+            path.to_path_buf()
+        } else {
+            path.join(ROOT_FILE)
+        };
+        let connection = rusqlite::Connection::open_with_flags(
+            &file,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(during("read-only probe open"))?;
+        let count = connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(during("read-only probe query"))?;
+        u64::try_from(count)
+            .map_err(|_| tinystoragedrivers_core::StorageError::backend("negative schema count"))
     }
 
     fn assemble(file: &Path, clock: Clock) -> Result<Self> {
@@ -190,6 +227,14 @@ impl StorageBackend for SqliteStorage {
 
     fn capabilities(&self) -> Capabilities {
         capabilities()
+    }
+
+    fn supports_scope_purge_binding_validation(&self) -> bool {
+        true
+    }
+
+    fn supports_scope_purge_generation_validation(&self) -> bool {
+        true
     }
 
     async fn prepare_schema(&self) -> Result<()> {

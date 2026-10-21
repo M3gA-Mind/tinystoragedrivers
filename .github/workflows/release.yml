@@ -59,6 +59,9 @@ jobs:
       - name: Start a MongoDB replica set
         run: .github/scripts/start-mongo-replset.sh 27017
 
+      - name: Test release version and proof lockfile updates
+        run: python3 .github/scripts/release_version_tests.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -158,20 +161,7 @@ jobs:
           NEXT_VERSION: ${{ steps.version.outputs.next_version }}
         run: |
           set -euo pipefail
-          # One version for the whole workspace: every member inherits it with
-          # `version.workspace = true`, so this is the only edit needed.
-          perl -0pi -e 's/(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+(")/$1$ENV{NEXT_VERSION}$2/' Cargo.toml
-          # `--workspace` re-resolves the local packages only, which is what a
-          # version bump changes. `-p <name> --precise` cannot express "and the
-          # other member moved too".
-          cargo update --workspace
-          released="$(cargo metadata --format-version 1 --no-deps \
-            | jq -r --arg name "$CRATE_NAME" \
-              '.packages[] | select(.name == $name) | .version')"
-          if [[ "$released" != "$NEXT_VERSION" ]]; then
-            echo "version bump did not take: expected ${NEXT_VERSION}, got ${released}" >&2
-            exit 1
-          fi
+          python3 .github/scripts/update-release-version.py "$NEXT_VERSION" "$CRATE_NAME"
 
       - name: Commit version bump and tag
         if: ${{ inputs.bump != 'current' }}
@@ -181,7 +171,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
           git commit -m "Release ${RELEASE_TAG}"
           git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
