@@ -39,7 +39,9 @@ mod loopback;
 mod server;
 mod transport;
 
-pub use client::{BusBlobs, BusDocuments, BusQueues, BusSecrets, BusStorage, BusStoragePorts, BusStreams};
+pub use client::{
+    BusBlobs, BusDocuments, BusQueues, BusSecrets, BusStorage, BusStoragePorts, BusStreams,
+};
 pub use loopback::Loopback;
 pub use server::StorageServer;
 pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};
