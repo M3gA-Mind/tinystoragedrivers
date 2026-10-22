@@ -313,7 +313,7 @@ fn ledger_path(inner: &Inner) -> PathBuf {
 
 fn read_ledger(inner: &Inner, namespace: &secure::Namespace) -> Result<SecretMap> {
     let blob = match read_private(namespace, &ledger_path(inner)) {
-        Ok(blob) => blob,
+        Ok((blob, _identity)) => blob,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SecretMap::default());
         }

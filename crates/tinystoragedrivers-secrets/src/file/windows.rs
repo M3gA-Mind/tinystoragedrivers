@@ -1,7 +1,8 @@
 //! Protected NTFS objects, retained namespace pins and safe native publication.
 //!
 //! Publication verifies the visible object and flushes its content explicitly.
-//! They do not establish an ordinary-user durable directory publication barrier.
+//! Quarantine moves use Windows write-through semantics for durable directory
+//! publication. Ordinary replacements preserve Rust's POSIX replacement behavior.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -125,12 +126,18 @@ impl Namespace {
         self.verify()?;
         valid_leaf(source)?;
         valid_leaf(target)?;
-        // Rust 1.88 and 1.99 fall back on access-denied to FileRenameInfoEx with
-        // REPLACE_IF_EXISTS | POSIX_SEMANTICS, preserving open target handles.
-        // Like the previous native move, this selects full paths within the
-        // pinned namespace; it is not descriptor-relative source authority.
-        // The caller verifies the published FileID, flushes and reads it back.
+        // Rust's Windows rename fallback uses FileRenameInfoEx with
+        // POSIX_SEMANTICS, preserving admitted old handles while replacing.
+        // Keep this separate from the write-through quarantine move below.
         std::fs::rename(self.path.join(source), self.path.join(target))?;
+        self.verify()
+    }
+
+    pub(super) fn move_noreplace(&self, source: &Path, target: &Path) -> io::Result<()> {
+        self.verify()?;
+        valid_leaf(source)?;
+        valid_leaf(target)?;
+        atomicwrites::move_atomic(&self.path.join(source), &self.path.join(target))?;
         self.verify()
     }
 
