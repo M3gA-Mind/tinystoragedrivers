@@ -1,5 +1,7 @@
 //! Public API check for the reusable file lock.
 
+#![cfg(feature = "file")]
+
 use tinystoragedrivers_secrets::lock_file;
 
 #[test]
