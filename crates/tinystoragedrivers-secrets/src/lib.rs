@@ -67,7 +67,10 @@ pub mod testkit;
 #[cfg(feature = "document")]
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
 #[cfg(feature = "file")]
-pub use file::{EncryptedFileSecrets, KEY_FILE_NAME, SECRETS_FILE_NAME, load_or_create_key_file};
+pub use file::{
+    CorruptFilePolicy, EncryptedFileSecrets, KEY_FILE_NAME, Locked, SECRETS_FILE_NAME,
+    load_or_create_key_file, lock_file, write_atomic as write_atomic_private,
+};
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
 #[cfg(any(feature = "document", feature = "kms-aws", feature = "kms-gcp"))]

@@ -78,9 +78,18 @@ on every call:
 - `EncryptedFileSecrets` takes the same `secrets.enc.lock` advisory lock as
   OpenHuman for its read → modify → write cycle. It writes through a unique
   temp file (`0600`, synced) and renames it into place.
-- A `secrets.enc` that does not decrypt or parse fails the call
-  (`ErrorKind::Crypto` / `Serialization`) and is left untouched. It is never
-  treated as empty or overwritten.
+- By default, a `secrets.enc` that does not decrypt or parse fails the call
+  (`ErrorKind::Crypto` / `Serialization`) and is left untouched. Hosts may
+  explicitly select `CorruptFilePolicy::QuarantineAndContinue`; that mode
+  durably moves the corrupt bytes to a unique `secrets.enc.corrupt.*` sibling
+  before treating the store as empty. On Unix it syncs the directory; on
+  Windows it uses a no-replace, write-through native move. An incorrect key is
+  indistinguishable from damaged ciphertext and is also quarantined under this
+  opt-in policy. Quarantine failures and non-corruption I/O errors still fail
+  closed.
+- Hosts that write plaintext secrets can use `write_atomic_private`, which
+  creates owner-only staging files before writing secret bytes. Generic file
+  storage writes remain available separately.
 - `KeyringSecrets` cannot enumerate (`enumerable() == false`, `list` fails with
   `ErrorKind::Backend`). A locked store is `ErrorKind::Unavailable`.
 - File and keyring calls run on the tokio blocking pool when a runtime is

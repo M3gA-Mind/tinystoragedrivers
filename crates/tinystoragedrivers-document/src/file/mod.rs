@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod documents;
 mod encode;
-mod fsio;
+pub mod fsio;
 pub(crate) mod streams;
 
 use crate::file::encode::dir_components;
