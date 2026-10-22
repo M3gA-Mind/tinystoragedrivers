@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Blobs object name under [`crate::STORAGE_INTERFACE`].
 pub const BLOBS_OBJECT: &str = "Blobs";
 /// Finite selector set; servers must reject every other selector.
-pub const BLOBS_SELECTORS: [&str; 11] = [
+pub const BLOBS_SELECTORS: [&str; 12] = [
     "Put",
     "PutStream",
     "Get",
@@ -28,6 +28,7 @@ pub const BLOBS_SELECTORS: [&str; 11] = [
     "Head",
     "Delete",
     "List",
+    "ListPage",
     "PresignGet",
     "PresignPut",
     "Capabilities",
@@ -125,6 +126,19 @@ pub struct ListBlobsRequest {
     /// Literal key prefix.
     #[serde(default)]
     pub prefix: String,
+}
+/// Bounded keyset page over physical blob metadata.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListBlobsPageRequest {
+    /// Literal key prefix.
+    #[serde(default)]
+    pub prefix: String,
+    /// Exclusive key cursor from the preceding page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Maximum entries requested.
+    pub limit: usize,
 }
 /// Request a bearer URL; only when the backend reports `PresignedUrls`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

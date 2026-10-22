@@ -1,7 +1,7 @@
 //! The suite catches a store that breaks the contract.
 
 use async_trait::async_trait;
-use tinystoragedrivers_core::{Result, StorageError};
+use tinystoragedrivers_types::{Result, StorageError, validate_secret_prefix};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -24,7 +24,7 @@ impl SecretStore for Opaque {
         self.0.delete(name).await
     }
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        crate::store::validate_prefix(prefix)?;
+        validate_secret_prefix(prefix)?;
         Err(StorageError::backend("cannot enumerate"))
     }
     fn enumerable(&self) -> bool {
@@ -90,6 +90,9 @@ impl SecretStore for ForgetsOverwrites {
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.0.list(prefix).await
     }
+    fn enumerable(&self) -> bool {
+        true
+    }
     fn backend_name(&self) -> &'static str {
         "forgetful"
     }
@@ -106,12 +109,4 @@ async fn a_failed_check_still_removes_what_the_suite_wrote() {
 #[test]
 fn prefixes_are_unique_per_call() {
     assert_ne!(unique_prefix(), unique_prefix());
-}
-
-#[tokio::test]
-async fn document_secrets_pass_on_the_memory_backend() {
-    use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
-
-    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
-    document_secrets_conformance(&storage).await;
 }

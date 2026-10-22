@@ -2,7 +2,7 @@
 //! the secrets.
 //!
 //! API keys, OAuth tokens and encrypted configuration fields need a store that
-//! is not a [`DocumentStore`](tinystoragedrivers_core::DocumentStore): values
+//! is not a [`DocumentStore`](tinystoragedrivers_api::DocumentStore): values
 //! are bytes that must never reach a log, a query, or a backend in plaintext.
 //! The port is small (`get`, `set`, `delete`, `list`), and the drivers decide
 //! where the bytes live:
@@ -20,30 +20,10 @@
 //! secret OpenHuman already stored decrypts here unchanged, and the reverse.
 //!
 //! [`DocumentSecrets`] encrypts each value under a data key a [`KeyProvider`]
-//! picks for the handle's [`Scope`](tinystoragedrivers_core::Scope):
+//! picks for the handle's [`Scope`](tinystoragedrivers_types::Scope):
 //! [`StaticKey`] for one key everywhere, [`DerivedKeys`] for a distinct
 //! HKDF-SHA256 key per tenant from one master key, or [`KmsKeyProvider`] for
 //! per-scope envelope keys wrapped by a cloud KMS and persisted on storage.
-//!
-//! # Example
-//!
-//! ```
-//! # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-//! use std::sync::Arc;
-//! use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
-//! use tinystoragedrivers_secrets::{DerivedKeys, DocumentSecrets, SecretStore, crypto};
-//!
-//! let storage = MemoryStorage::new().for_scope(&Scope::new("tenant-a")?)?;
-//! let keys = Arc::new(DerivedKeys::new(crypto::generate_key()?));
-//! let secrets = DocumentSecrets::new(&storage, keys);
-//!
-//! secrets.set("openai:api_key", b"sk-live-123").await?;
-//! let value = secrets.get("openai:api_key").await?.unwrap();
-//! assert_eq!(value.as_slice(), b"sk-live-123");
-//! assert_eq!(secrets.list("openai:").await?, ["openai:api_key"]);
-//! # Ok::<(), tinystoragedrivers_core::StorageError>(())
-//! # }).unwrap();
-//! ```
 //!
 //! # Features
 //!
@@ -56,39 +36,60 @@
 //! This crate holds no policy: which secrets exist, how names are namespaced
 //! per user, and when a legacy value is migrated belong to the host.
 
+#[cfg(any(
+    feature = "file",
+    feature = "document",
+    feature = "kms-aws",
+    feature = "kms-gcp"
+))]
 pub mod crypto;
+#[cfg(feature = "document")]
 mod document;
+#[cfg(feature = "file")]
 mod file;
 #[cfg(feature = "keyring")]
 mod keyring;
+#[cfg(any(feature = "document", feature = "kms-aws", feature = "kms-gcp"))]
 mod keys;
+#[cfg(any(feature = "kms-aws", feature = "kms-gcp"))]
 mod kms;
+#[cfg(feature = "memory")]
 mod memory;
 mod store;
+#[cfg(any(feature = "file", feature = "keyring"))]
 mod task;
+#[cfg(any(feature = "file", feature = "document"))]
+mod version;
 
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 
+#[cfg(feature = "document")]
 pub use document::{DEFAULT_COLLECTION, DocumentSecrets};
-pub use file::{
-    CleanupAcknowledgment, EncryptedFileSecrets, FileImportSource, FileTransactionBudget,
-    FileTransactionGuard, FileTransactionLease, FileTransactionOperation, FileTransactionPhase,
-    FileTransactionResource, FileTransactionResult, HexKeyFileSource, KEY_FILE_NAME,
-    MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile, PublicationBoundary, SECRETS_FILE_NAME,
-    VerifiedFileImport, load_or_create_key_file,
-};
+#[cfg(feature = "file")]
+pub use file::{EncryptedFileSecrets, KEY_FILE_NAME, SECRETS_FILE_NAME, load_or_create_key_file};
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringSecrets;
+#[cfg(any(feature = "document", feature = "kms-aws", feature = "kms-gcp"))]
 pub use keys::{DerivedKeys, KeyProvider, StaticKey};
 #[cfg(feature = "kms-aws")]
 pub use kms::{AwsCredentials, AwsCredentialsProvider, AwsKms};
+#[cfg(any(feature = "kms-aws", feature = "kms-gcp"))]
 pub use kms::{ENVELOPE_COLLECTION, ENVELOPE_ID, KmsClient, KmsKeyProvider};
 #[cfg(feature = "kms-gcp")]
 pub use kms::{GcpAccessTokenProvider, GcpKms};
+#[cfg(feature = "memory")]
 pub use memory::MemorySecrets;
-pub use store::{MAX_SECRET_NAME_LEN, SecretStore, validate_name, validate_prefix};
+pub use store::SecretStore;
+pub use tinystoragedrivers_types::{
+    MAX_SECRET_NAME_LEN, SecretPrecondition, SecretVersion, validate_secret_name,
+    validate_secret_prefix,
+};
 
 /// The `Zeroizing` wrapper every secret value and key is returned in,
 /// re-exported so callers need not name the dependency.
 pub use zeroize::Zeroizing;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod testkit_tests;

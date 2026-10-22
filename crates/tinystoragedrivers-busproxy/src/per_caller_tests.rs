@@ -1,14 +1,32 @@
 use super::*;
+use crate::Admission;
+use crate::Object;
+use bytes::Bytes;
+use futures_core::Stream;
 use serde_json::json;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tinystoragedrivers_api::StorageBackend;
 use tinystoragedrivers_bus::StorageKind;
-use tinystoragedrivers_client::{Admission, Object};
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_testkit::MemoryBackend;
+use tinystoragedrivers_types::Scope;
+
+struct OnceBytes(Option<Bytes>);
+impl Stream for OnceBytes {
+    type Item = tinystoragedrivers_types::Result<Bytes>;
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.0.take().map(Ok))
+    }
+}
+fn reader(bytes: Vec<u8>) -> BlobReader {
+    Box::pin(OnceBytes(Some(Bytes::from(bytes))))
+}
 
 fn endpoint() -> PerCallerEndpoint<impl Fn(&BusName) -> Option<StorageServer>> {
-    let backend = MemoryStorage::new();
+    let backend = MemoryBackend::new();
     PerCallerEndpoint::new(move |sender| {
         (sender.as_str() == ":1.1")
-            .then(|| StorageServer::new(backend.for_scope(&Scope::local()).unwrap()))
+            .then(|| StorageServer::new(backend.for_scope(&Scope::new("local").unwrap()).unwrap()))
     })
 }
 
@@ -42,7 +60,7 @@ async fn an_unauthenticated_or_unknown_caller_is_denied_on_every_path() {
             content_type: None,
             ttl_ms: None,
         };
-        let body: BlobReader = Box::pin(std::io::Cursor::new(Vec::new()));
+        let body: BlobReader = reader(Vec::new());
         assert_eq!(
             endpoint
                 .put_blob_stream(sender, head, body)
@@ -89,7 +107,7 @@ async fn a_known_caller_is_served_from_one_stable_binding() {
         content_type: None,
         ttl_ms: None,
     };
-    let body: BlobReader = Box::pin(std::io::Cursor::new(vec![1, 2]));
+    let body: BlobReader = reader(vec![1, 2]);
     let stored = endpoint
         .put_blob_stream(Some(&known), head, body)
         .await
@@ -106,11 +124,11 @@ async fn a_known_caller_is_served_from_one_stable_binding() {
 async fn a_released_caller_is_rebound_on_its_next_call() {
     let bound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = Arc::clone(&bound);
-    let backend = MemoryStorage::new();
+    let backend = MemoryBackend::new();
     let endpoint = PerCallerEndpoint::new(move |_: &BusName| {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Some(StorageServer::new(
-            backend.for_scope(&Scope::local()).unwrap(),
+            backend.for_scope(&Scope::new("local").unwrap()).unwrap(),
         ))
     });
     let caller = BusName::new(":1.1").unwrap();

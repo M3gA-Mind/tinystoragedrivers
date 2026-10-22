@@ -1,9 +1,9 @@
 //! Running blocking work (disk I/O, an advisory lock, an OS keychain call)
 //! from the async port without stalling the caller's runtime.
 
-use tinystoragedrivers_core::{Result, StorageError};
+use tinystoragedrivers_types::{Result, StorageError};
 
-/// The native guarded file transaction deliberately bypasses this bridge:
+/// The native guarded file writer deliberately bypasses this bridge:
 /// dropping this future does not cancel an already running blocking closure.
 /// Its native owner must execute synchronously with its physical job permit.
 ///
@@ -23,8 +23,8 @@ where
 }
 
 /// Map an I/O failure to the kind a caller can act on: transient conditions
-/// are [`ErrorKind::Unavailable`](tinystoragedrivers_core::ErrorKind::Unavailable),
-/// everything else [`ErrorKind::Backend`](tinystoragedrivers_core::ErrorKind::Backend).
+/// are [`ErrorKind::Unavailable`](tinystoragedrivers_types::ErrorKind::Unavailable),
+/// everything else [`ErrorKind::Backend`](tinystoragedrivers_types::ErrorKind::Backend).
 /// `what` names the operation, never a path or a secret name.
 pub(crate) fn io_error(what: &str, error: std::io::Error) -> StorageError {
     use std::io::ErrorKind as Io;

@@ -20,14 +20,9 @@ After the specification is accepted, create a linked implementation plan in
 [`../plans/`](../plans/README.md). Keep code snippets small enough to clarify
 the contract; production code still belongs under `src/`.
 
-See [`storage-ports.md`](storage-ports.md),
-[`secret-storage.md`](secret-storage.md) and
-[`write-fencing.md`](write-fencing.md) and
-[`generation-admission-errors.md`](generation-admission-errors.md) and
-[`schema-v2.md`](schema-v2.md), the uniform record schema.
-
-[Confidential migration delivery](migration-delivery.md) preserves full-payload
-migration semantics through bounded transport frames.
-
-[`queue-store.md`](queue-store.md) specifies the `QueueStore` port, and
-[`queue-rabbitmq.md`](queue-rabbitmq.md) its RabbitMQ backend.
+See [`primitives-v2.md`](primitives-v2.md) for the current storage contract,
+[`storage-ports.md`](storage-ports.md) for its entry point, and
+[`storage-bus.md`](storage-bus.md) for the loadable-module wire protocol.
+Queue-specific behavior is in [`queue-store.md`](queue-store.md) and
+[`queue-rabbitmq.md`](queue-rabbitmq.md); confidential secret handling is in
+[`secret-storage.md`](secret-storage.md).

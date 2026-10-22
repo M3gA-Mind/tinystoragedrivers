@@ -17,7 +17,9 @@
     reason = "the conformance suite reports a failed check by panicking inside the driver's test"
 )]
 
+#[cfg(feature = "document")]
 mod document;
+mod versioned;
 
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -26,11 +28,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::{ErrorKind, Result};
 
-use crate::store::{MAX_SECRET_NAME_LEN, SecretStore};
+use crate::store::SecretStore;
+use tinystoragedrivers_types::MAX_SECRET_NAME_LEN;
 
+#[cfg(feature = "document")]
 pub use document::document_secrets_conformance;
+pub use versioned::versioned_secrets_conformance;
 
 /// Run every check against `store`.
 ///
@@ -211,7 +216,7 @@ async fn invalid_names(store: &dyn SecretStore) {
     );
 }
 
-fn expect_invalid<T>(result: tinystoragedrivers_core::Result<T>, check: &str) {
+fn expect_invalid<T>(result: Result<T>, check: &str) {
     assert_eq!(
         result.err().map(|error| error.kind()),
         Some(ErrorKind::InvalidInput),
@@ -229,6 +234,6 @@ fn unique_prefix() -> String {
     format!("tsd-conformance:{}:{nanos}:{seq}:", std::process::id())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 #[path = "mod_tests.rs"]
 mod tests;

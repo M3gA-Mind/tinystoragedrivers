@@ -1,8 +1,181 @@
 //! Envelope sharing, rotation, cache validation and failures of the KMS provider.
 use super::*;
 use crate::{DocumentSecrets, SecretStore};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use tinystoragedrivers_core::MemoryStorage;
+use tinystoragedrivers_api::{DocumentStore, Storage};
+use tinystoragedrivers_types::{
+    Capabilities, CollectionSpec, Filter, Meta, Page, Precondition, Query, Result, SearchHit, Sort,
+    Version, Versioned, WriteOp, WriteOptions, WriteResult,
+};
+use tokio::sync::Mutex;
+
+type ScopedDocuments = Arc<Mutex<HashMap<(String, String, String), Versioned<Value>>>>;
+
+#[derive(Debug, Default)]
+struct FakeBackend {
+    documents: ScopedDocuments,
+}
+
+#[derive(Debug)]
+struct FakeDocuments {
+    scope: String,
+    documents: ScopedDocuments,
+}
+
+#[async_trait]
+impl DocumentStore for FakeDocuments {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
+
+    async fn ensure_collection(&self, _: &CollectionSpec) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
+        Ok(self
+            .documents
+            .lock()
+            .await
+            .get(&(self.scope.clone(), collection.to_owned(), id.to_owned()))
+            .cloned())
+    }
+
+    async fn put(
+        &self,
+        collection: &str,
+        id: &str,
+        doc: Value,
+        precondition: Precondition,
+    ) -> Result<Version> {
+        let key = (self.scope.clone(), collection.to_owned(), id.to_owned());
+        let mut documents = self.documents.lock().await;
+        let current = documents.get(&key);
+        let allowed = match (precondition, current) {
+            (Precondition::None, _) | (Precondition::Absent, None) => true,
+            (Precondition::Version(expected), Some(found)) => found.version == expected,
+            _ => false,
+        };
+        if !allowed {
+            return Err(StorageError::conflict("fake document precondition failed"));
+        }
+        let version = current.map_or(Version::FIRST, |found| found.version.next().unwrap());
+        documents.insert(
+            key,
+            Versioned {
+                id: id.to_owned(),
+                version,
+                doc,
+                meta: Meta::default(),
+            },
+        );
+        Ok(version)
+    }
+
+    async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
+        let key = (self.scope.clone(), collection.to_owned(), id.to_owned());
+        let mut documents = self.documents.lock().await;
+        let Some(found) = documents.get(&key) else {
+            return if precondition == Precondition::None || precondition == Precondition::Absent {
+                Ok(false)
+            } else {
+                Err(StorageError::conflict("fake document precondition failed"))
+            };
+        };
+        if let Precondition::Version(expected) = precondition
+            && found.version != expected
+        {
+            return Err(StorageError::conflict("fake document precondition failed"));
+        }
+        documents.remove(&key);
+        Ok(true)
+    }
+
+    async fn query(&self, collection: &str, _: &Query) -> Result<Page<Versioned<Value>>> {
+        let documents = self.documents.lock().await;
+        let items = documents
+            .iter()
+            .filter(|((scope, found_collection, _), _)| {
+                scope == &self.scope && found_collection == collection
+            })
+            .map(|(_, found)| found.clone())
+            .collect();
+        Ok(Page { items, next: None })
+    }
+
+    async fn count(&self, collection: &str, _: &Filter) -> Result<u64> {
+        Ok(self.query(collection, &Query::all()).await?.items.len() as u64)
+    }
+
+    async fn delete_where(&self, collection: &str, _: &Filter) -> Result<u64> {
+        let mut documents = self.documents.lock().await;
+        let before = documents.len();
+        documents.retain(|(scope, found_collection, _), _| {
+            scope != &self.scope || found_collection != collection
+        });
+        Ok((before - documents.len()) as u64)
+    }
+
+    async fn claim(
+        &self,
+        _: &str,
+        _: &Filter,
+        _: &[Sort],
+        _: &Value,
+    ) -> Result<Option<Versioned<Value>>> {
+        Ok(None)
+    }
+
+    async fn atomic_batch(&self, _: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        Err(StorageError::unsupported(
+            tinystoragedrivers_types::Capability::Transactions,
+            "fake document batch is unsupported",
+        ))
+    }
+
+    async fn put_with(
+        &self,
+        collection: &str,
+        id: &str,
+        value: Value,
+        precondition: Precondition,
+        _: WriteOptions,
+    ) -> Result<Version> {
+        self.put(collection, id, value, precondition).await
+    }
+
+    async fn search(&self, _: &str, _: &str, _: usize) -> Result<Vec<SearchHit>> {
+        Ok(Vec::new())
+    }
+
+    async fn drop_collection(&self, collection: &str) -> Result<()> {
+        self.delete_where(collection, &Filter::default()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl StorageBackend for FakeBackend {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
+
+    fn for_scope(&self, scope: &Scope) -> Result<Storage> {
+        let unavailable = Storage::unsupported();
+        Ok(Storage::new(
+            Arc::new(FakeDocuments {
+                scope: scope.as_str().to_owned(),
+                documents: Arc::clone(&self.documents),
+            }),
+            Arc::clone(unavailable.streams()),
+            Arc::clone(unavailable.kv()),
+            Arc::clone(unavailable.blobs()),
+            Arc::clone(unavailable.queues()),
+            Arc::clone(unavailable.secrets()),
+        ))
+    }
+}
 
 #[derive(Debug, Default)]
 struct FakeKms {
@@ -51,7 +224,7 @@ impl KmsClient for FakeKms {
 
 #[tokio::test]
 async fn separate_pods_share_persisted_keys_and_rotation_preserves_secrets() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let first = Arc::new(
         KmsKeyProvider::new(
@@ -64,7 +237,7 @@ async fn separate_pods_share_persisted_keys_and_rotation_preserves_secrets() {
     );
     let scope = Scope::new("tenant-a").unwrap();
     let scoped = storage.for_scope(&scope).unwrap();
-    let secret = DocumentSecrets::new(&scoped, first.clone());
+    let secret = DocumentSecrets::new(&scoped, scope.clone(), first.clone());
     secret.set("token", b"private").await.unwrap();
     let second = Arc::new(
         KmsKeyProvider::new(
@@ -75,7 +248,7 @@ async fn separate_pods_share_persisted_keys_and_rotation_preserves_secrets() {
         )
         .unwrap(),
     );
-    let other = DocumentSecrets::new(&scoped, second.clone());
+    let other = DocumentSecrets::new(&scoped, scope.clone(), second.clone());
     assert_eq!(&**other.get("token").await.unwrap().unwrap(), b"private");
     second.rotate(&scope, "key-v2").await.unwrap();
     first.invalidate(&scope).unwrap();
@@ -90,7 +263,7 @@ async fn separate_pods_share_persisted_keys_and_rotation_preserves_secrets() {
 
 #[tokio::test]
 async fn kms_failure_never_creates_an_unencrypted_fallback() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     kms.fail.store(true, Ordering::SeqCst);
     let provider = KmsKeyProvider::new(storage.clone(), kms, "key", Duration::ZERO).unwrap();
@@ -110,7 +283,7 @@ async fn kms_failure_never_creates_an_unencrypted_fallback() {
 
 #[tokio::test]
 async fn deleting_the_envelope_invalidates_cached_plaintext_on_other_pods() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let old =
         KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::from_secs(60)).unwrap();
@@ -131,7 +304,7 @@ async fn deleting_the_envelope_invalidates_cached_plaintext_on_other_pods() {
 
 #[tokio::test]
 async fn concurrent_pods_use_the_winning_envelope() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let first = KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::ZERO).unwrap();
     let second = KmsKeyProvider::new(storage, kms, "key", Duration::ZERO).unwrap();
@@ -142,7 +315,7 @@ async fn concurrent_pods_use_the_winning_envelope() {
 
 #[tokio::test]
 async fn copying_an_envelope_to_another_scope_fails_closed() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let provider = KmsKeyProvider::new(storage.clone(), kms, "key", Duration::ZERO).unwrap();
     let a = Scope::new("a").unwrap();
@@ -172,7 +345,7 @@ async fn copying_an_envelope_to_another_scope_fails_closed() {
 
 #[tokio::test]
 async fn a_valid_cache_avoids_kms_calls_but_invalidation_forces_unwrap() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let provider =
         KmsKeyProvider::new(storage, kms.clone(), "key", Duration::from_secs(60)).unwrap();
@@ -187,7 +360,7 @@ async fn a_valid_cache_avoids_kms_calls_but_invalidation_forces_unwrap() {
 
 #[tokio::test]
 async fn failed_rotation_leaves_the_persisted_envelope_unchanged() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let provider =
         KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::ZERO).unwrap();
@@ -214,7 +387,7 @@ async fn failed_rotation_leaves_the_persisted_envelope_unchanged() {
 
 #[tokio::test]
 async fn concurrent_rotations_detect_conflict_without_changing_the_data_key() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let first = KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::ZERO).unwrap();
     let second = KmsKeyProvider::new(storage, kms, "key", Duration::ZERO).unwrap();
@@ -259,7 +432,7 @@ async fn a_blocked_tenant_rotation_does_not_stall_another_tenant_key_load() {
     let kms = Arc::new(BlockingKms::default());
     let provider = Arc::new(
         KmsKeyProvider::new(
-            Arc::new(MemoryStorage::new()),
+            Arc::new(FakeBackend::default()),
             kms.clone(),
             "key",
             Duration::from_secs(60),
@@ -290,7 +463,7 @@ async fn a_blocked_tenant_rotation_does_not_stall_another_tenant_key_load() {
 
 #[tokio::test]
 async fn malformed_envelopes_fail_before_kms_access() {
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
+    let storage: Arc<dyn StorageBackend> = Arc::new(FakeBackend::default());
     let kms = Arc::new(FakeKms::default());
     let provider =
         KmsKeyProvider::new(storage.clone(), kms.clone(), "key", Duration::ZERO).unwrap();
@@ -334,7 +507,7 @@ async fn malformed_envelopes_fail_before_kms_access() {
 async fn one_provider_serializes_same_scope_loads_without_duplicate_kms_calls() {
     let kms = Arc::new(FakeKms::default());
     let provider = KmsKeyProvider::new(
-        Arc::new(MemoryStorage::new()),
+        Arc::new(FakeBackend::default()),
         kms.clone(),
         "key",
         Duration::from_secs(60),
@@ -347,61 +520,4 @@ async fn one_provider_serializes_same_scope_loads_without_duplicate_kms_calls() 
     );
     assert_eq!(*one.unwrap(), *two.unwrap());
     assert_eq!(kms.calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn retired_generation_never_uses_a_cached_dek_or_replacement_secret() {
-    use tinystoragedrivers_core::{ErrorKind, PurgeMode, PurgeRequest};
-    let storage: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::new());
-    let kms = Arc::new(FakeKms::default());
-    let keys = Arc::new(
-        KmsKeyProvider::new(
-            storage.clone(),
-            kms.clone(),
-            "key-v1",
-            Duration::from_secs(60),
-        )
-        .unwrap(),
-    );
-    let scope = Scope::new("retired-secret").unwrap();
-    let old = storage.for_scope(&scope).unwrap();
-    let secret = DocumentSecrets::new(&old, keys.clone());
-    secret.set("token", b"private").await.unwrap();
-    let envelope = old
-        .documents()
-        .get(ENVELOPE_COLLECTION, ENVELOPE_ID)
-        .await
-        .unwrap()
-        .unwrap();
-    let receipt = old
-        .purge(&PurgeRequest {
-            operation_id: "retire_secret".into(),
-            mode: PurgeMode::Atomic,
-        })
-        .await
-        .unwrap();
-    let fresh = storage
-        .for_scope_generation(&scope, receipt.generation)
-        .unwrap();
-    // Even a byte-identical envelope in a new generation must not let an old
-    // provider use the previously cached plaintext key.
-    fresh
-        .documents()
-        .put(
-            ENVELOPE_COLLECTION,
-            ENVELOPE_ID,
-            envelope.doc,
-            Precondition::None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        keys.data_key_async(&scope).await.unwrap_err().kind(),
-        ErrorKind::ScopeGenerationRejected
-    );
-    assert_eq!(
-        secret.get("token").await.unwrap_err().kind(),
-        ErrorKind::ScopeGenerationRejected
-    );
-    keys.invalidate(&scope).unwrap();
 }

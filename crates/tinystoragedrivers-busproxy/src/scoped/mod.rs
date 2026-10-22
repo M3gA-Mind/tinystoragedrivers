@@ -1,4 +1,5 @@
 //! Exact-instance, confidential transport for the three-port callback profile.
+use crate::{BlobBody, BusStoragePorts, Object, StorageTransport, WireError};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -6,8 +7,7 @@ use tinybus::{BusName, Connection, ObjectPath};
 use tinystoragedrivers_bus::{
     BlobKeyRequest, BlobStreamHead, PutBlobStreamRequest, StorageFailure, StorageKind, WatchChanged,
 };
-use tinystoragedrivers_client::{BlobBody, BusStoragePorts, Object, StorageTransport, WireError};
-use tinystoragedrivers_schema::{ScopedStorageProfile, ScopedStorageRoute};
+use tinystoragedrivers_types::{ScopedStorageProfile, ScopedStorageRoute};
 use tokio::sync::broadcast;
 
 struct ScopedTransport {
@@ -93,9 +93,9 @@ impl StorageTransport for ScopedTransport {
 pub async fn connect_scoped_storage(
     connection: Connection,
     route: ScopedStorageRoute,
-) -> tinystoragedrivers_core::Result<BusStoragePorts> {
+) -> tinystoragedrivers_types::Result<BusStoragePorts> {
     let invalid =
-        || tinystoragedrivers_core::StorageError::invalid_input("invalid storage callback route");
+        || tinystoragedrivers_types::StorageError::invalid_input("invalid storage callback route");
     let destination = BusName::new(route.destination).map_err(|_| invalid())?;
     let root = ObjectPath::new(route.object_root).map_err(|_| invalid())?;
     if route.version != 1

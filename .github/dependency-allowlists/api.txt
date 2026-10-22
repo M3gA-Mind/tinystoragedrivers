@@ -1,0 +1,20 @@
+# Exact normal/build dependency closure of tinystoragedrivers-api.
+tinystoragedrivers-api
+async-trait
+proc-macro2
+unicode-ident
+quote
+syn
+bytes
+futures-core
+serde
+serde_core
+serde_derive
+serde_json
+itoa
+memchr
+zmij
+tinystoragedrivers-types
+thiserror
+thiserror-impl
+zeroize

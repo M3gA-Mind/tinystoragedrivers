@@ -12,21 +12,18 @@
 //! # Concurrency
 //!
 //! Reads and whole-file mutations retain the exclusive advisory sidecar lock
-//! `secrets.enc.lock`, interoperable with OpenHuman's lock. Key initialization
-//! uses `<key filename>.lock` to serialize its no-clobber publication interval.
+//! `secrets.enc.lock`, interoperable with OpenHuman's lock.
 //! New objects are private at the native create call, before payload writes.
 //! Namespace pins and opened-file identities guard admission and readback.
 //! Unix acknowledgment includes file and directory sync; Windows verifies
 //! visible publication and file flush without claiming durable directory sync.
 //! Errors after replacement can describe a visible, unacknowledged outcome.
 //!
-//! The [module design](README.md) describes import receipts and recovery limits.
-//!
 //! # Corruption
 //!
 //! A file that fails to decrypt or parse is an error
-//! ([`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) or
-//! [`ErrorKind::Serialization`](tinystoragedrivers_core::ErrorKind::Serialization))
+//! ([`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) or
+//! [`ErrorKind::Serialization`](tinystoragedrivers_types::ErrorKind::Serialization))
 //! and is left untouched: no read degrades to "empty", and no write replaces
 //! secrets it could not read.
 
@@ -39,25 +36,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use tinystoragedrivers_core::{Result, StorageError};
+use tinystoragedrivers_types::{
+    Result, SecretPrecondition, SecretVersion, StorageError, validate_secret_name as validate_name,
+    validate_secret_prefix as validate_prefix,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
-use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
+use crate::store::{SecretStore, require_utf8};
 use crate::task::{io_error, run_blocking};
-
-mod hex_key_source;
-pub use hex_key_source::{HexKeyFileSource, MAX_HEX_KEY_FILE_BYTES, ProtectedHexKeyFile};
-mod migration;
-pub use migration::{
-    CleanupAcknowledgment, FileImportSource, PublicationBoundary, VerifiedFileImport,
-};
-
-mod transaction;
-pub use transaction::{
-    FileTransactionBudget, FileTransactionGuard, FileTransactionLease, FileTransactionOperation,
-    FileTransactionPhase, FileTransactionResource, FileTransactionResult,
-};
 
 mod secure;
 #[cfg(unix)]
@@ -68,8 +55,7 @@ mod windows;
 /// The secrets file name inside a workspace directory.
 pub const SECRETS_FILE_NAME: &str = "secrets.enc";
 
-/// The key file name OpenHuman's `SecretStore` keeps beside its config: the
-/// 32-byte key as 64 hex characters.
+/// The key file name for a generic file-backed master key.
 pub const KEY_FILE_NAME: &str = ".secret_key";
 
 /// Distinguishes concurrent temp files written by one process.
@@ -87,7 +73,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// secrets.set("alice:api_key", b"sk-live-abc").await?;
 /// assert!(dir.join("secrets.enc").exists());
 /// # std::fs::remove_dir_all(&dir).unwrap();
-/// # Ok::<(), tinystoragedrivers_core::StorageError>(())
+/// # Ok::<(), tinystoragedrivers_types::StorageError>(())
 /// # }).unwrap();
 /// ```
 pub struct EncryptedFileSecrets {
@@ -102,9 +88,6 @@ struct Inner {
 impl EncryptedFileSecrets {
     /// The store at `dir/secrets.enc`, under `key`.
     ///
-    /// OpenHuman keeps that key in the OS keychain (service `openhuman`, user
-    /// `app:master_key`, as hex); see `KeyringSecrets::load_or_create_key`
-    /// under the `keyring` feature.
     #[must_use]
     pub fn new(dir: impl AsRef<Path>, key: Zeroizing<[u8; KEY_LEN]>) -> Self {
         Self::at_path(dir.as_ref().join(SECRETS_FILE_NAME), key)
@@ -189,6 +172,33 @@ impl SecretStore for EncryptedFileSecrets {
         .await
     }
 
+    async fn get_versioned(
+        &self,
+        name: &str,
+    ) -> Result<Option<(Zeroizing<Vec<u8>>, SecretVersion)>> {
+        validate_name(name)?;
+        let inner = Arc::clone(&self.inner);
+        let name = name.to_string();
+        run_blocking(move || {
+            let lock = inner.lock()?;
+            let map = inner.read_map_in(&lock.namespace)?;
+            let Some(value) = map.0.get(&name) else {
+                return Ok(None);
+            };
+            let (identity, ciphertext) = inner.snapshot_in(&lock.namespace)?;
+            lock.verify()
+                .map_err(|e| io_error("revalidate the versioned read lock", e))?;
+            let version = crate::version::version_from_parts(&[
+                &identity.0.to_be_bytes(),
+                &identity.1.to_be_bytes(),
+                name.as_bytes(),
+                &ciphertext,
+            ]);
+            Ok(Some((Zeroizing::new(value.as_bytes().to_vec()), version)))
+        })
+        .await
+    }
+
     async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
         validate_name(name)?;
         let value = Zeroizing::new(require_utf8(value, "encrypted file")?.to_string());
@@ -203,6 +213,57 @@ impl SecretStore for EncryptedFileSecrets {
             inner.write_map_in(&lock.namespace, &map)?;
             lock.verify()
                 .map_err(|e| io_error("verify the published lock", e))
+        })
+        .await
+    }
+
+    async fn set_if(
+        &self,
+        name: &str,
+        value: &[u8],
+        condition: SecretPrecondition,
+    ) -> Result<SecretVersion> {
+        validate_name(name)?;
+        let value = Zeroizing::new(require_utf8(value, "encrypted file")?.to_string());
+        let inner = Arc::clone(&self.inner);
+        let name = name.to_string();
+        run_blocking(move || {
+            let lock = inner.lock()?;
+            let mut map = inner.read_map_in(&lock.namespace)?;
+            match condition {
+                SecretPrecondition::Absent if map.0.contains_key(&name) => {
+                    return Err(StorageError::conflict("secret precondition did not match"));
+                }
+                SecretPrecondition::Version(expected) => {
+                    if !map.0.contains_key(&name) {
+                        return Err(StorageError::conflict("secret precondition did not match"));
+                    }
+                    let (identity, ciphertext) = inner.snapshot_in(&lock.namespace)?;
+                    let current = crate::version::version_from_parts(&[
+                        &identity.0.to_be_bytes(),
+                        &identity.1.to_be_bytes(),
+                        name.as_bytes(),
+                        &ciphertext,
+                    ]);
+                    if current != expected {
+                        return Err(StorageError::conflict("secret precondition did not match"));
+                    }
+                }
+                SecretPrecondition::Absent => {}
+            }
+            map.0.insert(name.clone(), value.to_string());
+            lock.verify()
+                .map_err(|e| io_error("revalidate the conditional write lock", e))?;
+            inner.write_map_in(&lock.namespace, &map)?;
+            lock.verify()
+                .map_err(|e| io_error("verify the published conditional write", e))?;
+            let (identity, ciphertext) = inner.snapshot_in(&lock.namespace)?;
+            Ok(crate::version::version_from_parts(&[
+                &identity.0.to_be_bytes(),
+                &identity.1.to_be_bytes(),
+                name.as_bytes(),
+                &ciphertext,
+            ]))
         })
         .await
     }
@@ -250,6 +311,10 @@ impl SecretStore for EncryptedFileSecrets {
     fn backend_name(&self) -> &'static str {
         "encrypted_file"
     }
+
+    fn enumerable(&self) -> bool {
+        true
+    }
 }
 
 /// The decrypted name → value map, wiped on drop.
@@ -265,6 +330,23 @@ impl Drop for SecretMap {
 }
 
 impl Inner {
+    fn snapshot_in(&self, namespace: &secure::Namespace) -> Result<(secure::Identity, Vec<u8>)> {
+        let name =
+            secure::file_name(&self.path).map_err(|e| io_error("admit the secrets file", e))?;
+        let mut file = namespace
+            .open_file(name, false)
+            .map_err(|e| io_error("open the versioned secrets file", e))?;
+        let identity = secure::identity(&file)
+            .map_err(|e| io_error("read the versioned secrets identity", e))?;
+        let mut ciphertext = Vec::new();
+        file.read_to_end(&mut ciphertext)
+            .map_err(|e| io_error("read the versioned secrets file", e))?;
+        namespace
+            .verify()
+            .map_err(|e| io_error("revalidate the versioned secrets namespace", e))?;
+        Ok((identity, ciphertext))
+    }
+
     fn read_map_in(&self, namespace: &secure::Namespace) -> Result<SecretMap> {
         let blob = match read_private(namespace, &self.path) {
             Ok(blob) => blob,
@@ -470,7 +552,7 @@ fn reserve_temp_file(path: &Path, next_seq: &mut dyn FnMut() -> u64) -> Result<(
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) for a
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) for a
 /// key file that is not 32 bytes of hex, or an I/O error mapped as the file
 /// driver maps them (including a filesystem without hard links).
 pub fn load_or_create_key_file(path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> {

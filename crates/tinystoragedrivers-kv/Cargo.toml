@@ -1,0 +1,42 @@
+[package]
+name = "tinystoragedrivers-kv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Memory, file, SQLite, and MongoDB JSON key/value storage primitives."
+readme = "README.md"
+keywords = ["storage", "key-value", "sqlite", "mongodb"]
+categories = ["database"]
+publish = false
+
+[features]
+default = ["memory"]
+memory = []
+sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite"]
+mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:tinystoragedrivers-document", "tinystoragedrivers-document/mongodb", "dep:mongodb", "dep:futures-util"]
+file = ["dep:libc", "dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
+
+[dependencies]
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tinystoragedrivers-connect = { workspace = true, optional = true }
+tinystoragedrivers-document = { workspace = true, optional = true }
+# The MongoDB client dependency and feature set match the existing engine.
+mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = { workspace = true }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.0" }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
+
+[lints]
+workspace = true

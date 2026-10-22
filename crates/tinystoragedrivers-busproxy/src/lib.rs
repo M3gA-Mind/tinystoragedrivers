@@ -1,49 +1,27 @@
 //! The real `TinyBus` transport for the storage bus.
 //!
-//! `tinystoragedrivers-client` turns the storage ports into typed bus messages
-//! and knows nothing about `TinyBus`; this crate is the other half, on both
-//! ends of a connection:
+//! This crate adapts the shared storage ports to `TinyBus` on both ends of a
+//! connection:
 //!
 //! * **Module side.** [`BusTransport`] implements
-//!   [`StorageTransport`](tinystoragedrivers_client::StorageTransport) over a
-//!   [`tinybus::Connection`]: async JSON calls to the
+//!   [`StorageTransport`] over a [`tinybus::Connection`]: async JSON calls to the
 //!   `ai.tinyhumans.tinystorage.Storage` objects, blobs over `tinybus` streams
 //!   in bounded chunks, watch invalidations as signals. [`connect_storage`]
-//!   is the one call a module makes to obtain its
-//!   [`BusStorage`](tinystoragedrivers_client::BusStorage).
-//!   [`connect_scoped_storage`] connects to an exact-instance route that the
-//!   host has already admitted and bound to confidential callback endpoints.
-//! * **Host side.** [`serve`] registers the five objects on the host's
+//!   is the one call a module makes to obtain its six-port [`tinystoragedrivers_api::Storage`].
+//!   [`connect_scoped_storage`] connects to an exact-instance route using only
+//!   the documents, native JSON streams and secrets callback profile.
+//! * **Host side.** [`serve`] registers the six objects on the host's
 //!   connection and hands every call, with the broker-authenticated sender, to
 //!   a [`StorageEndpoint`]. [`PerCallerEndpoint`] is the ready-made endpoint
-//!   that binds each caller to its own `StorageServer`; a host that builds
-//!   that server `with_queue_manifest` serves exactly the queues its manifest
-//!   declares.
+//!   that binds each caller to its own `StorageServer` over a host-composed
+//!   `Storage` bundle.
 //!
 //! ```no_run
-//! # async fn module(connection: tinybus::Connection) -> tinystoragedrivers_core::Result<()> {
-//! use tinystoragedrivers_core::{DocumentStore, CollectionSpec};
+//! # async fn module(connection: tinybus::Connection) -> tinystoragedrivers_types::Result<()> {
+//! use tinystoragedrivers_types::CollectionSpec;
 //!
 //! let storage = tinystoragedrivers_busproxy::connect_storage(connection).await?;
-//! let scoped = tinystoragedrivers_core::StorageBackend::for_scope(
-//!     &storage,
-//!     &tinystoragedrivers_busproxy::module_scope_label(),
-//! )?;
-//! scoped.documents().ensure_collection(&CollectionSpec::new("notes")).await?;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! A module that receives an exact-instance route uses the scoped connector
-//! for the host's finite documents, streams and secrets profile:
-//!
-//! ```no_run
-//! # async fn module(
-//! #     connection: tinybus::Connection,
-//! #     route: tinystoragedrivers_schema::ScopedStorageRoute,
-//! # ) -> tinystoragedrivers_core::Result<()> {
-//! let storage = tinystoragedrivers_busproxy::connect_scoped_storage(connection, route).await?;
-//! let _documents = storage.documents();
+//! storage.documents().ensure_collection(&CollectionSpec::new("notes")).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -70,25 +48,47 @@
 //!   another peer is refused and stays available to its owner.
 //! * Watch signals are unicast with `Connection::emit_to` to the subscribing
 //!   caller, so a peer that matches the same path or interface never sees them.
+mod address;
 mod chunks;
+mod client;
+mod convert;
 mod host;
+mod loopback;
 mod names;
 mod per_caller;
+mod scoped;
+mod server;
+mod tinybus_transport;
 mod transport;
 
-pub use host::{HostFailure, ServedStorage, StorageCall, StorageEndpoint, serve};
+pub use address::{INVOCATION_OBJECT_ROOT, StorageAddress};
+pub use client::{
+    BusBlobs, BusDocuments, BusKv, BusQueues, BusSecrets, BusStorage, BusStoragePorts, BusStreams,
+};
+pub use host::{
+    HostFailure, ServedStorage, StorageCall, StorageEndpoint, prepare_storage_host_callbacks,
+    serve, serve_at_address, serve_with_host_callbacks,
+};
+pub use loopback::Loopback;
 pub use names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, OBJECT_ROOT, WATCH_MEMBER, object_path, watch_path,
 };
 pub use per_caller::PerCallerEndpoint;
-pub use transport::{BusTransport, connect_storage, module_scope_label};
+pub use scoped::connect_scoped_storage;
+pub use server::StorageServer;
+pub use tinybus_transport::{
+    BusTransport, connect_storage, connect_storage_at, connect_storage_at_address,
+};
+pub use transport::{Admission, BlobBody, Object, StorageTransport, WireError};
 
 #[cfg(test)]
 #[path = "bus_tests.rs"]
 mod bus_tests;
-#[cfg(test)]
-#[path = "watching_fake.rs"]
-mod watching_fake;
 
-mod scoped;
-pub use scoped::connect_scoped_storage;
+mod callback;
+pub use callback::{endpoint, serve_collection};
+pub use callback::{scoped_storage_endpoints, serve_scoped_storage};
+
+#[cfg(test)]
+#[path = "ops_tests.rs"]
+mod ops_tests;

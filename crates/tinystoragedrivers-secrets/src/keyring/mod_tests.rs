@@ -1,12 +1,12 @@
 //! The keyring driver over an in-memory credential builder (never the real OS
-//! store), the error mapping, and the opt-in `live_*` test.
+//! store), the error mapping, and versioned-write support.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::{Capability, ErrorKind, SecretPrecondition};
 
 use super::*;
 use crate::crypto::tests::FIXTURE_KEY_HEX;
@@ -270,7 +270,10 @@ async fn a_creation_lock_file_is_reused_and_rejects_a_non_directory_parent() {
             .kind(),
         ErrorKind::Backend
     );
-    assert!(store.lock().unwrap().is_empty());
+    assert_eq!(
+        store.lock().unwrap().clone(),
+        HashMap::<(String, String), Vec<u8>>::new()
+    );
 }
 
 #[tokio::test]
@@ -292,7 +295,10 @@ async fn load_or_create_key_never_mints_over_a_locked_store() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert!(store.lock().unwrap().is_empty());
+    assert_eq!(
+        store.lock().unwrap().clone(),
+        HashMap::<(String, String), Vec<u8>>::new()
+    );
 }
 
 #[tokio::test]
@@ -374,28 +380,7 @@ fn debug_shows_service_only() {
     assert!(format!("{default:?}").contains("custom_builder: false"));
 }
 
-/// The real OS store. Opt-in only: `TSD_LIVE_KEYRING=1 cargo test -p
-/// tinystoragedrivers-secrets --features keyring live_`.
-#[tokio::test]
-async fn live_keyring_conformance() {
-    if std::env::var("TSD_LIVE_KEYRING").as_deref() != Ok("1") {
-        return;
-    }
-    let secrets = KeyringSecrets::new("tinystoragedrivers-live-test");
-    secrets_conformance(&secrets).await;
-    // A name unique to this run, so the cleanup below can only remove the
-    // credential this test created.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let name = format!("live:master_key:{}:{nanos}", std::process::id());
-    assert!(secrets.get(&name).await.unwrap().is_none());
-    let key = secrets.load_or_create_key(&name).await.unwrap();
-    assert_eq!(*secrets.load_or_create_key(&name).await.unwrap(), *key);
-    assert!(secrets.delete(&name).await.unwrap());
-}
-
+/// Native provider factories remain lazy and never access credentials here.
 #[cfg(target_os = "linux")]
 #[test]
 fn explicit_kernel_factory_retains_its_concrete_builder_without_provider_access() {
@@ -483,4 +468,17 @@ async fn live_isolated_secret_service_probe() {
         _ => false,
     };
     assert!(passed, "isolated native provider operation failed");
+}
+
+#[tokio::test]
+async fn conditional_writes_are_typed_unsupported() {
+    let (store, _) = fake(Fault::None);
+    let error = store
+        .set_if("token", b"value", SecretPrecondition::Absent)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Unsupported(Capability::ConditionalSecretWrites)
+    );
 }

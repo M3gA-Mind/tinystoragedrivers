@@ -9,19 +9,21 @@ description = "The real TinyBus transport for the storage bus: a module-side Sto
 publish = false
 
 [dependencies]
-tinystoragedrivers-schema.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tinybus.workspace = true
+tinybus = { workspace = true, features = ["modules"] }
 tinystoragedrivers-bus.workspace = true
-tinystoragedrivers-client.workspace = true
-tinystoragedrivers-core.workspace = true
+tinystoragedrivers-api.workspace = true
+tinystoragedrivers-types.workspace = true
 tokio = { workspace = true, features = ["sync", "io-util", "rt", "time"] }
+zeroize.workspace = true
 
 [dev-dependencies]
-tinystoragedrivers-secrets = { path = "../tinystoragedrivers-secrets" }
-tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit" }
+futures-util = "0.3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
 
 [lints]
