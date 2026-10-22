@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tinystoragedrivers_bus::{
     BLOB_STREAM_CHUNK_BYTES, BlobKeyRequest, BlobStreamHead, MAX_FRAME_BYTES, PutBlobStreamRequest,
@@ -16,6 +17,14 @@ use tokio::sync::broadcast;
 
 use crate::server::StorageServer;
 use crate::transport::{Admission, BlobBody, Object, StorageTransport, WireError};
+
+fn encode_value<T: Serialize>(value: &T) -> Result<Value, WireError> {
+    serde_json::to_value(value).map_err(|_| WireError::Transport("frame encode failed".into()))
+}
+
+fn decode_value<T: DeserializeOwned>(value: Value) -> Result<T, WireError> {
+    serde_json::from_value(value).map_err(|_| WireError::Transport("frame decode failed".into()))
+}
 
 /// A [`StorageTransport`] that calls a server in the same process.
 ///
@@ -56,7 +65,10 @@ impl Loopback {
     }
 
     /// Serialize as a frame, enforce the cap and parse it back.
-    fn frame(&self, value: &Value) -> Result<Value, WireError> {
+    fn frame<T>(&self, value: &T) -> Result<T, WireError>
+    where
+        T: Serialize + DeserializeOwned,
+    {
         let text = serde_json::to_string(value)
             .map_err(|_| WireError::Transport("frame encode failed".into()))?;
         self.largest_frame.fetch_max(text.len(), Ordering::Relaxed);
@@ -64,6 +76,15 @@ impl Loopback {
             return Err(WireError::Transport("frame exceeds the 16 MiB cap".into()));
         }
         serde_json::from_str(&text).map_err(|_| WireError::Transport("frame decode failed".into()))
+    }
+
+    fn round_trip<T>(&self, value: &T) -> Result<T, WireError>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let wire = encode_value(value)?;
+        let wire = self.frame(&wire)?;
+        decode_value(wire)
     }
 
     fn chunked(&self, body: BlobBody) -> BlobBody {
@@ -117,7 +138,7 @@ impl StorageTransport for Loopback {
         selector: &str,
         request: Value,
     ) -> Result<Value, WireError> {
-        let request = self.frame(&request)?;
+        let request: Value = self.frame(&request)?;
         let reply = self
             .server
             .handle(self.admission, object.as_str(), selector, request)
@@ -131,17 +152,13 @@ impl StorageTransport for Loopback {
         head: PutBlobStreamRequest,
         body: BlobBody,
     ) -> Result<Value, WireError> {
-        let head = serde_json::to_value(&head)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
-        let head = serde_json::from_value(self.frame(&head)?)
-            .map_err(|_| WireError::Transport("frame decode failed".into()))?;
+        let head = self.round_trip(&head)?;
         let info = self
             .server
             .put_blob_stream(head, self.chunked(body))
             .await
             .map_err(wire_failure)?;
-        let info = serde_json::to_value(&info)
-            .map_err(|_| WireError::Transport("frame encode failed".into()))?;
+        let info = encode_value(&info)?;
         self.frame(&info)
     }
 
