@@ -1,5 +1,7 @@
 //! Public API check for reusable atomic filesystem operations.
 
+#![cfg(feature = "file")]
+
 use tinystoragedrivers_document::fsio::{fsync_dir, write_atomic};
 
 #[test]
