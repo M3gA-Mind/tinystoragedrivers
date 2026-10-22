@@ -37,7 +37,7 @@ async fn invalid_unavailable_and_well_known_routes_fail_statically() {
             .unwrap_err();
         assert_eq!(
             error.kind(),
-            tinystoragedrivers_core::ErrorKind::InvalidInput
+            tinystoragedrivers_types::ErrorKind::InvalidInput
         );
         assert!(!error.to_string().contains("private-"));
     }
@@ -46,7 +46,7 @@ async fn invalid_unavailable_and_well_known_routes_fail_statically() {
         .unwrap_err();
     assert_eq!(
         error.kind(),
-        tinystoragedrivers_core::ErrorKind::Unavailable
+        tinystoragedrivers_types::ErrorKind::Unavailable
     );
     let (signals, _) = broadcast::channel(1);
     let transport = ScopedTransport {
@@ -88,7 +88,7 @@ async fn invalid_unavailable_and_well_known_routes_fail_statically() {
     };
     assert_eq!(
         transport
-            .put_blob_stream(head, Box::pin(std::io::Cursor::new(Vec::<u8>::new())))
+            .put_blob_stream(head, Box::pin(futures_util::stream::empty()))
             .await
             .unwrap_err(),
         unsupported()

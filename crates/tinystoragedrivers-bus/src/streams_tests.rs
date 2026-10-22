@@ -40,7 +40,7 @@ fn stream_requests_reject_authority_selectors() {
 #[test]
 fn stream_selectors_are_fixed() {
     assert_eq!(STREAMS_OBJECT, "Streams");
-    assert_eq!(STREAMS_SELECTORS.len(), 10);
+    assert_eq!(STREAMS_SELECTORS.len(), 11);
     assert!(is_streams_selector("AppendBatchIfOffset"));
     assert!(is_streams_selector("Seal"));
     assert!(is_streams_selector("Info"));

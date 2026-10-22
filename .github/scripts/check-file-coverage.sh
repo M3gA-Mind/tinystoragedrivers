@@ -23,6 +23,25 @@ python3 .github/scripts/native_profile_tests.py
 python3 .github/scripts/check-native-io-fault.py
 python3 .github/scripts/check-native-key-race.py
 python3 .github/scripts/check-native-secret-service.py --coverage
+
+# Exercise callback host code in this workspace's LLVM-instrumented test binary.
+# The preceding real-module CI step builds and admits this exact artifact; fail
+# closed if the proof artifact was not produced or its path was not forwarded.
+: "${TSD_STORAGE_CALLBACK_MODULE:?run scripts/test-storage-callback.sh before native coverage}"
+test -f "$TSD_STORAGE_CALLBACK_MODULE"
+cargo llvm-cov \
+  --locked \
+  --no-clean \
+  --package tinystoragedrivers-busproxy \
+  --lib \
+  --all-features \
+  --json \
+  --output-path "$report" \
+  -- host::tests::admitted_module_exercises_callback_host_streams_and_secrets \
+  --ignored \
+  --exact \
+  --test-threads=1
+
 cargo llvm-cov report --json --output-path "$report"
 
 covered_files="$(jq --arg source_root "$source_root" '

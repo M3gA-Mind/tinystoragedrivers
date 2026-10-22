@@ -46,13 +46,13 @@ jobs:
       # are native runtime tests; cross-target compilation is not acceptance.
       - name: Windows empty production handle at birth
         if: runner.os == 'Windows'
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::reserved_empty_file_has_protected_owner_dacl_before_bytes_under_broad_parent -- --exact --nocapture
+        run: cargo test --locked -p tinystoragedrivers-secrets --no-default-features --features file --lib file::tests::windows_birth::reserved_empty_file_has_protected_owner_dacl_before_bytes_under_broad_parent -- --exact --nocapture
       - name: Unix empty production handle at birth
         if: runner.os != 'Windows'
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::unix_birth::reserved_empty_file_is_owner_only_at_birth_with_permissive_umask -- --exact --nocapture
+        run: cargo test --locked -p tinystoragedrivers-secrets --no-default-features --features file --lib file::tests::unix_birth::reserved_empty_file_is_owner_only_at_birth_with_permissive_umask -- --exact --nocapture
       - name: Windows public key data and lock fixture
         if: ${{ always() && runner.os == 'Windows' }}
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::published_key_data_and_lock_have_protected_owner_dacl_in_admitted_namespace -- --exact --nocapture
+        run: cargo test --locked -p tinystoragedrivers-secrets --no-default-features --features file --lib file::tests::windows_birth::published_key_data_and_lock_have_protected_owner_dacl_in_admitted_namespace -- --exact --nocapture
       - name: Record Stage3 native toolchain versions
         if: always()
         run: |
@@ -61,18 +61,12 @@ jobs:
           cargo clippy --version
       - name: Windows canonical local path identity regression
         if: ${{ always() && runner.os == 'Windows' }}
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests::windows_birth::canonical_local_verbatim_paths_retain_native_namespace_and_file_identity -- --exact --nocapture
-      - name: Native reserved object case alias regression
-        if: ${{ always() && runner.os != 'Linux' }}
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::migration::tests::native_case_aliases_of_all_reserved_objects_never_publish_or_delete -- --exact --nocapture
+        run: cargo test --locked -p tinystoragedrivers-secrets --no-default-features --features file --lib file::tests::windows_birth::canonical_local_verbatim_paths_retain_native_namespace_and_file_identity -- --exact --nocapture
       # Keep native key/file compatibility evidence even when birth is RED.
       # MongoDB and Bash service setup remain in the existing Linux lanes.
-      - name: Native bounded secret transactions
-        if: always()
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::transaction::tests -- --nocapture
       - name: Native existing file and key tests
         if: always()
-        run: cargo test --locked -p tinystoragedrivers-secrets --lib file::tests -- --nocapture
+        run: cargo test --locked -p tinystoragedrivers-secrets --no-default-features --features file --lib file::tests -- --nocapture
       - name: Exercise the actual Windows finite diagnostic launcher
         if: ${{ runner.os == 'Windows' }}
         run: |
@@ -135,6 +129,11 @@ jobs:
       TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
       # Likewise the RabbitMQ queue backend's `live_*` tests.
       TSD_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/%2f
+      # The facade S3 conformance test must share the MinIO lifetime with the
+      # full-workspace LLVM coverage run below.
+      TSD_S3_URL: s3://tsd-test/ci?region=us-east-1&endpoint=http%3A%2F%2F127.0.0.1%3A19000
+      AWS_ACCESS_KEY_ID: tsd-test-access
+      AWS_SECRET_ACCESS_KEY: tsd-test-secret
     steps:
       - uses: actions/checkout@v7
         with:
@@ -158,6 +157,8 @@ jobs:
         run: .github/scripts/start-mongo-replset.sh 27017
       - name: Start RabbitMQ
         run: .github/scripts/start-rabbitmq.sh 5672
+      - name: Start MinIO for facade blob conformance and coverage
+        run: .github/scripts/start-minio.sh 19000 tsd-minio-rust
 
       - name: Test release version and proof lockfile updates
         run: python3 .github/scripts/release_version_tests.py
@@ -165,19 +166,23 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Prove isolated schema dependency closure and negative fixture
-        run: python3 scripts/check-schema-dependencies.py --negative-test
+      - name: Check facade without optional backend features
+        run: cargo check --locked -p tinystoragedrivers --no-default-features
 
-      # All-target checks unify dev features and hide a missing tokio/macros
-      # dependency in testkit. Keep the library-only feature build independent.
-      - name: Check core feature closure without dev dependency unification
-        run: cargo check -p tinystoragedrivers-core --lib --all-features --locked
+      - name: Test shared storage testkit
+        run: cargo test --locked -p tinystoragedrivers-testkit
 
-      - name: Check migration delivery without dev or testkit features
-        run: cargo check -p tinystoragedrivers-core --no-default-features --features migration-delivery --lib --locked
+      - name: Lint shared storage testkit
+        run: cargo clippy --locked -p tinystoragedrivers-testkit --all-targets --all-features -- -D warnings
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test standalone blob memory, filesystem, and SQLite features
+        run: |
+          cargo test --locked -p tinystoragedrivers-blob
+          cargo test --locked -p tinystoragedrivers-blob --no-default-features --features fs
+          cargo test --locked -p tinystoragedrivers-blob --no-default-features --features sqlite
+          cargo check --locked -p tinystoragedrivers-blob --no-default-features --features s3
 
       - name: Build
         run: cargo build --all-targets --all-features
@@ -190,25 +195,37 @@ jobs:
 
       - name: Verify confidential document callbacks through a real module
         run: bash scripts/test-document-callback.sh
-
-      # `tinystoragedrivers-core` defines the ports every driver and consumer
-      # compiles against. A database library arriving there transitively would
-      # force SQLite or MongoDB onto every host, so it is asserted rather than
-      # documented. The FORWARD form is required: `cargo tree -i <crate> -p
-      # <pkg>` discards the `-p` scope and exits 0 looking clean.
-      - name: Assert the core crate stays driver-free
+      - name: Verify all storage callbacks through a real module
+        run: bash scripts/test-storage-callback.sh
+      - name: Format and lint the excluded callback-proof workspace
         run: |
-          set -euo pipefail
-          forbidden="$(cargo tree -p tinystoragedrivers-core --all-features -e normal,build --prefix none \
-            | grep -Ei 'rusqlite|libsqlite3|mongodb|bson|reqwest|hyper|lapin|amq-protocol' || true)"
-          if [ -n "$forbidden" ]; then
-            echo "tinystoragedrivers-core pulled in a dependency its manifest forbids:" >&2
-            echo "$forbidden" >&2
-            echo >&2
-            echo "The ports must stay free of database clients and transports;" >&2
-            echo "drivers live in their own crates." >&2
+          cargo fmt --manifest-path proof-workspaces/storage-callback/Cargo.toml --all -- --check
+          cargo clippy --locked --manifest-path proof-workspaces/storage-callback/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+      - name: Keep the compiled storage module on ports, not engine implementations
+        run: |
+          tree="$(cargo tree --locked --manifest-path proof-workspaces/storage-callback/Cargo.toml -p storage-callback-module-proof --all-features --edges normal,build --prefix none)"
+          members="$(awk '{print $1}' <<<"$tree" | sort -u)"
+          if [[ -z "$members" ]] || ! grep -Fxq storage-callback-module-proof <<<"$members"; then
+            echo "module dependency tree is empty or omitted its root package" >&2
             exit 1
           fi
+          for engine in tinystoragedrivers-connect tinystoragedrivers-document tinystoragedrivers-kv tinystoragedrivers-blob tinystoragedrivers-queue tinystoragedrivers-secrets tinystoragedrivers-testkit; do
+            if grep -Fxq "$engine" <<<"$members"; then
+              echo "compiled storage module links engine implementation: ${engine}" >&2
+              exit 1
+            fi
+          done
+
+      # These are the only production vocabularies every driver and consumer
+      # needs. Exact forward dependency closures make any unreviewed transitive
+      # package fail, including new clients, runtimes and native bindings.
+      - name: Assert the types and API crates stay dependency-light
+        run: |
+          set -euo pipefail
+          .github/scripts/check-vocabulary-deps.sh \
+            tinystoragedrivers-types .github/dependency-allowlists/types.txt
+          .github/scripts/check-vocabulary-deps.sh \
+            tinystoragedrivers-api .github/dependency-allowlists/api.txt
 
       - name: Install native syscall observation for full-workspace coverage
         run: sudo apt-get install --yes strace
@@ -223,6 +240,41 @@ jobs:
           name: coverage-json
           path: coverage.json
           if-no-files-found: ignore
+      - name: Stop MinIO
+        if: always()
+        run: .github/scripts/stop-minio.sh tsd-minio-rust
+
+  facade-feature-matrix:
+    name: Facade feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check memory-only and each facade feature
+        run: scripts/test-features.sh
+
+  facade-memory-only:
+    name: Facade memory-only feature closure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check no-default-features build and assert optional engines are absent
+        run: |
+          cargo check --locked -p tinystoragedrivers --no-default-features
+          tree="$(cargo tree --locked -p tinystoragedrivers --no-default-features --edges normal)"
+          for forbidden in chacha20poly1305 aes-gcm keyring aws-config aws-sdk-kms google-cloud-kms; do
+            if grep -F "$forbidden" <<<"$tree"; then
+              echo "unexpected optional cryptography/provider dependency: $forbidden" >&2
+              exit 1
+            fi
+          done
 
   secret-service:
     name: Real isolated Linux Secret Service
@@ -276,10 +328,12 @@ jobs:
         run: .github/scripts/start-mongo-replset.sh 27017
 
       - name: Test the driver against MongoDB
-        run: cargo test -p tinystoragedrivers-mongodb --all-features
+        run: |
+          cargo test --locked -p tinystoragedrivers-document --features mongodb
+          cargo test --locked -p tinystoragedrivers-blob --features mongodb
 
       - name: Test the facade's mongodb feature
-        run: cargo test -p tinystoragedrivers --features mongodb
+        run: cargo test --locked -p tinystoragedrivers --no-default-features --features mongodb
 
   rabbitmq:
     name: RabbitMQ queue backend
@@ -299,10 +353,10 @@ jobs:
         run: .github/scripts/start-rabbitmq.sh 5672
 
       - name: Test the queue backend against RabbitMQ
-        run: cargo test -p tinystoragedrivers-rabbitmq --all-features
+        run: cargo test --locked -p tinystoragedrivers-queue --no-default-features --features rabbitmq
 
       - name: Test the facade's rabbitmq feature
-        run: cargo test -p tinystoragedrivers --features rabbitmq
+        run: cargo test --locked -p tinystoragedrivers --no-default-features --features rabbitmq
 
   s3:
     name: S3-compatible blob driver
@@ -317,10 +371,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: MinIO conformance, presigned URLs and 500 MiB streaming roundtrip
+      - name: MinIO blob conformance and facade S3 selection
         run: .github/scripts/test-minio.sh
-      - name: Test composite URL selection
-        run: cargo test -p tinystoragedrivers --features s3
 
   docs:
     name: Docs

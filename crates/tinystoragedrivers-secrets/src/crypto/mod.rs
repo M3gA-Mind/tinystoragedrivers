@@ -12,11 +12,7 @@
 //! Every nonce is fresh from the OS generator, and no associated data is
 //! bound, which is what keeps an existing value decrypting here.
 //!
-//! The legacy `enc:` format (repeating-key XOR, unauthenticated) is readable
-//! through [`decrypt_legacy_enc`] so a host can migrate the last of those
-//! values; nothing here writes it.
-//!
-//! Failures are [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto)
+//! Failures are [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto)
 //! and their messages never contain key or plaintext bytes.
 //!
 //! ```
@@ -26,12 +22,12 @@
 //! let stored = crypto::encrypt_enc2(&key, b"sk-live-123")?;
 //! assert!(stored.starts_with("enc2:"));
 //! assert_eq!(crypto::decrypt_enc2(&key, &stored)?.as_slice(), b"sk-live-123");
-//! # Ok::<(), tinystoragedrivers_core::StorageError>(())
+//! # Ok::<(), tinystoragedrivers_types::StorageError>(())
 //! ```
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use tinystoragedrivers_core::{Result, StorageError};
+use tinystoragedrivers_types::{Result, StorageError};
 use zeroize::Zeroizing;
 
 /// Key length in bytes (256-bit).
@@ -42,14 +38,12 @@ pub const NONCE_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 /// The prefix of an encrypted string value.
 pub const ENC2_PREFIX: &str = "enc2:";
-/// The prefix of a legacy XOR-obfuscated string value.
-pub const LEGACY_ENC_PREFIX: &str = "enc:";
 
 /// A fresh random key from the OS generator.
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when the
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) when the
 /// OS random source fails.
 pub fn generate_key() -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
@@ -68,7 +62,7 @@ fn fill_random(buf: &mut [u8]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when the
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) when the
 /// OS random source fails, or the cipher refuses the input (only possible
 /// beyond its 256 GiB limit).
 pub fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -89,7 +83,7 @@ pub fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when the
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) when the
 /// blob is too short to hold a nonce and tag, or fails authentication (wrong
 /// key, or tampered data).
 pub fn decrypt(key: &[u8; KEY_LEN], blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -127,7 +121,7 @@ pub fn encrypt_enc2(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<String> {
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when the
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) when the
 /// value lacks the `enc2:` prefix, the hex is malformed, or [`decrypt`] fails.
 pub fn decrypt_enc2(key: &[u8; KEY_LEN], value: &str) -> Result<Zeroizing<Vec<u8>>> {
     let hex = value
@@ -143,34 +137,12 @@ pub fn is_enc2(value: &str) -> bool {
     value.starts_with(ENC2_PREFIX)
 }
 
-/// Decode a legacy `enc:<hex>` value: repeating-key XOR with the 32-byte key.
-///
-/// The format is unauthenticated and leaks the key to anyone who knows part of
-/// the plaintext, so this exists only to migrate such a value to `enc2:`; a
-/// wrong key yields garbage rather than an error.
+/// Parse host-owned hexadecimal key material. Surrounding whitespace is
+/// ignored.
 ///
 /// # Errors
 ///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) when the
-/// value lacks the `enc:` prefix or the hex is malformed.
-pub fn decrypt_legacy_enc(key: &[u8; KEY_LEN], value: &str) -> Result<Zeroizing<Vec<u8>>> {
-    let hex = value
-        .strip_prefix(LEGACY_ENC_PREFIX)
-        .ok_or_else(|| StorageError::crypto("value is not a legacy enc: ciphertext"))?;
-    let mut bytes = Zeroizing::new(hex_decode(hex)?);
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte ^= key[i % KEY_LEN];
-    }
-    Ok(bytes)
-}
-
-/// Parse a 32-byte key written as hex, the form OpenHuman keeps in its
-/// `.secret_key` file and its OS keychain master-key entry. Surrounding
-/// whitespace is ignored.
-///
-/// # Errors
-///
-/// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) for
+/// [`ErrorKind::Crypto`](tinystoragedrivers_types::ErrorKind::Crypto) for
 /// malformed hex or a length other than 32 bytes.
 pub fn key_from_hex(hex: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let bytes = Zeroizing::new(hex_decode(hex.trim())?);

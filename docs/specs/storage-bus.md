@@ -1,7 +1,6 @@
 # Storage bus
 
-Status: accepted for contract design; implementation is staged by
-[`../plans/storage-bus.md`](../plans/storage-bus.md). Owner: tinystoragedrivers.
+Status: implemented. Owner: tinystoragedrivers.
 
 ## Problem and boundary
 
@@ -100,7 +99,7 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 5` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 7` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
@@ -133,16 +132,17 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
 
 ## Client and reference server
 
-`tinystoragedrivers-client` holds both ends, with no `TinyBus` dependency:
+`tinystoragedrivers-busproxy` holds the module-side clients, transport and
+host-side adapter. Its normal dependency graph uses only the API, shared
+types, bus contract and TinyBus:
 
-- `BusStorage` implements `StorageBackend`; its `ScopedStorage` hands out
-  `BusDocuments` (`DocumentStore`), `BusStreams` (`StreamStore`) and
-  `BusBlobs` (`BlobStore`), and `BusStorage::secrets()` is a `SecretStore`.
+- `BusStorage::connect` returns the six-port `Storage` bundle containing
+  Documents, Streams, KV, Blobs, Queues and Secrets ports.
   Calls go through the `StorageTransport` trait (`call`, `put_blob_stream`,
   `get_blob_stream`, `signals`); a `TinyBus` proxy is one implementation.
-- The caller is bound to one host-chosen scope. `for_scope` accepts only that
-  scope, the fenced and generation variants are refused, and
-  host-only capabilities (fencing, scope purge, existing-schema) are never
+- The caller is bound to one host-chosen scope. The host selects the scope
+  before constructing its `StorageServer`; request payloads cannot choose it.
+  Host-only capabilities (fencing, scope purge, existing-schema) are never
   reported. `Documents.Capabilities` and `Blobs.Capabilities` tell the client
   what the admitted backend provides; an `Unsupported` refusal is attributed to
   the capability the call needs, since the wire carries only the category.
@@ -150,8 +150,9 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
   and `GetRange` is split into inline spans, so a blob above the 16 MiB frame
   works; windows and batches above their caps are rejected or continued as
   described under Wire reference.
-- `StorageServer` is the reference host adapter: generic over a `ScopedStorage`
-  the host already bound, it enforces the limits before native I/O, answers
+- `StorageServer` is the reference host adapter: it accepts any six-port
+  `Storage` bundle already bound by the host, enforces limits before native I/O,
+  answers
   `Secrets` only to `Admission::Confidential` callers, and projects native
   watches to `WatchChanged` signals (at most 64 per binding). `Loopback` joins
   a client to a server in one process through JSON text frames capped at
@@ -159,8 +160,8 @@ Watch signals are `WatchChanged` (Documents) and carry no payload.
   the client exactly as against a native driver.
 
 `WatchOpen` replies with `WatchOpenResponse { watch_id }`; `Capabilities`
-replies with `CapabilitiesReply`. Adding that selector made the contract
-version 2.
+replies with `CapabilitiesReply`. Contract version 7 includes the current six
+ports and selector set.
 
 ### Blob lifetimes
 
@@ -185,9 +186,9 @@ layout like any other schema drift.
 
 ### Record metadata, sealing and host-only operations (version 4)
 
-Uniform schema v2 ([`schema-v2.md`](schema-v2.md) sections 3 and 6) adds four
-things to the ports. The wire carries two of them and deliberately not the
-other two.
+The v2 primitive contract ([`primitives-v2.md`](primitives-v2.md)) defines the
+metadata and sealing behavior carried by the ports. The wire carries the
+supported fields and deliberately omits host-only policy.
 
 Carried (additive; every new field is optional and defaulted):
 
@@ -218,7 +219,7 @@ Carried (additive; every new field is optional and defaulted):
 - `Documents.Capabilities` now lists `record_metadata` and `stream_seal` when
   the backend has them.
 
-Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-client`
+Host-only (no selector exists; `HOST_ONLY` in `tinystoragedrivers-busproxy`
 keeps `maintenance`, `scope_enumeration`, `shared_across_processes` and
 `cross_process_cas` out of every capability list):
 
@@ -271,19 +272,15 @@ or `{"kind":"dead_letter","reason":"..."}`. `Features` replies
   `MAX_INLINE_BYTES`, so the host never takes a lease its reply cannot carry;
   the reply may hold fewer than `max`. `DeadLetters` is clamped to
   `MAX_PAGE_ITEMS` and cut at the inline cap.
-- **Manifest.** `StorageServer::with_queue_manifest(manifest)` makes a
-  `QueueManifest` the host's authority: the host applies it on the caller's
-  first `Queues` call, a request naming an undeclared queue is refused
-  `NotFound`, and `EnsureQueue` succeeds only with the declared spec
-  (`Conflict` otherwise). A module that applies the same manifest file
-  therefore agrees with its host. Without a manifest a caller may declare any
-  queue in its scope.
-- Compatibility: a version 5 module calls `Queues.Features` while connecting,
-  so it needs a version 5 host; a version 4 module never names the object.
+- Queue manifest admission remains host policy. The transport receives an
+  already-constrained queue port and does not parse a manifest or admit queue
+  declarations.
+- Contract version 7 pins the current selectors and wire shapes.
 
 ## Real TinyBus transport
 
-`tinystoragedrivers-busproxy` is the `TinyBus` half that `-client` leaves out:
+`tinystoragedrivers-busproxy` combines the module-side clients, TinyBus
+transport, host registration and confined host callback adapter:
 
 - **Module side.** `connect_storage(connection)` returns the module's
   `BusStorage` over a `BusTransport`: ordinary calls are proxy calls to

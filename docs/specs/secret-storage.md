@@ -1,8 +1,7 @@
 # Secret storage
 
-Status: accepted (v0.3, `tinystoragedrivers-secrets`). Companion to
-[`storage-ports.md`](storage-ports.md); delivered by step 4 of
-[`../plans/storage-rollout.md`](../plans/storage-rollout.md).
+Status: implemented for the `SecretStore` port and its explicit engines.
+See [`primitives-v2.md`](primitives-v2.md) for the current primitive contract.
 
 ## Problem
 
@@ -29,9 +28,9 @@ Non-goals:
   `DerivedKeys` material.
 - Migrating OpenHuman's `dev-keychain.json`.
 
-The port lives in `tinystoragedrivers-secrets`, not in the core, so the core
-links no cryptography. The facade re-exports it as `tinystoragedrivers::secrets`
-behind the `secrets` feature, and `keyring` adds the OS store.
+The port lives in `tinystoragedrivers-api`; implementations live in
+`tinystoragedrivers-secrets`. Hosts select a concrete engine and supply key
+material explicitly. The facade does not choose or acquire a key for them.
 
 ## `SecretStore`
 
@@ -76,7 +75,8 @@ Errors:
   parse is an error and is never overwritten.
 - **Keys.** 32 bytes as 64 hex characters, surrounding whitespace ignored:
   `.secret_key`, and the keychain entry `openhuman` / `app:master_key`.
-- **Legacy `enc:`.** Repeating-key XOR. Read-only, for migration.
+- **Legacy `enc:`.** Repeating-key XOR decoding belongs to the OpenHuman host
+  migration adapter and is not part of the v2 secret-store primitive.
 
 ## Drivers
 

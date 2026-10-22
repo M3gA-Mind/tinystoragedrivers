@@ -102,15 +102,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -975,17 +966,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1207,16 +1187,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -2252,6 +2222,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -3709,8 +3691,8 @@ dependencies = [
 
 [[package]]
 name = "tinybus"
-version = "0.1.5"
-source = "git+https://github.com/tinyhumansai/tinybus?rev=d5b949be8ea56eb5a17289a09aa28e8c09bd88b7#d5b949be8ea56eb5a17289a09aa28e8c09bd88b7"
+version = "0.1.6"
+source = "git+https://github.com/tinyhumansai/tinybus?rev=0de2d283f35cbbff08efad6fbe05537ffb74611b#0de2d283f35cbbff08efad6fbe05537ffb74611b"
 dependencies = [
  "async-trait",
  "flate2",
@@ -3730,159 +3712,168 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers"
-version = "1.0.0"
+version = "2.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
- "tinystoragedrivers-core",
- "tinystoragedrivers-file",
- "tinystoragedrivers-mongodb",
- "tinystoragedrivers-rabbitmq",
- "tinystoragedrivers-s3",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-kv",
+ "tinystoragedrivers-queue",
  "tinystoragedrivers-secrets",
- "tinystoragedrivers-sqlite",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
+ "tokio",
+]
+
+[[package]]
+name = "tinystoragedrivers-api"
+version = "2.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "serde",
+ "serde_json",
+ "tinystoragedrivers-types",
+ "zeroize",
+]
+
+[[package]]
+name = "tinystoragedrivers-blob"
+version = "2.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "mongodb",
+ "object_store",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
 [[package]]
 name = "tinystoragedrivers-bus"
-version = "1.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tinybus",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
 [[package]]
 name = "tinystoragedrivers-busproxy"
-version = "1.0.0"
+version = "2.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
  "serde",
  "serde_json",
  "tinybus",
+ "tinystoragedrivers-api",
  "tinystoragedrivers-bus",
- "tinystoragedrivers-client",
- "tinystoragedrivers-core",
- "tinystoragedrivers-schema",
- "tinystoragedrivers-secrets",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
-name = "tinystoragedrivers-client"
-version = "1.0.0"
+name = "tinystoragedrivers-connect"
+version = "2.1.0"
 dependencies = [
- "async-trait",
- "serde",
+ "lapin",
+ "mongodb",
+ "object_store",
+ "rusqlite",
  "serde_json",
- "tinystoragedrivers-bus",
- "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
+ "tempfile",
+ "tinystoragedrivers-types",
  "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-core"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "data-encoding",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tinystoragedrivers-schema",
- "tokio",
- "ulid",
+ "url",
  "zstd",
 ]
 
 [[package]]
-name = "tinystoragedrivers-fence"
-version = "1.0.0"
+name = "tinystoragedrivers-document"
+version = "2.1.0"
 dependencies = [
  "async-trait",
- "fs2",
+ "data-encoding",
+ "futures-util",
+ "libc",
+ "mongodb",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "thiserror",
- "tinystoragedrivers-core",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
-name = "tinystoragedrivers-file"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
- "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-mongodb"
-version = "1.0.0"
+name = "tinystoragedrivers-kv"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "libc",
  "mongodb",
  "serde",
  "serde_json",
- "sha2 0.11.0",
- "tinystoragedrivers-core",
- "tinystoragedrivers-secrets",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
 ]
 
 [[package]]
-name = "tinystoragedrivers-rabbitmq"
-version = "1.0.0"
+name = "tinystoragedrivers-queue"
+version = "2.1.0"
 dependencies = [
  "async-trait",
+ "data-encoding",
  "lapin",
  "serde",
  "serde_json",
- "tinystoragedrivers-core",
+ "sha2 0.11.0",
+ "tempfile",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
-]
-
-[[package]]
-name = "tinystoragedrivers-s3"
-version = "1.0.0"
-dependencies = [
- "bytes",
- "futures-util",
- "http",
- "object_store",
- "quick-xml",
- "reqwest 0.13.5",
- "serde",
- "tinystoragedrivers-core",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "tinystoragedrivers-schema"
-version = "1.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
+ "ulid",
 ]
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "1.0.0"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "atomicwrites",
@@ -3902,7 +3893,11 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tinystoragedrivers-core",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-testkit",
+ "tinystoragedrivers-types",
  "tokio",
  "winapi-util",
  "windows-permissions",
@@ -3911,32 +3906,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinystoragedrivers-sqlite"
-version = "1.0.0"
+name = "tinystoragedrivers-testkit"
+version = "2.1.0"
 dependencies = [
  "async-trait",
- "rusqlite",
+ "bytes",
+ "futures-util",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
- "tinystoragedrivers-core",
+ "tinystoragedrivers-api",
+ "tinystoragedrivers-blob",
+ "tinystoragedrivers-connect",
+ "tinystoragedrivers-document",
+ "tinystoragedrivers-kv",
+ "tinystoragedrivers-queue",
  "tinystoragedrivers-secrets",
+ "tinystoragedrivers-types",
  "tokio",
- "zstd",
+ "ulid",
+ "zeroize",
 ]
 
 [[package]]
-name = "tinystoragedrivers-tinybus"
-version = "1.0.0"
+name = "tinystoragedrivers-types"
+version = "2.1.0"
 dependencies = [
- "async-trait",
  "serde",
  "serde_json",
- "tinybus",
- "tinystoragedrivers-bus",
- "tinystoragedrivers-client",
- "tinystoragedrivers-core",
- "tokio",
+ "thiserror",
 ]
 
 [[package]]
@@ -4171,6 +4168,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typenum"
@@ -4877,7 +4880,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "hex",
- "nix",
+ "nix 0.29.0",
  "ordered-stream",
  "rand 0.8.8",
  "serde",
@@ -5013,19 +5016,16 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
- "arbitrary",
  "crc32fast",
- "crossbeam-utils",
- "displaydoc",
  "flate2",
  "indexmap",
  "memchr",
- "thiserror",
- "zopfli",
+ "nix 0.31.3",
+ "typed-path",
 ]
 
 [[package]]
@@ -5039,18 +5039,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zopfli"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
-dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
-]
 
 [[package]]
 name = "zstd"

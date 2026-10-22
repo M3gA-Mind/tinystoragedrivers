@@ -1,6 +1,7 @@
 //! Wire compatibility and authority-selector rejection tests.
 use super::*;
 use serde_json::json;
+use tinystoragedrivers_types::{Cursor, Version};
 
 #[test]
 fn query_roundtrips_and_rejects_authority_selectors() {
@@ -14,16 +15,16 @@ fn query_roundtrips_and_rejects_authority_selectors() {
             direction: Direction::Desc,
         }],
         limit: Some(25),
-        cursor: Some("opaque-cursor".into()),
+        cursor: Some(Cursor("opaque-cursor".into())),
     };
     let encoded = serde_json::to_value(&query).unwrap();
     assert_eq!(
         serde_json::from_value::<Query>(encoded.clone()).unwrap(),
         query
     );
-    let mut forged = encoded;
+    let mut forged = json!({"collection":"notes","query":encoded});
     forged["scope"] = json!("bob");
-    assert!(serde_json::from_value::<Query>(forged).is_err());
+    assert!(serde_json::from_value::<QueryRequest>(forged).is_err());
     assert_eq!(DOCUMENTS_SELECTORS.len(), 17);
     assert!(!DOCUMENTS_SELECTORS.contains(&"Arbitrary"));
     assert!(is_documents_selector("Query"));
@@ -225,15 +226,22 @@ fn every_documents_message_shape_roundtrips() {
 }
 
 #[test]
-fn nested_schema_and_sort_fields_reject_unknown_data() {
-    assert!(serde_json::from_value::<CollectionSpec>(json!({
+fn shared_specs_ignore_unrecognized_non_authority_data() {
+    let spec: CollectionSpec = serde_json::from_value(json!({
         "name":"notes", "indexes":[{"name":"i","fields":["state"],"unique":false,"scope":"forged"}]
-    })).is_err());
-    assert!(
-        serde_json::from_value::<Query>(json!({
-            "sort":[{"field":"created","direction":"asc","collection":"forged"}]
-        }))
-        .is_err()
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(spec).unwrap()["indexes"][0].get("scope"),
+        None
+    );
+    let query: Query = serde_json::from_value(json!({
+        "sort":[{"field":"created","direction":"asc","collection":"forged"}]
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(query).unwrap()["sort"][0].get("collection"),
+        None
     );
 }
 
@@ -284,17 +292,12 @@ fn batch_writes_reuse_document_id_and_inline_document_json_fields() {
     let wire = serde_json::to_value(batch).unwrap();
     let put = &wire["ops"][0];
     let delete = &wire["ops"][1];
-    assert_eq!(put["document_id"], "put-id");
-    assert!(put["document_id"].is_string());
-    assert!(put["document_json"].is_string());
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(put["document_json"].as_str().unwrap()).unwrap(),
-        value
-    );
-    assert!(put.get("id").is_none());
-    assert!(put.get("doc").is_none());
-    assert_eq!(delete["document_id"], "delete-id");
-    assert!(delete.get("id").is_none());
+    assert_eq!(put["id"], "put-id");
+    assert_eq!(put["doc"], value);
+    assert!(put.get("document_id").is_none());
+    assert!(put.get("document_json").is_none());
+    assert_eq!(delete["id"], "delete-id");
+    assert!(delete.get("document_id").is_none());
 }
 
 #[test]

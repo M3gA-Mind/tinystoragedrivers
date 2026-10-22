@@ -1,6 +1,28 @@
 use super::*;
+use bytes::Bytes;
+use futures_core::Stream;
 use tinybus::{Connection, StreamDescriptor, broker::Broker, transport::memory::MemoryBus};
-use tokio::io::AsyncReadExt;
+use tinystoragedrivers_types::{Result, StorageError};
+
+struct Source(Option<Bytes>);
+impl Stream for Source {
+    type Item = Result<Bytes>;
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.0.take().map(Ok))
+    }
+}
+
+fn source(bytes: Vec<u8>) -> BlobReader {
+    Box::pin(Source(Some(Bytes::from(bytes))))
+}
+
+async fn collect(mut reader: BlobReader) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(chunk) = std::future::poll_fn(|cx| reader.as_mut().poll_next(cx)).await {
+        out.extend_from_slice(&chunk?);
+    }
+    Ok(out)
+}
 
 /// Two connected peers on an in-process broker: `(sender, receiver)`.
 async fn peers() -> (Connection, Connection) {
@@ -24,109 +46,108 @@ async fn bytes_round_trip_through_a_stream_in_order() {
         .open_stream(&to, StreamDescriptor::with_len(body.len() as u64))
         .await
         .unwrap();
-    let mut reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
-    let mut source: BlobReader = Box::pin(std::io::Cursor::new(body.clone()));
+    let reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let mut source = source(body.clone());
     let len = body.len() as u64;
-    let (pumped, collected) = tokio::join!(pump(writer, &mut source, len), async {
-        let mut out = Vec::new();
-        reader.read_to_end(&mut out).await.unwrap();
-        out
-    });
+    let (pumped, collected) = tokio::join!(pump(writer, &mut source, len), collect(reader));
     pumped.unwrap();
-    assert_eq!(collected, body);
+    assert_eq!(collected.unwrap(), body);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_aborted_stream_is_an_error_on_the_reader_not_a_clean_end() {
     let (sender, receiver) = peers().await;
-    let to = receiver.unique_name().unwrap();
     let mut writer = sender
-        .open_stream(&to, StreamDescriptor::with_len(10))
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(10),
+        )
         .await
         .unwrap();
-    let mut reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
     writer.write_chunk(b"abc").await.unwrap();
     writer.abort().await.unwrap();
-    let mut out = Vec::new();
-    let error = reader.read_to_end(&mut out).await.unwrap_err();
-    assert_eq!(error.to_string(), "storage blob stream failed");
+    assert_eq!(
+        collect(reader).await.unwrap_err().message(),
+        "storage blob stream failed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_short_source_aborts_the_stream_and_reports_short() {
     let (sender, receiver) = peers().await;
-    let to = receiver.unique_name().unwrap();
     let writer = sender
-        .open_stream(&to, StreamDescriptor::with_len(100))
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(100),
+        )
         .await
         .unwrap();
-    let mut reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
-    let mut source: BlobReader = Box::pin(std::io::Cursor::new(vec![1_u8; 10]));
-    let result = pump(writer, &mut source, 100).await;
-    assert!(matches!(result, Err(PumpError::Short)));
-    let mut out = Vec::new();
-    assert!(reader.read_to_end(&mut out).await.is_err());
+    let reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let mut source = source(vec![1; 10]);
+    assert!(matches!(
+        pump(writer, &mut source, 100).await,
+        Err(PumpError::Short)
+    ));
+    assert!(collect(reader).await.is_err());
 }
 
-/// A source that fails after its first read.
-struct Failing(bool);
-
-impl AsyncRead for Failing {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        if self.0 {
-            return Poll::Ready(Err(io::Error::other("source failed")));
-        }
-        self.0 = true;
-        buf.put_slice(&[1, 2, 3]);
-        Poll::Ready(Ok(()))
+struct Failing;
+impl Stream for Failing {
+    type Item = Result<Bytes>;
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(Some(Err(StorageError::unavailable("source failed"))))
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_source_is_reported_as_the_sources_fault() {
     let (sender, receiver) = peers().await;
-    let to = receiver.unique_name().unwrap();
     let writer = sender
-        .open_stream(&to, StreamDescriptor::with_len(100))
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(100),
+        )
         .await
         .unwrap();
     let _reader = receiver.accept_stream(&writer.stream_ref()).unwrap();
-    let mut source: BlobReader = Box::pin(Failing(false));
-    let result = pump(writer, &mut source, 100).await;
-    assert!(matches!(result, Err(PumpError::Source)));
+    let mut source: BlobReader = Box::pin(Failing);
+    assert!(matches!(
+        pump(writer, &mut source, 100).await,
+        Err(PumpError::Source)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_receiver_that_walks_away_fails_the_writer_on_the_bus() {
     let (sender, receiver) = peers().await;
-    let to = receiver.unique_name().unwrap();
     let writer = sender
-        .open_stream(&to, StreamDescriptor::with_len(8 * 1024 * 1024))
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(8 * 1024 * 1024),
+        )
         .await
         .unwrap();
-    // Taking the reader and dropping it closes the window.
     drop(receiver.accept_stream(&writer.stream_ref()).unwrap());
-    let mut source: BlobReader = Box::pin(std::io::Cursor::new(vec![0_u8; 8 * 1024 * 1024]));
-    let result = pump(writer, &mut source, 8 * 1024 * 1024).await;
-    assert!(matches!(result, Err(PumpError::Bus(_))));
+    let mut source = source(vec![0; 8 * 1024 * 1024]);
+    assert!(matches!(
+        pump(writer, &mut source, 8 * 1024 * 1024).await,
+        Err(PumpError::Bus(_))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_zero_length_stream_closes_without_chunks() {
     let (sender, receiver) = peers().await;
-    let to = receiver.unique_name().unwrap();
     let writer = sender
-        .open_stream(&to, StreamDescriptor::with_len(0))
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(0),
+        )
         .await
         .unwrap();
-    let mut reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
-    let mut source: BlobReader = Box::pin(std::io::Cursor::new(Vec::new()));
+    let reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let mut source = source(Vec::new());
     pump(writer, &mut source, 0).await.unwrap();
-    let mut out = Vec::new();
-    reader.read_to_end(&mut out).await.unwrap();
-    assert_eq!(out.len(), 0);
+    assert_eq!(collect(reader).await.unwrap(), Vec::<u8>::new());
 }

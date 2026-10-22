@@ -1,7 +1,7 @@
 //! Where the storage objects live on the bus, and how errors are named.
+use crate::transport::Object;
 use tinybus::{BusName, InterfaceName, MemberName, ObjectPath};
 use tinystoragedrivers_bus::STORAGE_INTERFACE;
-use tinystoragedrivers_client::Object;
 
 /// The well-known name the host owns, and the interface its objects speak.
 pub const HOST_NAME: &str = STORAGE_INTERFACE;
@@ -14,6 +14,8 @@ pub const ERROR_DENIED: &str = "ai.tinyhumans.tinystorage.Error.Denied";
 pub const ERROR_STORAGE: &str = "ai.tinyhumans.tinystorage.Error.Storage";
 /// Signal member that carries a payload-free `WatchChanged`.
 pub const WATCH_MEMBER: &str = "WatchChanged";
+/// Fixed watch path used only by an exact host callback binding.
+pub(crate) const CALLBACK_WATCH_PATH: &str = "/ai/tinyhumans/tinystorage/Documents";
 
 /// A name this crate spells itself, which is valid by construction.
 pub(crate) fn fixed<T>(parsed: tinybus::Result<T>) -> T {
@@ -71,6 +73,11 @@ pub fn watch_path(recipient: &BusName) -> tinybus::Result<ObjectPath> {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
     ObjectPath::new(format!("{OBJECT_ROOT}/Watch/{element}"))
+}
+
+/// A fixed signal path whose destination is already bound to one admitted module.
+pub(crate) fn callback_watch_path() -> ObjectPath {
+    fixed(ObjectPath::new(CALLBACK_WATCH_PATH))
 }
 
 #[cfg(test)]

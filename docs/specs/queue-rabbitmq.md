@@ -6,7 +6,7 @@
 ## Problem
 
 A deployment that already runs RabbitMQ wants its inbound queues there, not in
-the document database. `tinystoragedrivers-rabbitmq` implements `QueueStore`
+the document database. `tinystoragedrivers-queue` implements `QueueStore`
 over AMQP 0-9-1 (`lapin`). RabbitMQ is a queue, not a document store, so it is
 selected by its own URL, never by the storage URL.
 
@@ -90,27 +90,24 @@ priority level.
   are invisible to AMQP 0-9-1 without the management API.
   `ready`, `delayed` and `dead` are the broker's counts.
 - `QueueSpec` lives in the handle (and in each envelope, as `max_attempts`),
-  so every process should `ensure_queue` (or apply the same
-  [`QueueManifest`](queue-store.md)) before enqueueing. `dedupe_window_ms` is
-  accepted and ignored.
+  so every process should `ensure_queue` before enqueueing. `dedupe_window_ms`
+  is accepted and ignored.
 - `purge` cannot drop another process's unacknowledged deliveries; they are
   requeued if that process dies, or settled by it.
 
 ## Configuration
 
 The facade parses a queue URL, separate from the storage URL, with
-`QueueConfig::parse`: `storage` (or empty) keeps the scope's `DocumentQueue`,
-and `amqp://…` / `amqps://…` select RabbitMQ (feature `rabbitmq`; without it
-the URL is refused). `open_queues(&config, storage, manifest)` returns the
-scope's `ScopedStorage` with its queue port replaced by a `RabbitQueues` and,
-given a manifest path, applies the `QueueManifest`: `apply` calls
-`ensure_queue`, which declares the durable topology. `QueueConfig` never
-prints credentials. A storage-bus host serves those queues like any other
-port.
+`QueueConfig::parse`: `storage` (or empty) keeps the queue port already in the
+supplied `Storage`; `amqp://…` and `amqps://…` select RabbitMQ when the
+`rabbitmq` feature is enabled. `open_queues(&config, storage, scope)` returns
+a new `Storage` bundle with its queue port replaced by a scope-bound
+`RabbitQueues`. Queue manifests and declaration policy belong to the host.
+`QueueConfig` redacts credentials when rendered.
 
 ## Acceptance
 
 `conformance::run_queue` passes against a live broker
-(`crates/tinystoragedrivers-rabbitmq/tests/live.rs`, `TSD_RABBITMQ_URL`), with
+(`crates/tinystoragedrivers-queue/src/rabbitmq`, `TSD_RABBITMQ_URL`), with
 live tests for lease lapse, crash redelivery, delay buckets and foreign
 messages. CI runs them in a RabbitMQ job and in the coverage job.

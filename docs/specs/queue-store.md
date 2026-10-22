@@ -1,8 +1,7 @@
 # QueueStore: durable message queues
 
-**Status:** Implemented (document drivers, storage bus `Queues` object,
-RabbitMQ in [`queue-rabbitmq.md`](queue-rabbitmq.md)); see
-[the plan](../plans/queue-store.md). **Owner:** tinystoragedrivers.
+**Status:** Implemented in the v2 queue primitive and storage bus. **Owner:**
+tinystoragedrivers.
 
 ## Problem
 
@@ -72,31 +71,6 @@ pub trait QueueStore: Send + Sync + Debug {
   ago, returns `Enqueued { duplicate: true }` with the held message's id and
   stores nothing.
 
-### Queue manifest
-
-Queues are declared in a JSON file, not in code, so people and agents add or
-tune one by editing a file. `QueueManifest::load(path)` (or `from_json`) reads
-
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/tinyhumansai/tinystoragedrivers/main/schemas/queues.schema.json",
-  "version": 1,
-  "queues": [
-    {"name": "inbound.ingress", "description": "...", "owner": "tinyeventqueues",
-     "max_attempts": 8, "dedupe_window_ms": 2592000000, "visibility_ms": 30000}
-  ]
-}
-```
-
-and `apply(&dyn QueueStore)` declares every queue it lists. Only `name` is
-required; `max_attempts` and `dedupe_window_ms` default to `QueueSpec`'s
-defaults, and `visibility_ms` is a hint for consumers. Parsing is strict:
-unknown fields, an unsupported `version`, invalid or duplicate names and
-invalid values fail with `InvalidInput` naming the entry (`queues[1] ("Bad")`)
-or the line and column. `schemas/queues.schema.json` describes the format for
-editors and agents, and a test keeps it in step with `QueueDeclaration`.
-[`docs/examples/queues.json`](../examples/queues.json) is a working example.
-
 ## Invariants and constraints
 
 - A message is leased to at most one receipt at a time.
@@ -110,23 +84,15 @@ editors and agents, and a test keeps it in step with `QueueDeclaration`.
 
 ## Acceptance criteria
 
-`conformance::run_ports` includes the queue checks (`conformance/queue.rs`):
-ordering, lease expiry and stale receipts, attempts and dead letters, delays
-and backoff, group exclusivity and pinning, dedupe windows and tombstone
-pruning, lease extension, queue isolation and purge, and input validation.
-The memory, SQLite and file drivers pass them; MongoDB passes them in its live
-job.
+The `tinystoragedrivers-testkit` queue conformance suite checks ordering,
+acknowledgement, nacks, attempts, dead letters, redrive, extension, stats,
+isolation and purge, plus delays, groups and dedupe when the engine reports
+those capabilities. The in-memory queue runs without a service; RabbitMQ's
+live acceptance uses a disposable broker.
 
-`conformance::run_queue(&dyn QueueStore)` (`conformance/queue_port.rs`) is the
-clock-free part: ordering, acknowledgement, nacks with attempts and dead
-letters, redrive, extension, stats, isolation and purge, plus delays, groups
-and dedupe without a window when the queue reports them. Leases are a minute
-and never left to lapse, so it holds for a queue whose clock the caller does
-not own: `run_ports` runs it on `ScopedStorage::queues()`, which over the bus
-client is the host's queue, and a broker runs it directly.
-
-`ScopedStorage::queues()` is every scope's queue port: a `DocumentQueue` over
-its documents by default, or whatever `ScopedStorage::with_queues` installed.
+The v2 `Storage` bundle contains a queue port for its scope. Applications can
+use `QueueConfig` and `open_queues` to install a RabbitMQ implementation; the
+manifest and declaration policy remain with the host that owns the queues.
 
 ## Open questions
 

@@ -7,7 +7,7 @@
 //! `chacha20_encrypt`, under [`FIXTURE_KEY_HEX`]. Nonces are random, so these
 //! are exact bytes OpenHuman wrote, not ones this crate could regenerate.
 
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::ErrorKind;
 
 use super::*;
 
@@ -71,7 +71,7 @@ fn every_encryption_uses_a_fresh_nonce() {
 fn an_empty_plaintext_round_trips() {
     let key = generate_key().unwrap();
     let value = encrypt_enc2(&key, b"").unwrap();
-    assert!(decrypt_enc2(&key, &value).unwrap().is_empty());
+    assert_eq!(decrypt_enc2(&key, &value).unwrap().as_slice(), &[] as &[u8]);
 }
 
 #[test]
@@ -120,30 +120,6 @@ fn malformed_values_are_crypto_errors_without_echoing_input() {
         decrypt(&key, &[0; NONCE_LEN + TAG_LEN - 1])
             .unwrap_err()
             .kind(),
-        ErrorKind::Crypto
-    );
-}
-
-#[test]
-fn legacy_enc_values_decode_with_repeating_key_xor() {
-    let key = fixture_key();
-    let plaintext = b"xoxb-a-token-longer-than-thirty-two-bytes!";
-    let xored: Vec<u8> = plaintext
-        .iter()
-        .enumerate()
-        .map(|(i, b)| b ^ key[i % KEY_LEN])
-        .collect();
-    let value = format!("enc:{}", hex_encode(&xored));
-    assert_eq!(
-        decrypt_legacy_enc(&key, &value).unwrap().as_slice(),
-        plaintext
-    );
-    assert_eq!(
-        decrypt_legacy_enc(&key, "enc2:00").unwrap_err().kind(),
-        ErrorKind::Crypto
-    );
-    assert_eq!(
-        decrypt_legacy_enc(&key, "enc:0").unwrap_err().kind(),
         ErrorKind::Crypto
     );
 }

@@ -1,0 +1,40 @@
+[package]
+name = "tinystoragedrivers-blob"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone scoped blob primitives for tinystoragedrivers."
+publish = false
+
+[features]
+default = ["memory"]
+memory = []
+fs = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/file"]
+sqlite = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/sqlite", "dep:sha2"]
+mongodb = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/mongodb", "dep:mongodb", "dep:futures-util"]
+s3 = ["dep:tinystoragedrivers-connect", "tinystoragedrivers-connect/s3", "dep:object_store", "dep:futures-util", "dep:http"]
+
+[dependencies]
+tinystoragedrivers-types = { workspace = true }
+tinystoragedrivers-api = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tinystoragedrivers-connect = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+object_store = { version = "0.14.2", default-features = false, features = ["aws"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
+http = { version = "1", optional = true }
+mongodb = { version = "3.6", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = { workspace = true }
+tinystoragedrivers-testkit = { path = "../tinystoragedrivers-testkit", version = "2.1.0" }
+
+[lints]
+workspace = true

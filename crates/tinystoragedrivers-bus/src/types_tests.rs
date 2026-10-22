@@ -1,22 +1,7 @@
 //! Wire data excludes storage authority.
 use super::*;
-
-#[test]
-fn scope_generation_refusal_has_a_distinct_content_free_wire_kind() {
-    let failure = StorageFailure {
-        kind: StorageKind::ScopeGenerationRejected,
-    };
-    let wire = serde_json::to_value(failure).unwrap();
-    assert_eq!(
-        wire,
-        serde_json::json!({"kind":"scope_generation_rejected"})
-    );
-    assert_eq!(
-        serde_json::from_value::<StorageFailure>(wire).unwrap(),
-        failure
-    );
-}
 use serde_json::json;
+
 #[test]
 fn requests_refuse_arbitrary_authority_fields() {
     for field in ["scope", "collection", "url", "generation", "sender"] {
@@ -45,8 +30,11 @@ fn body_and_cas_condition_preserve_native_wire_values() {
         json!({"document_id":"entry","document_json":"{\"collection\":\"data\",\"scope\":\"data\"}","precondition":{"kind":"version","version":u64::MAX}})
     );
     assert_eq!(serde_json::from_value::<PutRequest>(wire).unwrap(), request);
-    assert!(
-        serde_json::from_value::<Precondition>(json!({"kind":"absent","scope":"forged"})).is_err()
+    let condition: Precondition =
+        serde_json::from_value(json!({"kind":"absent","scope":"forged"})).unwrap();
+    assert_eq!(
+        serde_json::to_value(condition).unwrap(),
+        json!({"kind":"absent"})
     );
 }
 #[test]
@@ -82,30 +70,34 @@ fn meta_pins_its_wire_representation() {
         serde_json::from_value::<Meta>(json!({})).unwrap(),
         Meta::default()
     );
-    assert!(serde_json::from_value::<Meta>(json!({"scope":"forged"})).is_err());
+    let metadata: Meta = serde_json::from_value(json!({"scope":"forged"})).unwrap();
+    assert_eq!(serde_json::to_value(metadata).unwrap(), open);
 }
 
 #[test]
-fn versioned_meta_is_optional_and_omitted_when_absent() {
-    let bare = json!({"document_id":"a","version":1,"document_json":"{}"});
-    let old: Versioned = serde_json::from_value(bare.clone()).unwrap();
-    assert_eq!(old.meta, None);
-    // A reply without metadata serializes exactly as before contract version 4.
-    assert_eq!(serde_json::to_value(&old).unwrap(), bare);
+fn versioned_wire_values_use_shared_native_fields() {
+    let bare = json!({"id":"a","version":1,"doc":{}});
+    let old: Versioned<Value> = serde_json::from_value(bare.clone()).unwrap();
+    assert_eq!(old.meta, Meta::unknown());
+    let encoded = serde_json::to_value(&old).unwrap();
+    assert_eq!(encoded["id"], "a");
+    assert_eq!(encoded["doc"], json!({}));
+    assert!(encoded.get("document_id").is_none());
+    assert!(encoded.get("document_json").is_none());
     let meta = Meta {
         schema: 1,
         created_ms: 5,
         updated_ms: 6,
         expires_ms: None,
     };
-    let full = Versioned {
-        meta: Some(meta),
-        ..old
-    };
+    let full = Versioned { meta, ..old };
     let wire = serde_json::to_value(&full).unwrap();
     assert_eq!(
         wire["meta"],
         json!({"schema":1,"created_ms":5,"updated_ms":6})
     );
-    assert_eq!(serde_json::from_value::<Versioned>(wire).unwrap(), full);
+    assert_eq!(
+        serde_json::from_value::<Versioned<Value>>(wire).unwrap(),
+        full
+    );
 }

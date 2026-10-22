@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use tinystoragedrivers_core::ErrorKind;
+use tinystoragedrivers_types::ErrorKind;
 
 use super::*;
 

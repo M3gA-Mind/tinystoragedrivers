@@ -52,16 +52,6 @@ has no cursor; a supplied native resume cursor is rejected. Subscription must
 still precede the initial authoritative read. No process persistent query cache,
 collection layout, document copying, or ambient backend is involved.
 
-## Generation admission
-
-Native Mongo subscriptions retain the handle's captured ScopePurge generation.
-Opening and every delivery check scope admission, including periodic hints and
-pending events retained across cancellation. Pending resets and retired
-generations return Fenced before delivering a notice; an old subscription
-cannot observe the replacement generation. Resume cursors are bound to that
-generation and cannot be reused by a replacement handle. Generation receipts
-and metadata belong to the native ScopePurge contract.
-
 ## Verification
 
 Tests cover unsupported defaults, validation and redaction, polling opening
@@ -70,44 +60,3 @@ Mongo conformance covers subscribe-before-read, same-scope independent handles,
 scope/database/filter/cursor isolation, deletion/filter exit, TTL, lost resume,
 and stale fence refusal. Live tests use an explicitly supplied local replica
 set fixture and retain the optional environment gate used by other drivers.
-
-## Local implementation evidence
-
-The implementation branch preserves its feature checkpoint and merge of
-canonical 89cc548 and the subsequent ScopePurge merge. Native Mongo watches
-validate that merged generation contract without changing a host checkout.
-
-Behavioral failures were observed before each relevant fix:
-
-- Polling accepted stale opening and stale delivery: four passing tests,
-  two failures, exit 101. Native empty checked-batch admission now rejects both.
-- Reset Debug exposed its native error payload: one failure, exit 101. Debug
-  now records only the source kind while callers retain the original source.
-- Native Mongo initially returned Unsupported for the actual subscribe/read,
-  cross-scope, insertion, filter exit and deletion regression: exit 101. The
-  same real local replica-set test passes through the native stream.
-- Cancellation during native admission discarded a consumed hint: one failure,
-  exit 101. Pending delivery now retains it until successful admission.
-- Memory's backend capability inherited unsupported Watch, and a composite
-  imported arbitrary document capabilities from a blob backend: both focused
-  regressions failed with exit 101 before explicit capability masks.
-
-Fresh local replica/standalone Watch tests pass (seven): scope and connected
-context isolation, exact cursor binding, stale owner refusal, TTL boundary,
-collection destruction/reopening, insertion/filter exit/deletion and native
-history-loss terminal reset with the original Mongo error. History loss changes
-only a returned token timestamp; no oplog truncation or server state mutation
-is required. Wait cancellation and admission cancellation have separate tests.
-
-At this point strict full-workspace Clippy, all-target/all-feature build,
-573 all-feature tests, 530 default tests (including doctests, none ignored),
-strict rustdoc, fmt and Rust 1.88 locked workspace check all passed. The fresh
-full coverage gate also passed (exit 0): all 79 executable production source
-files exceed 90%, with a minimum of 90.14%. Core Watch types cover 90.91%,
-polling 100%, conformance 100%, and native Mongo Watch 95.36%. This gate includes
-the instrumented local replica/standalone suite, eight injected native I/O
-faults, the stopped two-link key publisher/concurrent reader, and the real
-SecretService tests. It includes the pure CI-only helper correction from PR20
-(a44e09f) through a preserved merge; no unpublished library API, copied profile
-or fabricated filename alias is consumed. Disposable log filenames are not a
-substitute for these retained behavior names and recorded terminal outcomes.

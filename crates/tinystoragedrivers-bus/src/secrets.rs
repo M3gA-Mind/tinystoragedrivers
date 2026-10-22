@@ -4,16 +4,34 @@
 //! uses the confidential route. Values and names never appear in `Debug`
 //! output, logs or errors; hosts and clients zeroize buffers after use.
 use serde::{Deserialize, Serialize};
+pub use tinystoragedrivers_types::SecretPrecondition;
 
 /// Secrets object name under [`crate::STORAGE_INTERFACE`].
 pub const SECRETS_OBJECT: &str = "Secrets";
 /// Finite selector set; servers must reject every other selector.
-pub const SECRETS_SELECTORS: [&str; 4] = ["Get", "Set", "Delete", "List"];
+pub const SECRETS_SELECTORS: [&str; 7] = [
+    "Capabilities",
+    "Get",
+    "GetVersioned",
+    "Set",
+    "SetIf",
+    "Delete",
+    "List",
+];
 
 /// Return whether `selector` belongs to the fixed Secrets selector set.
 #[must_use]
 pub fn is_secrets_selector(selector: &str) -> bool {
     SECRETS_SELECTORS.contains(&selector)
+}
+
+/// Reply to confidential `Capabilities`; non-confidential callers are denied
+/// before the host inspects the bound secret store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsCapabilitiesReply {
+    /// Whether the bound store can enumerate secret names.
+    pub enumerable: bool,
 }
 
 /// Request addressing one secret (`Get`, `Delete`).
@@ -39,6 +57,26 @@ pub struct SecretValue {
     /// Secret bytes.
     pub value: Vec<u8>,
 }
+/// Versioned read reply; the revision token is opaque to callers.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionedSecretValue {
+    /// Secret bytes.
+    pub value: Vec<u8>,
+    /// Opaque revision token.
+    pub version: tinystoragedrivers_types::SecretVersion,
+}
+/// Conditional write request.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSecretIfRequest {
+    /// Secret name.
+    pub name: String,
+    /// Secret bytes.
+    pub value: Vec<u8>,
+    /// Required prior state.
+    pub condition: SecretPrecondition,
+}
 /// List secret names by prefix.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +99,8 @@ redacted_debug!(
     SecretNameRequest,
     SetSecretRequest,
     SecretValue,
+    VersionedSecretValue,
+    SetSecretIfRequest,
     ListSecretsRequest
 );
 

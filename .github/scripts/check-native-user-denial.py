@@ -34,6 +34,13 @@ SCRIPT_STAGES = {"Start", "Identity", "Paths", "Segments", "Serialize", "Complet
 ERROR_CATEGORIES = {"ParserError", "InvalidArgument", "ObjectNotFound", "PermissionDenied",
                     "InvalidOperation", "ResourceUnavailable", "NotSpecified", "Other"}
 
+
+def fixture_test_command():
+    """Run the native file-admission probe with its required engine enabled."""
+    return ["cargo", "test", "--locked", "-p", "tinystoragedrivers-secrets",
+            "--no-default-features", "--features", "file", "--lib", TEST,
+            "--", "--exact", "--nocapture"]
+
 # Paths enter only through the child environment and Get-Item's literal argument.
 # SID values remain inside the child; even error output is never copied.
 ACL_DIAGNOSTIC_SCRIPT = r"""$ErrorActionPreference='Stop'
@@ -760,8 +767,7 @@ def main():
             control.chmod(0o666)
         private = outer / "private"
         env = {**os.environ, "TSD_USER_DENIAL_FIXTURE": str(private)}
-        result = subprocess.run(["cargo", "test", "--locked", "-p", "tinystoragedrivers-secrets",
-                                 "--lib", TEST, "--", "--exact", "--nocapture"],
+        result = subprocess.run(fixture_test_command(),
                                 cwd=ROOT, env=env, capture_output=True, text=True)
         (evidence / "fixture.stdout").write_text(result.stdout)
         (evidence / "fixture.stderr").write_text(result.stderr)

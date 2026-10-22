@@ -46,7 +46,7 @@ async fn response(mut response: reqwest::Response) -> Result<SensitiveJson> {
     // Never echo cloud response bodies: an upstream could include plaintext.
     let status = response.status();
     if !status.is_success() {
-        use tinystoragedrivers_core::ErrorKind;
+        use tinystoragedrivers_types::ErrorKind;
         let kind = if status == reqwest::StatusCode::REQUEST_TIMEOUT
             || status == reqwest::StatusCode::TOO_MANY_REQUESTS
             || status.is_server_error()

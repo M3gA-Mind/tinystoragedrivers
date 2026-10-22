@@ -28,10 +28,10 @@ docs/
 Complex modules also carry a module-level `README.md` inside `src/<module>/`
 covering their design, public surface, and important constraints.
 
-The storage ports and their guarantees are specified in
-[`specs/storage-ports.md`](specs/storage-ports.md); the order in which drivers
-land and consumers move onto them is
-[`plans/storage-rollout.md`](plans/storage-rollout.md).
+The current storage contract is in
+[`specs/primitives-v2.md`](specs/primitives-v2.md), with a short entry point in
+[`specs/storage-ports.md`](specs/storage-ports.md). Host composition and
+consumer migration policy remain outside this repository.
 
 ## Conventions
 

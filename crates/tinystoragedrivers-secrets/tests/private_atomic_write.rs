@@ -1,5 +1,7 @@
 //! Public API check for private atomic secret-file writes.
 
+#![cfg(feature = "file")]
+
 use tinystoragedrivers_secrets::write_atomic_private;
 
 #[test]
