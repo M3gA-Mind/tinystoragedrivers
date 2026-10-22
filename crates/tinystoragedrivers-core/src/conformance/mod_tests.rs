@@ -1344,3 +1344,77 @@ async fn handles_on_separate_stores_fail_the_shared_checks() {
         "a driver that claims sharing but keeps handles apart must fail"
     );
 }
+
+/// A queue that honors none of the optional semantics: it drops priorities,
+/// delays, groups and dedupe keys before delegating.
+#[derive(Debug)]
+struct Plain(crate::queue::DocumentQueue);
+
+#[async_trait::async_trait]
+impl crate::queue::QueueStore for Plain {
+    fn features(&self) -> crate::queue::QueueFeatures {
+        crate::queue::QueueFeatures::default()
+    }
+    async fn ensure_queue(&self, q: &str, spec: &crate::queue::QueueSpec) -> Result<()> {
+        self.0.ensure_queue(q, spec).await
+    }
+    async fn enqueue(
+        &self,
+        q: &str,
+        messages: &[crate::queue::NewMessage],
+    ) -> Result<Vec<crate::queue::Enqueued>> {
+        if messages
+            .iter()
+            .any(|m| m.priority > crate::queue::MAX_PRIORITY)
+        {
+            return self.0.enqueue(q, messages).await;
+        }
+        let plain: Vec<_> = messages
+            .iter()
+            .map(|m| crate::queue::NewMessage::new(m.payload.clone()))
+            .collect();
+        self.0.enqueue(q, &plain).await
+    }
+    async fn receive(
+        &self,
+        q: &str,
+        max: u32,
+        visibility_ms: u64,
+        consumer: &str,
+    ) -> Result<Vec<crate::queue::Delivery>> {
+        self.0.receive(q, max, visibility_ms, consumer).await
+    }
+    async fn ack(&self, q: &str, r: &crate::queue::Receipt) -> Result<bool> {
+        self.0.ack(q, r).await
+    }
+    async fn nack(
+        &self,
+        q: &str,
+        r: &crate::queue::Receipt,
+        retry: crate::queue::Retry,
+    ) -> Result<bool> {
+        self.0.nack(q, r, retry).await
+    }
+    async fn extend(&self, q: &str, r: &crate::queue::Receipt, ms: u64) -> Result<bool> {
+        self.0.extend(q, r, ms).await
+    }
+    async fn stats(&self, q: &str) -> Result<crate::queue::QueueStats> {
+        self.0.stats(q).await
+    }
+    async fn dead_letters(&self, q: &str, limit: usize) -> Result<Vec<crate::queue::DeadLetter>> {
+        self.0.dead_letters(q, limit).await
+    }
+    async fn redrive(&self, q: &str, id: &str) -> Result<bool> {
+        self.0.redrive(q, id).await
+    }
+    async fn purge(&self, q: &str) -> Result<u64> {
+        self.0.purge(q).await
+    }
+}
+
+#[tokio::test]
+async fn the_clock_free_queue_checks_accept_a_queue_without_optional_features() {
+    let storage = MemoryStorage::new().for_scope(&Scope::local()).unwrap();
+    let plain = Plain(crate::queue::DocumentQueue::new(storage.documents()));
+    run_queue(&plain).await;
+}

@@ -1,4 +1,6 @@
 //! Mechanical conversions between native port types and bus wire types.
+pub(crate) mod queues;
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;

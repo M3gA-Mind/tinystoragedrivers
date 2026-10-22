@@ -9,7 +9,7 @@ use super::{
     run_blocking, secure, validate_name, write_atomic_in,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2_11::{Digest, Sha256};
 
 /// The native API boundary actually acknowledged by a file publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

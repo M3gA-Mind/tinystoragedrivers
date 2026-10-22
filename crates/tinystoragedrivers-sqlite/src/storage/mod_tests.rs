@@ -1029,3 +1029,129 @@ async fn retired_scope_handles_cannot_read_replacement_data() {
         ErrorKind::ScopeGenerationRejected
     );
 }
+
+#[test]
+fn read_only_probe_reads_rollback_database_without_changing_its_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("existing.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE records (value TEXT); \
+             INSERT INTO records VALUES ('fixture');",
+        )
+        .unwrap();
+    drop(connection);
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects =
+        SqliteStorage::probe_read_only(&file).expect("existing rollback database is readable");
+
+    assert_eq!(schema_objects, 1);
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_accepts_checkpointed_wal_database_without_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("wal.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE records (value TEXT); \
+             INSERT INTO records VALUES ('fixture');",
+        )
+        .unwrap();
+    drop(connection);
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects = SqliteStorage::probe_read_only(&file)
+        .expect("a checkpointed WAL database is readable through a read-only connection");
+    assert_eq!(schema_objects, 1);
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_reads_schema_committed_only_in_active_wal_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("active.db");
+    let connection = rusqlite::Connection::open(&file).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE records (value TEXT);")
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE wal_only (value TEXT); INSERT INTO wal_only VALUES ('fixture');",
+        )
+        .unwrap();
+    assert!(dir.path().join("active.db-wal").exists());
+    assert!(dir.path().join("active.db-shm").exists());
+    let before = snapshot_tree(dir.path());
+
+    let schema_objects = SqliteStorage::probe_read_only(&file)
+        .expect("a healthy WAL database is readable through a read-only connection");
+
+    assert_eq!(schema_objects, 2, "the committed WAL schema is included");
+    assert_eq!(before, snapshot_tree(dir.path()));
+    drop(connection);
+}
+
+#[test]
+fn read_only_probe_rejects_corrupt_database_without_changing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("corrupt.db");
+    std::fs::write(&file, b"not a sqlite database").unwrap();
+    let before = snapshot_tree(dir.path());
+
+    assert!(SqliteStorage::probe_read_only(&file).is_err());
+
+    assert_eq!(before, snapshot_tree(dir.path()));
+}
+
+#[test]
+fn read_only_probe_does_not_create_a_missing_database_or_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("missing").join("nested");
+    let file = parent.join("storage.db");
+
+    assert!(SqliteStorage::probe_read_only(&file).is_err());
+
+    assert!(!parent.exists());
+}
+
+fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+    fn walk(
+        current: &Path,
+        root: &Path,
+        snapshot: &mut std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+    ) {
+        for entry in std::fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                snapshot.insert(relative, None);
+                walk(&path, root, snapshot);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                // SQLite may update derived `-shm` coordination or create an
+                // empty `-wal` on a read-only connection. Database and
+                // committed WAL bytes remain part of this fingerprint.
+                if name.ends_with("-shm") || (name.ends_with("-wal") && bytes.is_empty()) {
+                    continue;
+                }
+                snapshot.insert(relative, Some(bytes));
+            }
+        }
+    }
+
+    let mut snapshot = std::collections::BTreeMap::new();
+    walk(root, root, &mut snapshot);
+    snapshot
+}

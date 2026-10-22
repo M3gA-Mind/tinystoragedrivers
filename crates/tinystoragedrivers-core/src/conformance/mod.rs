@@ -26,6 +26,8 @@ mod migrations;
 mod primitives;
 mod purge;
 mod purge_history;
+mod queue;
+mod queue_port;
 mod schema;
 mod seal;
 mod semantics;
@@ -43,8 +45,9 @@ use crate::capabilities::Capability;
 use crate::error::{ErrorKind, Result};
 use crate::scope::Scope;
 
-/// Run the port checks (documents, validated batches, watch, streams, blobs)
-/// against one already-scoped handle.
+/// Run the port checks (documents, validated batches, watch, streams, blobs,
+/// queues, and [`run_queue`] on [`ScopedStorage::queues`]) against one
+/// already-scoped handle.
 ///
 /// This is the part of [`run`] that needs nothing from the backend itself, so
 /// a client that cannot choose scopes or fences (a storage-bus
@@ -61,6 +64,26 @@ pub async fn run_ports(storage: &ScopedStorage) {
     seal::run(storage).await;
     blobs::run(storage).await;
     primitives::run(storage).await;
+    queue::run(storage).await;
+    queue_port::run(storage.queues().as_ref()).await;
+}
+
+/// Run the queue checks that need no control over time against `queue`:
+/// ordering, acknowledgement, nacks and dead letters, redrive, extension,
+/// stats and purge, plus delays, groups and dedupe when the queue reports
+/// them in its [`QueueFeatures`](crate::queue::QueueFeatures).
+///
+/// [`run_ports`] runs these against [`ScopedStorage::queues`]; a queue
+/// backend that is not part of a [`StorageBackend`] (a broker) runs them
+/// directly. Leases are taken for a minute and never left to lapse, so the
+/// checks hold whoever owns the clock. Queue names are unique to the call, so
+/// the queue can be long-lived and shared.
+///
+/// # Panics
+///
+/// On the first check the queue fails, naming it.
+pub async fn run_queue(queue: &dyn crate::queue::QueueStore) {
+    queue_port::run(queue).await;
 }
 
 /// Run every check against `backend`.

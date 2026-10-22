@@ -1,6 +1,7 @@
 //! The client: native port traits over a [`StorageTransport`].
 mod blobs;
 mod documents;
+mod queues;
 mod secrets;
 mod streams;
 mod watch;
@@ -9,16 +10,19 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tinystoragedrivers_bus::{BlobCapabilities, CapabilitiesReply};
+use tinystoragedrivers_bus::{BlobCapabilities, CapabilitiesReply, QueueFeaturesReply};
+use tinystoragedrivers_core::queue::QueueFeatures;
 use tinystoragedrivers_core::{
     Capabilities, Capability, Result, Scope, ScopedStorage, StorageBackend, StorageError,
 };
 
+use crate::convert::queues::features_from_wire;
 use crate::convert::{HOST_ONLY, capabilities_of, error_of};
 use crate::transport::{Object, StorageTransport, WireError};
 
 pub use blobs::BusBlobs;
 pub use documents::BusDocuments;
+pub use queues::BusQueues;
 pub use secrets::BusSecrets;
 pub use streams::BusStreams;
 
@@ -81,6 +85,7 @@ pub struct BusStorage {
     scope: Scope,
     capabilities: Capabilities,
     blob_capabilities: BlobCapabilities,
+    queue_features: QueueFeatures,
 }
 
 impl std::fmt::Debug for BusStorage {
@@ -93,7 +98,8 @@ impl std::fmt::Debug for BusStorage {
 }
 
 impl BusStorage {
-    /// Connect over `transport` and learn the admitted backend's capabilities.
+    /// Connect over `transport` and learn the admitted backend's capabilities
+    /// and queue features.
     /// `scope` is a label for the scope the server end is bound to; the server
     /// never reads it.
     ///
@@ -106,6 +112,7 @@ impl BusStorage {
             .await?;
         let blob_capabilities: BlobCapabilities =
             wire.call(Object::Blobs, "Capabilities", &(), None).await?;
+        let features: QueueFeaturesReply = wire.call(Object::Queues, "Features", &(), None).await?;
         let mut capabilities = capabilities_of(&documents.capabilities);
         for capability in HOST_ONLY {
             capabilities = capabilities.without(capability);
@@ -115,6 +122,7 @@ impl BusStorage {
             scope,
             capabilities,
             blob_capabilities,
+            queue_features: features_from_wire(features),
         })
     }
 
@@ -148,7 +156,63 @@ impl StorageBackend for BusStorage {
             Arc::new(BusDocuments::new(self.wire.clone(), self.capabilities)),
             Arc::new(BusStreams::new(self.wire.clone())),
             Arc::new(BusBlobs::new(self.wire.clone(), self.blob_capabilities)),
-        ))
+        )
+        .with_queues(Arc::new(BusQueues::new(
+            self.wire.clone(),
+            self.queue_features,
+        ))))
+    }
+}
+
+/// Documents, native JSON streams and secrets, with no blob or watch surface.
+///
+/// The host fixes scope, admission, fences and generations. This deliberately
+/// does not implement `StorageBackend`, whose baseline includes blob storage.
+#[derive(Clone, Debug)]
+pub struct BusStoragePorts {
+    wire: Wire,
+    capabilities: Capabilities,
+}
+impl BusStoragePorts {
+    /// Probe only documents on an already bound three-port transport.
+    ///
+    /// # Errors
+    /// Refuses unavailable or invalid capability replies.
+    pub async fn connect(transport: Arc<dyn StorageTransport>) -> Result<Self> {
+        let wire = Wire::new(transport);
+        let reply: CapabilitiesReply = wire
+            .call(Object::Documents, "Capabilities", &(), None)
+            .await?;
+        let mut capabilities = capabilities_of(&reply.capabilities);
+        for capability in HOST_ONLY.into_iter().chain([
+            Capability::Watch,
+            Capability::StreamingBlobs,
+            Capability::PresignedUrls,
+            Capability::BlobTtl,
+        ]) {
+            capabilities = capabilities.without(capability);
+        }
+        Ok(Self { wire, capabilities })
+    }
+    /// Capabilities of the admitted document and JSON-stream ports.
+    #[must_use]
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+    /// The host-bound documents port.
+    #[must_use]
+    pub fn documents(&self) -> Arc<BusDocuments> {
+        Arc::new(BusDocuments::new(self.wire.clone(), self.capabilities))
+    }
+    /// The host-bound native JSON streams port.
+    #[must_use]
+    pub fn streams(&self) -> Arc<BusStreams> {
+        Arc::new(BusStreams::new(self.wire.clone()))
+    }
+    /// The host-bound confidential secrets port.
+    #[must_use]
+    pub fn secrets(&self) -> Arc<BusSecrets> {
+        Arc::new(BusSecrets::new(self.wire.clone()))
     }
 }
 

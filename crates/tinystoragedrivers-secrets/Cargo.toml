@@ -21,12 +21,15 @@ serde_json = { workspace = true }
 # prompt), so they run on the runtime's blocking pool when one is present.
 tokio = { workspace = true }
 # The AEAD OpenHuman already uses for `enc2:` values and `secrets.enc`; the same
-# crate and version keeps existing ciphertext decrypting byte-for-byte. Its
-# default `getrandom` feature supplies the OS nonce and key generator.
-chacha20poly1305 = "0.10"
+# crate and version keeps existing ciphertext decrypting byte-for-byte.
+chacha20poly1305 = "0.11"
+# Fallible OS randomness for encryption nonces and generated keys. This is a
+# direct dependency because chacha20poly1305 0.11 no longer reexports OsRng.
+getrandom = "0.4"
 # Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
-hkdf = "0.12"
-sha2 = { workspace = true }
+hkdf = "0.13"
+# HKDF 0.13 and HMAC 0.13 use digest 0.11, so both share this SHA-256 type.
+sha2_11 = { package = "sha2", version = "0.11" }
 # Keys, decrypted values and the decrypted secrets map are wiped on drop.
 zeroize = "1"
 # The cross-process advisory lock on `secrets.enc.lock`. It takes the same
@@ -38,8 +41,8 @@ keyring = { version = "3", optional = true, features = ["apple-native", "windows
 # Cloud KMS transports are opt-in; no cloud SDK enters desktop builds.
 reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
 bytes = { workspace = true, optional = true }
-base64 = { version = "0.22", optional = true }
-hmac = { version = "0.12", optional = true }
+base64 = { version = "0.23", optional = true }
+hmac = { version = "0.13", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
 [target.'cfg(unix)'.dependencies]

@@ -24,6 +24,7 @@ use crate::capabilities::{Capabilities, Capability};
 use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
 use crate::fence::Fence;
+use crate::queue::{DocumentQueue, QueueStore};
 use crate::scope::Scope;
 use crate::stream::StreamStore;
 
@@ -292,11 +293,14 @@ pub struct ScopedStorage {
     documents: Arc<dyn DocumentStore>,
     streams: Arc<dyn StreamStore>,
     blobs: Arc<dyn BlobStore>,
+    queues: Arc<dyn QueueStore>,
     purge: Option<Arc<dyn ScopePurge>>,
 }
 
 impl ScopedStorage {
-    /// Assemble handles a driver opened for `scope`.
+    /// Assemble handles a driver opened for `scope`. The queue port defaults
+    /// to a [`DocumentQueue`] over `documents`; [`with_queues`](Self::with_queues)
+    /// replaces it.
     #[must_use]
     pub fn new(
         scope: Scope,
@@ -305,14 +309,26 @@ impl ScopedStorage {
         streams: Arc<dyn StreamStore>,
         blobs: Arc<dyn BlobStore>,
     ) -> Self {
+        let queues: Arc<dyn QueueStore> = Arc::new(DocumentQueue::new(&documents));
         Self {
             scope,
             driver,
             documents,
             streams,
             blobs,
+            queues,
             purge: None,
         }
+    }
+
+    /// Serve the queue port from `queues` instead of the default
+    /// [`DocumentQueue`] over the document port: a broker such as `RabbitMQ`,
+    /// or a bus client's queue object. The caller binds `queues` to the same
+    /// scope as the other handles.
+    #[must_use]
+    pub fn with_queues(mut self, queues: Arc<dyn QueueStore>) -> Self {
+        self.queues = queues;
+        self
     }
 
     /// Attach the driver's native scope reset port.
@@ -424,6 +440,14 @@ impl ScopedStorage {
     #[must_use]
     pub fn blobs(&self) -> &Arc<dyn BlobStore> {
         &self.blobs
+    }
+
+    /// The queue port: a [`DocumentQueue`] over [`documents`](Self::documents)
+    /// unless the handles were built [`with_queues`](Self::with_queues). Every
+    /// call returns the same handle, so specs it caches are shared.
+    #[must_use]
+    pub fn queues(&self) -> &Arc<dyn QueueStore> {
+        &self.queues
     }
 }
 
