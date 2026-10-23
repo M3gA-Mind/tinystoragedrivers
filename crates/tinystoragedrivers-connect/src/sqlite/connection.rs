@@ -97,15 +97,18 @@ impl Db {
     /// Open (or share the already-open) database at `path`, creating it.
     pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
         let path = normalize(path)?;
-        #[cfg(unix)]
-        let requested_identity = file_identity(&path);
         loop {
+            #[cfg(unix)]
+            let requested_identity = file_identity(&path);
             let mut open = registry()
                 .lock()
                 .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
             if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
                 #[cfg(unix)]
-                if requested_identity == Some(db.identity) {
+                if requested_identity == Some(db.identity)
+                    || (requested_identity.is_none()
+                        && file_identity(&path) == Some(db.identity))
+                {
                     return Ok(db);
                 }
                 #[cfg(unix)]
