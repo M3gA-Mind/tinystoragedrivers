@@ -97,6 +97,10 @@ impl Db {
     /// Open (or share the already-open) database at `path`, creating it.
     pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
         let path = normalize(path)?;
+        // The retry path below is Unix-only because only Unix compares file
+        // identities. On other platforms this loop intentionally makes one
+        // pass, which Clippy otherwise flags as never_loop.
+        #[cfg_attr(not(unix), allow(clippy::never_loop))]
         loop {
             #[cfg(unix)]
             let requested_identity = file_identity(&path);
