@@ -115,9 +115,11 @@ fn concurrent_reopens_share_one_replacement_connection() {
         .map(|handle| handle.join().unwrap())
         .collect::<Vec<_>>();
 
-    assert!(reopened
-        .iter()
-        .all(|connection| Arc::ptr_eq(&reopened[0], connection)));
+    assert!(
+        reopened
+            .iter()
+            .all(|connection| Arc::ptr_eq(&reopened[0], connection))
+    );
     assert!(!Arc::ptr_eq(&original, &reopened[0]));
 }
 

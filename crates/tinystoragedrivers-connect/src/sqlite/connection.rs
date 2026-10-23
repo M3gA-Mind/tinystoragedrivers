@@ -106,8 +106,7 @@ impl Db {
             if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
                 #[cfg(unix)]
                 if requested_identity == Some(db.identity)
-                    || (requested_identity.is_none()
-                        && file_identity(&path) == Some(db.identity))
+                    || (requested_identity.is_none() && file_identity(&path) == Some(db.identity))
                 {
                     return Ok(db);
                 }
