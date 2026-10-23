@@ -42,8 +42,16 @@ fn replacing_a_database_file_does_not_reuse_its_open_connection() {
         })
         .unwrap();
 
-    std::fs::remove_dir_all(&database_dir).unwrap();
-    std::fs::create_dir_all(&database_dir).unwrap();
+    let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+    assert!(
+        wal_path.exists(),
+        "the live connection keeps its WAL sidecar"
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        wal_path.exists(),
+        "replacing only the main file leaves its WAL"
+    );
 
     let reopened = Db::open(&path).unwrap();
     assert!(
@@ -61,6 +69,19 @@ fn replacing_a_database_file_does_not_reuse_its_open_connection() {
         })
         .unwrap();
     assert_eq!(tables, 0, "the replacement file must start empty");
+
+    let error = first
+        .run_now(|conn| {
+            conn.execute("INSERT INTO probe VALUES (99)", [])
+                .map_err(during("write through retired database"))?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.message(),
+        "sqlite connection was retired after its database file was replaced",
+        "the old connection must be closed before the replacement reuses its WAL paths"
+    );
 }
 
 #[test]

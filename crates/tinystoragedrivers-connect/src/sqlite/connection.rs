@@ -29,7 +29,7 @@ pub(crate) struct Db {
     path: PathBuf,
     #[cfg(unix)]
     identity: FileIdentity,
-    conn: Mutex<Connection>,
+    conn: Mutex<Option<Connection>>,
 }
 
 #[cfg(unix)]
@@ -107,6 +107,8 @@ impl Db {
             if requested_identity == Some(db.identity) {
                 return Ok(db);
             }
+            #[cfg(unix)]
+            db.retire()?;
             #[cfg(not(unix))]
             return Ok(db);
         }
@@ -124,12 +126,13 @@ impl Db {
             .map_err(during("open"))?;
         #[cfg(unix)]
         let identity = file_identity(&path)
+            .filter(|identity| requested_identity.map_or(true, |before| before == *identity))
             .ok_or_else(|| StorageError::backend("cannot identify the opened sqlite database"))?;
         let db = Arc::new(Self {
             path: path.clone(),
             #[cfg(unix)]
             identity,
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Some(conn)),
         });
         open.retain(|_, weak| weak.strong_count() > 0);
         open.insert(path, Arc::downgrade(&db));
@@ -139,6 +142,18 @@ impl Db {
     /// The file this database lives in.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Close this connection before another database generation reuses its
+    /// SQLite sidecar paths.
+    #[cfg(unix)]
+    fn retire(&self) -> Result<()> {
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|_| StorageError::backend("sqlite connection lock poisoned"))?;
+        connection.take();
+        Ok(())
     }
 
     /// Run `f` with exclusive use of the connection.
@@ -165,7 +180,12 @@ impl Db {
             .conn
             .lock()
             .map_err(|_| StorageError::backend("sqlite connection lock poisoned"))?;
-        f(&mut conn)
+        let conn = conn.as_mut().ok_or_else(|| {
+            StorageError::backend(
+                "sqlite connection was retired after its database file was replaced",
+            )
+        })?;
+        f(conn)
     }
 }
 
