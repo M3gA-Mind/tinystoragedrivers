@@ -150,7 +150,7 @@ impl Db {
                 .map_err(during("open"))?;
             #[cfg(unix)]
             let identity = file_identity(&path)
-                .filter(|identity| requested_identity.map_or(true, |before| before == *identity))
+                .filter(|identity| requested_identity.is_none_or(|before| before == *identity))
                 .ok_or_else(|| {
                     StorageError::backend("cannot identify the opened sqlite database")
                 })?;
