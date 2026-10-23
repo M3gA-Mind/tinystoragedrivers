@@ -25,6 +25,44 @@ fn canonical_paths_share_one_connection_and_run_inline_without_a_runtime() {
     assert_eq!(answer, 42);
 }
 
+#[cfg(unix)]
+#[test]
+fn replacing_a_database_file_does_not_reuse_its_open_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_dir = directory.path().join("workspace");
+    let path = database_dir.join("storage.db");
+    let first = Db::open(&path).unwrap();
+    first
+        .run_now(|conn| {
+            conn.execute_batch("CREATE TABLE probe (value INTEGER)")
+                .map_err(during("create probe"))?;
+            conn.execute("INSERT INTO probe VALUES (42)", [])
+                .map_err(during("insert probe"))?;
+            Ok(())
+        })
+        .unwrap();
+
+    std::fs::remove_dir_all(&database_dir).unwrap();
+    std::fs::create_dir_all(&database_dir).unwrap();
+
+    let reopened = Db::open(&path).unwrap();
+    assert!(
+        !Arc::ptr_eq(&first, &reopened),
+        "a replacement file at the same path needs its own connection"
+    );
+    let tables = reopened
+        .run_now(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'probe'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(during("check replacement schema"))
+        })
+        .unwrap();
+    assert_eq!(tables, 0, "the replacement file must start empty");
+}
+
 #[test]
 fn database_parent_creation_errors_are_backend_errors() {
     let directory = tempfile::tempdir().unwrap();

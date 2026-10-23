@@ -27,7 +27,27 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// An open database file.
 pub(crate) struct Db {
     path: PathBuf,
+    #[cfg(unix)]
+    identity: FileIdentity,
     conn: Mutex<Connection>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 impl fmt::Debug for Db {
@@ -77,10 +97,17 @@ impl Db {
     /// Open (or share the already-open) database at `path`, creating it.
     pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
         let path = normalize(path)?;
+        #[cfg(unix)]
+        let requested_identity = file_identity(&path);
         let mut open = registry()
             .lock()
             .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
         if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
+            #[cfg(unix)]
+            if requested_identity == Some(db.identity) {
+                return Ok(db);
+            }
+            #[cfg(not(unix))]
             return Ok(db);
         }
         let conn = Connection::open(&path).map_err(during("open"))?;
@@ -95,8 +122,13 @@ impl Db {
             .map_err(during("open"))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(during("open"))?;
+        #[cfg(unix)]
+        let identity = file_identity(&path)
+            .ok_or_else(|| StorageError::backend("cannot identify the opened sqlite database"))?;
         let db = Arc::new(Self {
             path: path.clone(),
+            #[cfg(unix)]
+            identity,
             conn: Mutex::new(conn),
         });
         open.retain(|_, weak| weak.strong_count() > 0);
