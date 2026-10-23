@@ -99,44 +99,68 @@ impl Db {
         let path = normalize(path)?;
         #[cfg(unix)]
         let requested_identity = file_identity(&path);
-        let mut open = registry()
-            .lock()
-            .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
-        if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
-            #[cfg(unix)]
-            if requested_identity == Some(db.identity) {
+        loop {
+            let mut open = registry()
+                .lock()
+                .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
+            if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
+                #[cfg(unix)]
+                if requested_identity == Some(db.identity) {
+                    return Ok(db);
+                }
+                #[cfg(unix)]
+                {
+                    // A caller-supplied operation can itself open a database.
+                    // Do not keep the global registry locked while waiting for
+                    // that operation to release this connection. Competing
+                    // openers recheck the registry after retirement, so only
+                    // one of them creates the replacement connection.
+                    drop(open);
+                    db.retire()?;
+                    let mut open = registry().lock().map_err(|_| {
+                        StorageError::backend("sqlite connection registry lock poisoned")
+                    })?;
+                    if open
+                        .get(&path)
+                        .and_then(Weak::upgrade)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &db))
+                    {
+                        open.remove(&path);
+                    }
+                    continue;
+                }
+                #[cfg(not(unix))]
                 return Ok(db);
             }
+
+            let conn = Connection::open(&path).map_err(during("open"))?;
+            conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
+            // Must come before anything else touches a new file: the setting is
+            // fixed by the first table (and WAL mode writes the header). It is
+            // inert on a file that already has tables; `maintenance::maintain`
+            // converts those.
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .map_err(during("open"))?;
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(during("open"))?;
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(during("open"))?;
             #[cfg(unix)]
-            db.retire()?;
-            #[cfg(not(unix))]
+            let identity = file_identity(&path)
+                .filter(|identity| requested_identity.map_or(true, |before| before == *identity))
+                .ok_or_else(|| {
+                    StorageError::backend("cannot identify the opened sqlite database")
+                })?;
+            let db = Arc::new(Self {
+                path: path.clone(),
+                #[cfg(unix)]
+                identity,
+                conn: Mutex::new(Some(conn)),
+            });
+            open.retain(|_, weak| weak.strong_count() > 0);
+            open.insert(path, Arc::downgrade(&db));
             return Ok(db);
         }
-        let conn = Connection::open(&path).map_err(during("open"))?;
-        conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
-        // Must come before anything else touches a new file: the setting is
-        // fixed by the first table (and WAL mode writes the header). It is
-        // inert on a file that already has tables; `maintenance::maintain`
-        // converts those.
-        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .map_err(during("open"))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(during("open"))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(during("open"))?;
-        #[cfg(unix)]
-        let identity = file_identity(&path)
-            .filter(|identity| requested_identity.map_or(true, |before| before == *identity))
-            .ok_or_else(|| StorageError::backend("cannot identify the opened sqlite database"))?;
-        let db = Arc::new(Self {
-            path: path.clone(),
-            #[cfg(unix)]
-            identity,
-            conn: Mutex::new(Some(conn)),
-        });
-        open.retain(|_, weak| weak.strong_count() > 0);
-        open.insert(path, Arc::downgrade(&db));
-        Ok(db)
     }
 
     /// The file this database lives in.
