@@ -1,7 +1,7 @@
 use super::*;
 use crate::sqlite::SqliteConnection;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::task::{Context, Poll, Waker};
 
 #[test]
@@ -23,6 +23,104 @@ fn canonical_paths_share_one_connection_and_run_inline_without_a_runtime() {
     }))
     .unwrap();
     assert_eq!(answer, 42);
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_a_database_file_does_not_reuse_its_open_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_dir = directory.path().join("workspace");
+    let path = database_dir.join("storage.db");
+    let first = Db::open(&path).unwrap();
+    first
+        .run_now(|conn| {
+            conn.execute_batch("CREATE TABLE probe (value INTEGER)")
+                .map_err(during("create probe"))?;
+            conn.execute("INSERT INTO probe VALUES (42)", [])
+                .map_err(during("insert probe"))?;
+            Ok(())
+        })
+        .unwrap();
+
+    let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+    assert!(
+        wal_path.exists(),
+        "the live connection keeps its WAL sidecar"
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        wal_path.exists(),
+        "replacing only the main file leaves its WAL"
+    );
+
+    let reopened = Db::open(&path).unwrap();
+    assert!(
+        !Arc::ptr_eq(&first, &reopened),
+        "a replacement file at the same path needs its own connection"
+    );
+    let tables = reopened
+        .run_now(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'probe'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(during("check replacement schema"))
+        })
+        .unwrap();
+    assert_eq!(tables, 0, "the replacement file must start empty");
+
+    let error = first
+        .run_now(|conn| {
+            conn.execute("INSERT INTO probe VALUES (99)", [])
+                .map_err(during("write through retired database"))?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.message(),
+        "sqlite connection was retired after its database file was replaced",
+        "the old connection must be closed before the replacement reuses its WAL paths"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_reopens_share_one_replacement_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("storage.db");
+    let original = Db::open(&path).unwrap();
+    original
+        .run_now(|conn| {
+            conn.execute_batch("CREATE TABLE probe (value INTEGER)")
+                .map_err(during("create probe"))
+        })
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    let workers = 8;
+    let start = Arc::new(Barrier::new(workers));
+    let handles = (0..workers)
+        .map(|_| {
+            let path = path.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                Db::open(&path).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let reopened = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(
+        reopened
+            .iter()
+            .all(|connection| Arc::ptr_eq(&reopened[0], connection))
+    );
+    assert!(!Arc::ptr_eq(&original, &reopened[0]));
 }
 
 #[test]

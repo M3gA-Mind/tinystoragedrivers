@@ -27,7 +27,27 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// An open database file.
 pub(crate) struct Db {
     path: PathBuf,
-    conn: Mutex<Connection>,
+    #[cfg(unix)]
+    identity: FileIdentity,
+    conn: Mutex<Option<Connection>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 impl fmt::Debug for Db {
@@ -77,36 +97,93 @@ impl Db {
     /// Open (or share the already-open) database at `path`, creating it.
     pub(crate) fn open(path: &Path) -> Result<Arc<Self>> {
         let path = normalize(path)?;
-        let mut open = registry()
-            .lock()
-            .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
-        if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
+        // The retry path below is Unix-only because only Unix compares file
+        // identities. On other platforms this loop intentionally makes one
+        // pass, which Clippy otherwise flags as never_loop.
+        #[cfg_attr(not(unix), allow(clippy::never_loop))]
+        loop {
+            #[cfg(unix)]
+            let requested_identity = file_identity(&path);
+            let mut open = registry()
+                .lock()
+                .map_err(|_| StorageError::backend("sqlite connection registry lock poisoned"))?;
+            if let Some(db) = open.get(&path).and_then(Weak::upgrade) {
+                #[cfg(unix)]
+                if requested_identity == Some(db.identity)
+                    || (requested_identity.is_none() && file_identity(&path) == Some(db.identity))
+                {
+                    return Ok(db);
+                }
+                #[cfg(unix)]
+                {
+                    // A caller-supplied operation can itself open a database.
+                    // Do not keep the global registry locked while waiting for
+                    // that operation to release this connection. Competing
+                    // openers recheck the registry after retirement, so only
+                    // one of them creates the replacement connection.
+                    drop(open);
+                    db.retire()?;
+                    let mut open = registry().lock().map_err(|_| {
+                        StorageError::backend("sqlite connection registry lock poisoned")
+                    })?;
+                    if open
+                        .get(&path)
+                        .and_then(Weak::upgrade)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &db))
+                    {
+                        open.remove(&path);
+                    }
+                    continue;
+                }
+                #[cfg(not(unix))]
+                return Ok(db);
+            }
+
+            let conn = Connection::open(&path).map_err(during("open"))?;
+            conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
+            // Must come before anything else touches a new file: the setting is
+            // fixed by the first table (and WAL mode writes the header). It is
+            // inert on a file that already has tables; `maintenance::maintain`
+            // converts those.
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+                .map_err(during("open"))?;
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(during("open"))?;
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(during("open"))?;
+            #[cfg(unix)]
+            let identity = file_identity(&path)
+                .filter(|identity| requested_identity.is_none_or(|before| before == *identity))
+                .ok_or_else(|| {
+                    StorageError::backend("cannot identify the opened sqlite database")
+                })?;
+            let db = Arc::new(Self {
+                path: path.clone(),
+                #[cfg(unix)]
+                identity,
+                conn: Mutex::new(Some(conn)),
+            });
+            open.retain(|_, weak| weak.strong_count() > 0);
+            open.insert(path, Arc::downgrade(&db));
             return Ok(db);
         }
-        let conn = Connection::open(&path).map_err(during("open"))?;
-        conn.busy_timeout(BUSY_TIMEOUT).map_err(during("open"))?;
-        // Must come before anything else touches a new file: the setting is
-        // fixed by the first table (and WAL mode writes the header). It is
-        // inert on a file that already has tables; `maintenance::maintain`
-        // converts those.
-        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
-            .map_err(during("open"))?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(during("open"))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(during("open"))?;
-        let db = Arc::new(Self {
-            path: path.clone(),
-            conn: Mutex::new(conn),
-        });
-        open.retain(|_, weak| weak.strong_count() > 0);
-        open.insert(path, Arc::downgrade(&db));
-        Ok(db)
     }
 
     /// The file this database lives in.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Close this connection before another database generation reuses its
+    /// SQLite sidecar paths.
+    #[cfg(unix)]
+    fn retire(&self) -> Result<()> {
+        let mut connection = self
+            .conn
+            .lock()
+            .map_err(|_| StorageError::backend("sqlite connection lock poisoned"))?;
+        connection.take();
+        Ok(())
     }
 
     /// Run `f` with exclusive use of the connection.
@@ -133,7 +210,12 @@ impl Db {
             .conn
             .lock()
             .map_err(|_| StorageError::backend("sqlite connection lock poisoned"))?;
-        f(&mut conn)
+        let conn = conn.as_mut().ok_or_else(|| {
+            StorageError::backend(
+                "sqlite connection was retired after its database file was replaced",
+            )
+        })?;
+        f(conn)
     }
 }
 
