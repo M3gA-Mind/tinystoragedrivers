@@ -34,6 +34,8 @@ pub struct MongoBlobStore {
     connection: MongoConnection,
     scope: Scope,
     indexes_ready: Arc<AsyncMutex<bool>>,
+    #[cfg(test)]
+    sweep_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 impl MongoBlobStore {
@@ -44,7 +46,20 @@ impl MongoBlobStore {
             connection,
             scope,
             indexes_ready: Arc::new(AsyncMutex::new(false)),
+            #[cfg(test)]
+            sweep_pause: None,
         }
+    }
+
+    /// Pause `sweep_expired` between its two passes.
+    #[cfg(test)]
+    pub(crate) fn pause_sweep_for_test(
+        mut self,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.sweep_pause = Some((started, resume));
+        self
     }
 
     async fn bucket(&self) -> Result<GridFsBucket> {
@@ -556,6 +571,11 @@ impl BlobStore for MongoBlobStore {
             if let Some(key) = file.filename {
                 newest_expired.entry(key).or_insert(file.id);
             }
+        }
+        #[cfg(test)]
+        if let Some((started, resume)) = &self.sweep_pause {
+            started.notify_one();
+            resume.notified().await;
         }
         let mut count = 0_u64;
         for (key, bound) in newest_expired {

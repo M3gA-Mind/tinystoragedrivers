@@ -139,6 +139,50 @@ async fn mongodb_sweep_reclaims_only_up_to_the_newest_expired_version() {
     connection.database().drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn mongodb_sweep_keeps_a_blob_rewritten_between_its_passes() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        eprintln!(
+            "mongodb_sweep_keeps_a_blob_rewritten_between_its_passes: TSD_MONGO_URL is not set; skipping"
+        );
+        return;
+    };
+    let database = format!("tsd_blob_resweep_{}_{}", std::process::id(), ObjectId::new());
+    let now = Arc::new(AtomicU64::new(10_000));
+    let clock = Arc::clone(&now);
+    let connection = MongoConnection::connect(&url, &database)
+        .await
+        .unwrap()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let store = MongoBlobStore::new(connection.clone(), Scope::new("local").unwrap())
+        .pause_sweep_for_test(Arc::clone(&started), Arc::clone(&resume));
+    store
+        .put_expiring("session", b"stale".to_vec(), None, Duration::from_millis(10))
+        .await
+        .unwrap();
+    now.store(10_010, Ordering::SeqCst);
+
+    // The sweep has found `session` expired; the key is written again before
+    // the sweep deletes anything.
+    let sweeping = {
+        let store = store.clone();
+        tokio::spawn(async move { store.sweep_expired().await })
+    };
+    started.notified().await;
+    store.put("session", b"fresh".to_vec(), None).await.unwrap();
+    resume.notify_one();
+    sweeping.await.unwrap().unwrap();
+
+    assert_eq!(
+        store.get("session").await.unwrap().unwrap().bytes,
+        b"fresh",
+        "the version written between the sweep's passes survives"
+    );
+    connection.database().drop().await.unwrap();
+}
+
 /// Writes one GridFS version of `key` without `upload`'s cleanup of older
 /// versions: the state a failed cleanup or a racing writer leaves behind.
 async fn raw_version(store: &MongoBlobStore, key: &str, bytes: &[u8], expiry: Option<u64>) {
