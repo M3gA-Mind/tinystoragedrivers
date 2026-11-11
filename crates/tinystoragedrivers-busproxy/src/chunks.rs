@@ -1,6 +1,7 @@
 //! Moving blob bytes between a `BlobReader` and a `TinyBus` stream.
 use std::io;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -69,6 +70,24 @@ pub(crate) enum PumpError {
     Bus(tinybus::Error),
 }
 
+/// A fault of the source itself, known before the stream is aborted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceFault {
+    /// The source ended before, or ran past, `len` bytes.
+    Short,
+    /// The source failed.
+    Source,
+}
+
+impl From<SourceFault> for PumpError {
+    fn from(fault: SourceFault) -> Self {
+        match fault {
+            SourceFault::Short => Self::Short,
+            SourceFault::Source => Self::Source,
+        }
+    }
+}
+
 /// Write exactly `len` bytes from `reader` into `writer` in stream-sized chunks
 /// and close it. On failure the stream is aborted so the receiver stops
 /// waiting.
@@ -76,9 +95,25 @@ pub(crate) enum PumpError {
 /// # Errors
 /// [`PumpError`] naming which side failed.
 pub(crate) async fn pump(
+    writer: StreamWriter,
+    reader: &mut BlobReader,
+    len: u64,
+) -> Result<(), PumpError> {
+    pump_reporting(writer, reader, len, &OnceLock::new()).await
+}
+
+/// As [`pump`], also recording a source fault in `fault` *before* aborting.
+/// The abort makes the receiver fail its side, and that failure can reach the
+/// caller while the abort is still being sent; `fault` lets the caller tell
+/// such an echo from a refusal of the receiver's own.
+///
+/// # Errors
+/// [`PumpError`] naming which side failed.
+pub(crate) async fn pump_reporting(
     mut writer: StreamWriter,
     reader: &mut BlobReader,
     len: u64,
+    fault: &OnceLock<SourceFault>,
 ) -> Result<(), PumpError> {
     let mut remaining = len;
     let result = async {
@@ -102,6 +137,15 @@ pub(crate) async fn pump(
     match result {
         Ok(()) => writer.finish().await.map(|_| ()).map_err(PumpError::Bus),
         Err(error) => {
+            match error {
+                PumpError::Short => {
+                    let _ = fault.set(SourceFault::Short);
+                }
+                PumpError::Source => {
+                    let _ = fault.set(SourceFault::Source);
+                }
+                PumpError::Bus(_) => {}
+            }
             let _ = writer.abort().await;
             Err(error)
         }

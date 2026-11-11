@@ -151,3 +151,42 @@ async fn a_zero_length_stream_closes_without_chunks() {
     pump(writer, &mut source, 0).await.unwrap();
     assert_eq!(collect(reader).await.unwrap(), Vec::<u8>::new());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_fault_is_recorded_before_the_stream_is_aborted() {
+    let (sender, receiver) = peers().await;
+    let writer = sender
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(4),
+        )
+        .await
+        .unwrap();
+    let reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let fault = OnceLock::new();
+    let mut source = source(vec![1; 5]);
+    assert!(matches!(
+        pump_reporting(writer, &mut source, 4, &fault).await,
+        Err(PumpError::Short)
+    ));
+    assert_eq!(fault.get(), Some(&SourceFault::Short));
+    // The receiver only sees the abort, after the fault was recorded.
+    assert!(collect(reader).await.is_err());
+
+    let (sender, receiver) = peers().await;
+    let writer = sender
+        .open_stream(
+            &receiver.unique_name().unwrap(),
+            StreamDescriptor::with_len(4),
+        )
+        .await
+        .unwrap();
+    let _reader = blob_reader(receiver.accept_stream(&writer.stream_ref()).unwrap());
+    let fault = OnceLock::new();
+    let mut failing: BlobReader = Box::pin(Failing);
+    assert!(matches!(
+        pump_reporting(writer, &mut failing, 4, &fault).await,
+        Err(PumpError::Source)
+    ));
+    assert_eq!(fault.get(), Some(&SourceFault::Source));
+}
