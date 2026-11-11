@@ -147,7 +147,11 @@ async fn mongodb_sweep_keeps_a_blob_rewritten_between_its_passes() {
         );
         return;
     };
-    let database = format!("tsd_blob_resweep_{}_{}", std::process::id(), ObjectId::new());
+    let database = format!(
+        "tsd_blob_resweep_{}_{}",
+        std::process::id(),
+        ObjectId::new()
+    );
     let now = Arc::new(AtomicU64::new(10_000));
     let clock = Arc::clone(&now);
     let connection = MongoConnection::connect(&url, &database)
@@ -159,7 +163,12 @@ async fn mongodb_sweep_keeps_a_blob_rewritten_between_its_passes() {
     let store = MongoBlobStore::new(connection.clone(), Scope::new("local").unwrap())
         .pause_sweep_for_test(Arc::clone(&started), Arc::clone(&resume));
     store
-        .put_expiring("session", b"stale".to_vec(), None, Duration::from_millis(10))
+        .put_expiring(
+            "session",
+            b"stale".to_vec(),
+            None,
+            Duration::from_millis(10),
+        )
         .await
         .unwrap();
     now.store(10_010, Ordering::SeqCst);
