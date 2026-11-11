@@ -16,7 +16,7 @@ exclude = ["worktrees", "proof-workspaces/document-callback", "proof-workspaces/
 [workspace.package]
 version = "2.1.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 
