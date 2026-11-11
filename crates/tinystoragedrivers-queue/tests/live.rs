@@ -48,7 +48,7 @@ async fn connect(scope: &Scope) -> Option<RabbitQueues> {
 fn name(label: &str) -> String {
     format!(
         "live_{label}_{}",
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     )
 }
 
