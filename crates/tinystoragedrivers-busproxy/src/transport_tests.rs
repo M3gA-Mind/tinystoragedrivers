@@ -10,7 +10,7 @@ async fn upload_length_failure_wins_when_peer_abort_and_short_source_are_ready()
     };
     let sent = async { Err(PumpError::Short) };
 
-    let result = resolve_put_stream(reply, sent).await;
+    let result = resolve_put_stream(reply, sent, &OnceLock::new()).await;
 
     assert!(matches!(
         result,
@@ -29,7 +29,7 @@ async fn upload_source_failure_wins_when_peer_abort_and_source_error_are_ready()
     };
     let sent = async { Err(PumpError::Source) };
 
-    let result = resolve_put_stream(reply, sent).await;
+    let result = resolve_put_stream(reply, sent, &OnceLock::new()).await;
 
     assert!(matches!(
         result,
@@ -48,7 +48,7 @@ async fn host_refusal_wins_when_abort_and_typed_reply_are_ready() {
     };
     let sent = async { Err(PumpError::Bus(tinybus::Error::ConnectionClosed)) };
 
-    let result = resolve_put_stream(reply, sent).await;
+    let result = resolve_put_stream(reply, sent, &OnceLock::new()).await;
 
     assert_eq!(
         result,
@@ -68,7 +68,7 @@ async fn invalid_input_reply_wins_when_upload_abort_is_also_ready() {
     let sent = async { Err(PumpError::Bus(tinybus::Error::ConnectionClosed)) };
 
     assert_eq!(
-        resolve_put_stream(reply, sent).await,
+        resolve_put_stream(reply, sent, &OnceLock::new()).await,
         Err(WireError::Storage(StorageFailure {
             kind: StorageKind::InvalidInput
         }))
@@ -82,7 +82,7 @@ async fn bus_failure_does_not_wait_for_a_pending_host_reply() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        resolve_put_stream(reply, sent),
+        resolve_put_stream(reply, sent, &OnceLock::new()),
     )
     .await;
 
@@ -98,7 +98,7 @@ async fn successful_host_reply_does_not_hide_a_later_bus_failure() {
     };
 
     assert!(matches!(
-        resolve_put_stream(reply, sent).await,
+        resolve_put_stream(reply, sent, &OnceLock::new()).await,
         Err(WireError::Transport(_))
     ));
 }
@@ -112,7 +112,7 @@ async fn successful_upload_returns_host_reply_after_pump_completes() {
     };
 
     assert_eq!(
-        resolve_put_stream(reply, sent).await,
+        resolve_put_stream(reply, sent, &OnceLock::new()).await,
         Ok(json!({ "stored": true }))
     );
 }
@@ -125,7 +125,7 @@ async fn successful_host_reply_does_not_hide_a_later_upload_failure() {
         Err(PumpError::Short)
     };
 
-    let result = resolve_put_stream(reply, sent).await;
+    let result = resolve_put_stream(reply, sent, &OnceLock::new()).await;
 
     assert!(matches!(
         result,
@@ -146,7 +146,7 @@ async fn host_refusal_does_not_wait_for_a_pending_upload_source() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        resolve_put_stream(reply, sent),
+        resolve_put_stream(reply, sent, &OnceLock::new()),
     )
     .await;
 
@@ -496,4 +496,65 @@ impl crate::StorageEndpoint for SignalEndpoint {
     ) -> Option<tokio::sync::broadcast::Receiver<WatchChanged>> {
         Some(self.source_rx.resubscribe())
     }
+}
+
+/// The race behind the release-blocking flake: the pump found the source
+/// short and is still sending its abort when the host's failure to read the
+/// aborted stream arrives. The local fault must win over that echo.
+#[tokio::test]
+async fn a_short_source_wins_over_the_host_echo_while_its_abort_is_in_flight() {
+    let fault = OnceLock::new();
+    fault.set(SourceFault::Short).unwrap();
+    let reply = async {
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unavailable,
+        }))
+    };
+    // The abort never completes within this call.
+    let sent = std::future::pending::<Result<(), PumpError>>();
+
+    let result = resolve_put_stream(reply, sent, &fault).await;
+
+    assert_eq!(
+        result,
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::InvalidInput
+        }))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_source_wins_over_the_host_echo_while_its_abort_is_in_flight() {
+    let fault = OnceLock::new();
+    fault.set(SourceFault::Source).unwrap();
+    let reply = async {
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unavailable,
+        }))
+    };
+    let sent = std::future::pending::<Result<(), PumpError>>();
+
+    assert_eq!(
+        resolve_put_stream(reply, sent, &fault).await,
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Backend
+        }))
+    );
+}
+
+#[tokio::test]
+async fn a_host_refusal_without_a_source_fault_is_returned_while_the_source_is_pending() {
+    let reply = async {
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported,
+        }))
+    };
+    let sent = std::future::pending::<Result<(), PumpError>>();
+
+    assert_eq!(
+        resolve_put_stream(reply, sent, &OnceLock::new()).await,
+        Err(WireError::Storage(StorageFailure {
+            kind: StorageKind::Unsupported
+        }))
+    );
 }

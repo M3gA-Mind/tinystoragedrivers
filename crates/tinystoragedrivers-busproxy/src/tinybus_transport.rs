@@ -1,7 +1,7 @@
 //! The module-side [`StorageTransport`] over a real `TinyBus` connection.
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::address::StorageAddress;
@@ -16,7 +16,7 @@ use tinystoragedrivers_bus::{
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::chunks::{PumpError, blob_reader, pump};
+use crate::chunks::{PumpError, SourceFault, blob_reader, pump_reporting};
 use crate::names::{
     ERROR_DENIED, ERROR_STORAGE, HOST_NAME, WATCH_MEMBER, callback_watch_path, host_name,
     interface, member, object_path, watch_path, wire_value,
@@ -310,7 +310,8 @@ impl StorageTransport for BusTransport {
         );
         // The host reads the stream while this call is outstanding. Keep the
         // pump error typed until both sides' completion ordering is resolved.
-        let sending = pump(writer, &mut body, len);
+        let fault = OnceLock::new();
+        let sending = pump_reporting(writer, &mut body, len, &fault);
         let calling = async {
             self.connection
                 .call_raw(message, self.timeout)
@@ -319,7 +320,7 @@ impl StorageTransport for BusTransport {
         };
         // Prefer a locally known source failure when both halves are ready,
         // but keep host rejections prompt when the source is still pending.
-        resolve_put_stream(calling, sending).await
+        resolve_put_stream(calling, sending, &fault).await
     }
 
     async fn get_blob_stream(
@@ -348,7 +349,18 @@ impl StorageTransport for BusTransport {
     }
 }
 
-async fn resolve_put_stream<C, S>(calling: C, sending: S) -> Result<Value, WireError>
+/// Settle a `PutStream` from the host's reply and the local pump.
+///
+/// A source fault the pump recorded wins over the host's refusal: the pump
+/// aborts the stream on such a fault, and the host's failure to read the
+/// aborted stream can arrive before the abort itself finishes. Without a
+/// recorded fault, a host refusal is returned at once, even while the source
+/// is still pending.
+async fn resolve_put_stream<C, S>(
+    calling: C,
+    sending: S,
+    fault: &OnceLock<SourceFault>,
+) -> Result<Value, WireError>
 where
     C: Future<Output = Result<Value, WireError>>,
     S: Future<Output = Result<(), PumpError>>,
@@ -366,7 +378,10 @@ where
             Ok(()) => calling.await,
         },
         reply = &mut calling => match reply {
-            Err(error) => Err(error),
+            Err(error) => match fault.get() {
+                Some(fault) => Err(pump_error((*fault).into())),
+                None => Err(error),
+            },
             Ok(reply) => match sending.await {
                 Ok(()) => Ok(reply),
                 Err(error) => Err(pump_error(error)),
