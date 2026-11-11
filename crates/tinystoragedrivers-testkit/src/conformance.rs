@@ -23,7 +23,10 @@ pub mod validated;
 pub mod watch;
 
 fn unique(label: &str) -> String {
-    format!("{label}_{}", ulid::Ulid::new().to_string().to_lowercase())
+    format!(
+        "{label}_{}",
+        ulid::Ulid::generate().to_string().to_lowercase()
+    )
 }
 
 fn ok<T>(result: Result<T>, check: &str) -> T {

@@ -36,7 +36,7 @@ pub(crate) fn of(parts: &[&str]) -> Result<Key> {
 
 /// Return a fresh sortable id.
 pub(crate) fn ulid() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 #[cfg(all(test, feature = "document"))]
