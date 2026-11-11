@@ -549,15 +549,23 @@ impl BlobStore for MongoBlobStore {
         let expired = self
             .files(doc! {"metadata.expires_at_ms": {"$lte": to_i64((self.connection.clock())())}})
             .await?;
-        let mut keys = BTreeMap::new();
+        // The newest expired version of each key. `files` sorts `_id`
+        // descending within a filename, so the first one seen is it.
+        let mut newest_expired = BTreeMap::new();
         for file in expired {
             if let Some(key) = file.filename {
-                keys.insert(key, ());
+                newest_expired.entry(key).or_insert(file.id);
             }
         }
         let mut count = 0_u64;
-        for key in keys.into_keys() {
-            for file in self.files(doc! {"filename": &key}).await? {
+        for (key, bound) in newest_expired {
+            // Only versions up to that one: a version written since this sweep
+            // began is newer and stays. Older versions go first, so a failure
+            // partway never leaves a superseded version as the newest.
+            let versions = self
+                .files(doc! {"filename": &key, "_id": {"$lte": bound}})
+                .await?;
+            for file in versions.into_iter().rev() {
                 self.delete_id(file.id).await?;
                 count += 1;
             }

@@ -86,6 +86,75 @@ async fn mongodb_blob_streams_scoped_ttl_and_paged_listing() {
     connection.database().drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn mongodb_sweep_reclaims_only_up_to_the_newest_expired_version() {
+    let Ok(url) = std::env::var("TSD_MONGO_URL") else {
+        eprintln!(
+            "mongodb_sweep_reclaims_only_up_to_the_newest_expired_version: TSD_MONGO_URL is not set; skipping"
+        );
+        return;
+    };
+    let database = format!("tsd_blob_sweep_{}_{}", std::process::id(), ObjectId::new());
+    let now = Arc::new(AtomicU64::new(10_000));
+    let clock = Arc::clone(&now);
+    let connection = MongoConnection::connect(&url, &database)
+        .await
+        .unwrap()
+        .with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let store = MongoBlobStore::new(connection.clone(), Scope::new("local").unwrap());
+
+    // An expired newest version over an older live one: the sweep takes both,
+    // so the key stays absent instead of falling back to superseded bytes.
+    raw_version(&store, "shadowed", b"old", None).await;
+    raw_version(&store, "shadowed", b"expired", Some(10_005)).await;
+    // A version newer than the expired one, as a writer racing the sweep
+    // leaves it, is past the sweep's bound and survives.
+    raw_version(&store, "rewritten", b"expired", Some(10_005)).await;
+    raw_version(&store, "rewritten", b"fresh", None).await;
+    now.store(10_010, Ordering::SeqCst);
+
+    assert!(store.get("shadowed").await.unwrap().is_none());
+    assert_eq!(store.sweep_expired().await.unwrap(), 3);
+    assert!(store.get("shadowed").await.unwrap().is_none());
+    assert!(
+        store
+            .files(doc! {"filename": "shadowed"})
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.get("rewritten").await.unwrap().unwrap().bytes,
+        b"fresh"
+    );
+    assert_eq!(
+        store
+            .files(doc! {"filename": "rewritten"})
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    connection.database().drop().await.unwrap();
+}
+
+/// Writes one GridFS version of `key` without `upload`'s cleanup of older
+/// versions: the state a failed cleanup or a racing writer leaves behind.
+async fn raw_version(store: &MongoBlobStore, key: &str, bytes: &[u8], expiry: Option<u64>) {
+    let written = (store.connection.clock())();
+    let mut upload = store
+        .bucket()
+        .await
+        .unwrap()
+        .open_upload_stream(key)
+        .metadata(store.metadata(None, expiry, written))
+        .await
+        .unwrap();
+    upload.write_all(bytes).await.unwrap();
+    upload.close().await.unwrap();
+}
+
 async fn assert_mongo_sealed_blob_visibility(store: &MongoBlobStore, other_scope: &MongoBlobStore) {
     let sealed_key = "_tsd/sealed/events/g0";
     assert!(store.supports_sealed_blobs());
